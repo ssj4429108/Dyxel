@@ -1,0 +1,9 @@
+[package]
+name = "vello-view"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shared.workspace = true
+futures-signals.workspace = true
+futures-util.workspace = true

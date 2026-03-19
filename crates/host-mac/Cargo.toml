@@ -1,0 +1,15 @@
+[package]
+name = "host-mac"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+host-core = { path = "../host-core", features = ["wasm3-support"] }
+vello = { workspace = true }
+winit = "0.29"
+anyhow = "1.0"
+wasm3 = { workspace = true }
+pollster = "0.3"
+kurbo = "0.13"
+taffy = "0.9"
+shared = { path = "../shared" }

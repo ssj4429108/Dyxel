@@ -1,0 +1,3 @@
+[env]
+LIBCLANG_PATH = "/opt/homebrew/opt/llvm/lib"
+BINDGEN_EXTRA_CLANG_ARGS = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"

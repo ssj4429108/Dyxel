@@ -1,0 +1,15 @@
+namespace host_core {
+};
+
+interface VelloHost {
+    constructor();
+    [Async]
+    void init_native(u64 native_window_ptr, string data_dir, u32 width, u32 height);
+    void resize_native(u32 width, u32 height);
+    void stop_native();
+    void tick();
+    void on_touch(f32 x, f32 y);
+    boolean is_initialized();
+    [Async]
+    void prepare_engine(string data_dir);
+};

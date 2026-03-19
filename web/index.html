@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>VelloView Engine</title>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #1e1e1e; }
+        canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+    </style>
+</head>
+<body>
+    <canvas id="vello-canvas"></canvas>
+    <script type="module">
+        import init, { WebHost } from './pkg/host_web.js';
+
+        async function run() {
+            await init();
+            const canvas = document.getElementById('vello-canvas');
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = window.innerWidth * dpr;
+            canvas.height = window.innerHeight * dpr;
+            
+            console.log("Creating WebHost...");
+            const fontUrl = "https://raw.githubusercontent.com/googlefonts/roboto/main/src/hinted/Roboto-Regular.ttf";
+            const host = await WebHost.create(canvas, fontUrl);
+            console.log("WebHost Created Successfully.");
+
+            let wasmInstance;
+            const MAX_COMMAND_BYTES = 1024 * 64;
+
+            const importObject = {
+                env: {
+                    ui_force_layout: () => {
+                        const memory = new Uint8Array(wasmInstance.exports.memory.buffer);
+                        const bptr = wasmInstance.exports.vello_get_shared_buffer_ptr();
+                        host.wasm_sync_tick(memory, bptr);
+                    }
+                }
+            };
+
+            console.log("Loading sample.wasm...");
+            const response = await fetch('sample.wasm');
+            const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), importObject);
+            wasmInstance = instance;
+            
+            console.log("sample.wasm Instantiated. Running main()...");
+            instance.exports.main();
+
+            function render() {
+                if (wasmInstance) {
+                    const memory = new Uint8Array(wasmInstance.exports.memory.buffer);
+                    const bptr = wasmInstance.exports.vello_get_shared_buffer_ptr();
+                    host.wasm_sync_tick(memory, bptr);
+                    wasmInstance.exports.guest_tick();
+                } else {
+                    host.render();
+                }
+                requestAnimationFrame(render);
+            }
+            requestAnimationFrame(render);
+
+            window.addEventListener('click', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = (e.clientX - rect.left) * dpr;
+                const y = (e.clientY - rect.top) * dpr;
+                const hitId = host.handle_click(x, y);
+                if (hitId !== undefined) {
+                    console.log("Node Clicked:", hitId);
+                    instance.exports.on_node_click(hitId);
+                }
+            });
+        }
+
+        run();
+    </script>
+</body>
+</html>
