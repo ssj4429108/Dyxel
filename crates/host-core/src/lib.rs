@@ -84,7 +84,7 @@ impl SharedState {
     pub fn set_border_radius(&mut self, id: u32, r: f32) { if let Some(node) = self.nodes.get_mut(&id) { node.border_radius = r; } }
     pub fn set_padding(&mut self, id: u32, t: f32, r: f32, b: f32, l: f32) { if let Some(node) = self.nodes.get(&id) { let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); s.padding.top = LengthPercentage::length(t).into(); s.padding.right = LengthPercentage::length(r).into(); s.padding.bottom = LengthPercentage::length(b).into(); s.padding.left = LengthPercentage::length(l).into(); self.taffy.set_style(node.taffy_node, s).unwrap(); } }
     pub fn attach_click(&mut self, id: u32) { self.click_listeners.push(id); if let Some(node) = self.nodes.get_mut(&id) { node.has_click = true; } }
-    pub fn add_child(&mut self, pid: u32, cid: u32) { let c_tn = self.nodes.get(&cid).map(|n| n.taffy_node); let p_tn = self.nodes.get(&pid).map(|n| n.taffy_node); if let (Some(ptn), Some(ctn)) = (p_tn, c_tn) { self.nodes.get_mut(&pid).unwrap().children.push(cid); self.taffy.add_child(ptn, ctn).unwrap(); } }
+    pub fn add_child(&mut self, pid: u32, cid: u32) { let c_tn = self.nodes.get(&cid).map(|n| n.taffy_node); let p_tn = self.nodes.get(&pid).map(|n| n.taffy_node); if let (Some(ptn), Some(ctn)) = (p_tn, c_tn) { if let Some(parent) = self.nodes.get_mut(&pid) { parent.children.push(cid); } self.taffy.add_child(ptn, ctn).unwrap(); } }
     pub fn set_font_data(&mut self, data: Vec<u8>) { self.font_data = Some(data); }
 }
 
@@ -114,62 +114,98 @@ pub fn hit_test_recursive(id: u32, point: Vec2, nodes: &HashMap<u32, ViewNode>, 
     None
 }
 
+macro_rules! handle_op {
+    (CreateNode, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr) => {
+        $s.create_node($id); $cur_id = Some($id);
+    };
+    (SetViewType, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $vt:expr) => {
+        $s.set_view_type($id, $vt);
+    };
+    (SetColor, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $r:expr, $g:expr, $b:expr) => {
+        $s.set_color($id, $r, $g, $b);
+    };
+    (SetWidth, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $dt:expr, $v:expr) => {
+        $s.set_width($id, $dt as u32, $v);
+    };
+    (SetHeight, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $dt:expr, $v:expr) => {
+        $s.set_height($id, $dt as u32, $v);
+    };
+    (SetFlexDirection, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $dir:expr) => {
+        $s.set_flex_direction($id, $dir);
+    };
+    (SetJustifyContent, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $j:expr) => {
+        $s.set_justify_content($id, $j);
+    };
+    (SetAlignItems, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $a:expr) => {
+        $s.set_align_items($id, $a);
+    };
+    (SetPosition, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $p:expr) => {
+        $s.set_position($id, $p);
+    };
+    (SetInset, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $t:expr, $r:expr, $b:expr, $l:expr) => {
+        $s.set_inset($id, $t, $r, $b, $l);
+    };
+    (SetFlexGrow, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $grow:expr) => {
+        $s.set_flex_grow($id, $grow);
+    };
+    (SetZIndex, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $z:expr) => {
+        $s.set_z_index($id, $z);
+    };
+    (SetFontSize, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $size:expr) => {
+        $s.set_font_size($id, $size);
+    };
+    (SetBorderRadius, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $r:expr) => {
+        $s.set_border_radius($id, $r);
+    };
+    (SetPadding, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $t:expr, $r:expr, $b:expr, $l:expr) => {
+        $s.set_padding($id, $t, $r, $b, $l);
+    };
+    (AttachClick, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr) => {
+        $s.attach_click($id);
+    };
+    (SetText, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $len_u32:expr) => {
+        let len = $len_u32 as usize;
+        if $offset + len <= $command_data.len() {
+            let text = String::from_utf8_lossy(&$command_data[$offset..$offset+len]).to_string();
+            $s.set_text($id, text);
+            $offset += len;
+        }
+    };
+    (SetLabel, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $len_u32:expr) => {
+        let len = $len_u32 as usize;
+        if $offset + len <= $command_data.len() { $offset += len; }
+    };
+    (AddChild, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $pid:expr, $cid:expr) => {
+        $s.add_child($pid, $cid);
+    };
+    (SelectNode, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr) => {
+        $cur_id = Some($id);
+    };
+    (SetColorCompact, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $r:expr, $g:expr, $b:expr, $a:expr) => {
+        if let Some(id) = $cur_id { $s.set_color(id, $r, $g, $b); }
+    };
+    (SetWidthCompact, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $dt:expr, $v:expr) => {
+        if let Some(id) = $cur_id { $s.set_width(id, $dt as u32, $v); }
+    };
+    (SetHeightCompact, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $dt:expr, $v:expr) => {
+        if let Some(id) = $cur_id { $s.set_height(id, $dt as u32, $v); }
+    };
+    (UpdateLayout, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident) => {};
+    (SetSemantics, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $role:expr) => {};
+}
+
 pub fn process_command_stream(state: &Arc<Mutex<SharedState>>, command_data: &[u8]) -> anyhow::Result<()> {
     let mut offset = 0; let mut s = state.lock().unwrap(); let mut cur_id: Option<u32> = None;
     while offset < command_data.len() {
-        let op = command_data[offset]; offset += 1;
-        match op {
-            1 => { let id = u32::from_le_bytes(command_data[offset..offset+4].try_into()?); s.create_node(id); cur_id = Some(id); offset += 4; },
-            2 => { if let Some(id) = cur_id { s.set_view_type(id, u32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            3 => { if let Some(id) = cur_id { s.set_color(id, command_data[offset], command_data[offset+1], command_data[offset+2]); } offset += 4; },
-            4 | 5 => { if let Some(id) = cur_id { let t = command_data[offset] as u32; let v = f32::from_le_bytes(command_data[offset+1..offset+5].try_into()?); if op == 4 { s.set_width(id, t, v); } else { s.set_height(id, t, v); } } offset += 5; },
-            6 => { if let Some(id) = cur_id { s.set_flex_direction(id, u32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            7 => { if let Some(id) = cur_id { s.set_justify_content(id, u32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            8 => { if let Some(id) = cur_id { s.set_align_items(id, u32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            9 => { if let Some(id) = cur_id { s.set_position(id, u32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            10 => { 
-                let id = u32::from_le_bytes(command_data[offset..offset+4].try_into()?); 
-                let t = f32::from_le_bytes(command_data[offset+4..offset+8].try_into()?); 
-                let r = f32::from_le_bytes(command_data[offset+8..offset+12].try_into()?); 
-                let b = f32::from_le_bytes(command_data[offset+12..offset+16].try_into()?); 
-                let l = f32::from_le_bytes(command_data[offset+16..offset+20].try_into()?); 
-                s.set_inset(id, t, r, b, l); offset += 20; 
-            },
-            11 => { if let Some(id) = cur_id { s.set_flex_grow(id, f32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            12 => { if let Some(id) = cur_id { s.set_z_index(id, i32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            13 => { if let Some(id) = cur_id { s.set_font_size(id, f32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            14 => { if let Some(id) = cur_id { s.set_border_radius(id, f32::from_le_bytes(command_data[offset..offset+4].try_into()?)); } offset += 4; },
-            15 => { 
-                let id = u32::from_le_bytes(command_data[offset..offset+4].try_into()?); 
-                let t = f32::from_le_bytes(command_data[offset+4..offset+8].try_into()?); 
-                let r = f32::from_le_bytes(command_data[offset+8..offset+12].try_into()?); 
-                let b = f32::from_le_bytes(command_data[offset+12..offset+16].try_into()?); 
-                let l = f32::from_le_bytes(command_data[offset+16..offset+20].try_into()?); 
-                s.set_padding(id, t, r, b, l); offset += 20; 
-            },
-            16 => { if let Some(id) = cur_id { s.attach_click(id); } },
-            17 => { 
-                if let Some(id) = cur_id { 
-                    let len = u32::from_le_bytes(command_data[offset..offset+4].try_into()?) as usize;
-                    let text = String::from_utf8_lossy(&command_data[offset+4..offset+4+len]).to_string();
-                    s.set_text(id, text);
-                    offset += 4 + len;
-                } else {
-                    let len = u32::from_le_bytes(command_data[offset..offset+4].try_into()?) as usize;
-                    offset += 4 + len;
-                }
-            },
-            18 => { if let Some(p) = cur_id { let c = u32::from_le_bytes(command_data[offset..offset+4].try_into()?); s.add_child(p, c); } offset += 4; },
-            21 => { /* UpdateLayout handled by host tick */ },
-            22 => { cur_id = Some(u32::from_le_bytes(command_data[offset..offset+4].try_into()?)); offset += 4; },
-            23 => { if let Some(id) = cur_id { s.set_color(id, command_data[offset], command_data[offset+1], command_data[offset+2]); } offset += 4; },
-            24 | 25 => { if let Some(id) = cur_id { let t = command_data[offset] as u32; let v = f32::from_le_bytes(command_data[offset+1..offset+5].try_into()?); if op == 24 { s.set_width(id, t, v); } else { s.set_height(id, t, v); } } offset += 5; },
-            _ => { /* Skip unknown opcodes */ }
-        }
+        let op_byte = command_data[offset]; offset += 1;
+        let op = match OpCode::from_u8(op_byte) {
+            Some(o) => o,
+            None => { log::warn!("Unknown opcode: {}", op_byte); continue; }
+        };
+        shared::dispatch_op!(op, command_data, offset, handle_op, s, cur_id, offset, command_data);
     }
     Ok(())
 }
-
 
 pub fn process_commands(memory: &mut [u8], buffer_ptr: u32, state: &Arc<Mutex<SharedState>>) -> anyhow::Result<()> {
     let bs = buffer_ptr as usize; let clen = u32::from_le_bytes(memory[bs..bs+4].try_into()?);
@@ -181,31 +217,24 @@ pub fn process_commands(memory: &mut [u8], buffer_ptr: u32, state: &Arc<Mutex<Sh
 pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedState) -> anyhow::Result<()> {
     let bs = buffer_ptr as usize;
     let ls = bs + 16 + MAX_COMMAND_BYTES;
-    let ms = ls + (MAX_NODES * 16); // dirty_mask 偏移
-    
+    let ms = ls + (MAX_NODES * 16); 
     for (&id, node) in &state.nodes {
         if id as usize >= MAX_NODES { continue; }
         if let Ok(layout) = state.taffy.layout(node.taffy_node) {
             let target = ls + (id as usize * 16);
-            
-            // 比较旧数据与新数据 (Sparse Sync)
             let nx = layout.location.x.to_le_bytes();
             let ny = layout.location.y.to_le_bytes();
             let nw = layout.size.width.to_le_bytes();
             let nh = layout.size.height.to_le_bytes();
-            
             let changed = memory[target..target+4] != nx || 
                          memory[target+4..target+8] != ny ||
                          memory[target+8..target+12] != nw ||
                          memory[target+12..target+16] != nh;
-
             if changed {
                 memory[target..target+4].copy_from_slice(&nx);
                 memory[target+4..target+8].copy_from_slice(&ny);
                 memory[target+8..target+12].copy_from_slice(&nw);
                 memory[target+12..target+16].copy_from_slice(&nh);
-                
-                // 设置脏位
                 let word_idx = (id / 32) as usize;
                 let bit_idx = id % 32;
                 let mask_pos = ms + (word_idx * 4);
@@ -235,12 +264,9 @@ impl VelloHost {
                 #[cfg(feature = "wasm3-support")] {
                     let mem = unsafe { &mut *e._rt.memory_mut() };
                     let _ = process_commands(mem, e.shared_buffer_ptr, &e.shared_state);
-                    if let Err(err) = e.tick_fn.call() {
-                        log::error!("Wasm tick failed: {}", err);
-                    }
+                    if let Err(err) = e.tick_fn.call() { log::error!("Wasm tick failed: {}", err); }
                     let _ = sync_layout_to_wasm(mem, e.shared_buffer_ptr, &e.shared_state.lock().unwrap());
                 }
-
                 render_frame(e, s); 
             }
         }
@@ -251,44 +277,29 @@ impl VelloHost {
             let hit = { let sg = e.shared_state.lock().unwrap(); sg.root_id.and_then(|rid| hit_test_recursive(rid, mp, &sg.nodes, &sg.taffy, Vec2::ZERO, &sg.click_listeners)) };
             if let Some(_target_id) = hit { 
                 #[cfg(feature = "wasm3-support")] { 
-                    if let Err(err) = e.on_click_fn.call(_target_id) {
-                        log::error!("Wasm click failed: {}", err);
-                    }
+                    if let Err(err) = e.on_click_fn.call(_target_id) { log::error!("Wasm click failed: {}", err); }
                 } 
             }
         }
     }
     pub fn is_initialized(&self) -> bool { self.active_surface_id.lock().unwrap().is_some() }
-    
     pub async fn prepare_engine(&self, ddir: String) {
-        if self.engine.lock().unwrap().is_some() { 
-            return; 
-        }
+        if self.engine.lock().unwrap().is_some() { return; }
         if let Ok(e) = setup_engine(ddir, self.engine.clone()).await {
             let mut guard = self.engine.lock().unwrap();
-            if guard.is_none() { 
-                *guard = Some(e); 
-            }
+            if guard.is_none() { *guard = Some(e); }
         }
     }
-
     pub async fn init_native(&self, surface_ptr: u64, ddir: String, w: u32, h: u32) {
-        #[cfg(target_os = "android")]
-        let sh = Arc::new(SafeWindowHandle::new_android(surface_ptr));
-        #[cfg(target_os = "ios")]
-        let sh = Arc::new(SafeWindowHandle::new_ios(surface_ptr));
-        
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        self.setup(vello::wgpu::SurfaceTarget::from(sh.clone()), ddir, w, h, Some(sh)).await;
-        
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        let _ = (surface_ptr, ddir, w, h); 
+        #[cfg(target_os = "android")] let sh = Arc::new(SafeWindowHandle::new_android(surface_ptr));
+        #[cfg(target_os = "ios")] let sh = Arc::new(SafeWindowHandle::new_ios(surface_ptr));
+        #[cfg(any(target_os = "android", target_os = "ios"))] self.setup(vello::wgpu::SurfaceTarget::from(sh.clone()), ddir, w, h, Some(sh)).await;
+        #[cfg(not(any(target_os = "android", target_os = "ios")))] { let _ = (surface_ptr, ddir, w, h); }
     }
 }
 
 impl VelloHost {
     pub async fn setup(&self, target: vello::wgpu::SurfaceTarget<'static>, ddir: String, width: u32, height: u32, handle: Option<Arc<SafeWindowHandle>>) {
-        // 1. 确保引擎已存在
         let mut engine_ready = self.engine.lock().unwrap().is_some();
         if !engine_ready {
             if let Ok(e) = setup_engine(ddir, self.engine.clone()).await {
@@ -297,131 +308,74 @@ impl VelloHost {
                 engine_ready = true;
             }
         }
-
-        if !engine_ready {
-            return;
-        }
-
-        // 2. 取出引擎进行异步 Surface 创建
+        if !engine_ready { return; }
         let engine_opt = { self.engine.lock().unwrap().take() };
         if let Some(mut e) = engine_opt {
-            // 执行异步操作，此时不持有 engine 锁
             if let Ok(surface) = e.context.create_surface(target, width, height, vello::wgpu::PresentMode::AutoVsync).await {
                 let dev = &e.context.devices[surface.dev_id].device;
                 let bl = dev.create_pipeline_layout(&vello::wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&e.blit_bind_group_layout], push_constant_ranges: &[] });
                 let blit_p = dev.create_render_pipeline(&vello::wgpu::RenderPipelineDescriptor { label: None, layout: Some(&bl), vertex: vello::wgpu::VertexState { module: &e.blit_shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() }, fragment: Some(vello::wgpu::FragmentState { module: &e.blit_shader, entry_point: Some("fs_main"), targets: &[Some(vello::wgpu::ColorTargetState { format: surface.config.format, blend: Some(vello::wgpu::BlendState::REPLACE), write_mask: vello::wgpu::ColorWrites::ALL })], compilation_options: Default::default() }), primitive: vello::wgpu::PrimitiveState::default(), depth_stencil: None, multisample: vello::wgpu::MultisampleState::default(), multiview: None, cache: None });
                 let nid = self.next_surface_id.fetch_add(1, Ordering::SeqCst);
-                
                 let mut ss = SurfaceState { surface, blit_pipeline: blit_p, offscreen_texture: None, window_handle: handle };
                 render_frame(&mut e, &mut ss);
-                
                 self.surfaces.lock().unwrap().insert(nid, ss);
                 *self.active_surface_id.lock().unwrap() = Some(SurfaceId(nid));
             }
-            
-            // 无论 surface 是否成功，都必须归还引擎
             let mut guard = self.engine.lock().unwrap();
             *guard = Some(e);
         }
     }
-
     pub fn get_state(&self) -> std::sync::MutexGuard<'_, Option<EngineState>> { self.engine.lock().unwrap() }
     pub fn get_state_mut(&self) -> std::sync::MutexGuard<'_, Option<EngineState>> { self.engine.lock().unwrap() }
     pub fn apply_commands(&self, command_data: &[u8]) { if let Some(s) = &*self.engine.lock().unwrap() { let _ = process_command_stream(&s.shared_state, command_data); } }
 }
 
-async fn setup_engine(ddir: String, _: Arc<Mutex<Option<EngineState>>>) -> anyhow::Result<EngineState> {
+async fn setup_engine(ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -> anyhow::Result<EngineState> {
     let mut context = RenderContext::new(); 
-    let dev_id = context.device(None).await.ok_or_else(|| anyhow::anyhow!("No wgpu device found"))?;
+    let dev_id = context.device(None).await.ok_or_else(|| anyhow::anyhow!("No device found"))?;
     let dev = &context.devices[dev_id].device;
-    
     let blit_shader = dev.create_shader_module(vello::wgpu::ShaderModuleDescriptor { label: Some("Blit Shader"), source: vello::wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()) });
     let blit_bl = dev.create_bind_group_layout(&vello::wgpu::BindGroupLayoutDescriptor { label: None, entries: &[vello::wgpu::BindGroupLayoutEntry { binding: 0, visibility: vello::wgpu::ShaderStages::FRAGMENT, ty: vello::wgpu::BindingType::Texture { sample_type: vello::wgpu::TextureSampleType::Float { filterable: true }, view_dimension: vello::wgpu::TextureViewDimension::D2, multisampled: false }, count: None }, vello::wgpu::BindGroupLayoutEntry { binding: 1, visibility: vello::wgpu::ShaderStages::FRAGMENT, ty: vello::wgpu::BindingType::Sampler(vello::wgpu::SamplerBindingType::Filtering), count: None }] });
     let sampler = dev.create_sampler(&vello::wgpu::SamplerDescriptor { mag_filter: vello::wgpu::FilterMode::Linear, min_filter: vello::wgpu::FilterMode::Linear, ..Default::default() });
     let renderer = Renderer::new(dev, RendererOptions { antialiasing_support: vello::AaSupport::all(), pipeline_cache: None, num_init_threads: None, use_cpu: false }).map_err(|e| anyhow::anyhow!("Failed to create renderer: {}", e))?;
     let state = Arc::new(Mutex::new(SharedState::new()));
-    
     #[cfg(feature = "wasm3-support")] {
         let wasm_path = format!("{}/guest.wasm", ddir); 
-        let wasm = std::fs::read(&wasm_path).or_else(|_| std::fs::read("guest.wasm")).map_err(|e| anyhow::anyhow!("Failed to read guest.wasm at {}: {}", wasm_path, e))?;
-        let env = wasm3::Environment::new().map_err(|e| anyhow::anyhow!("Wasm3 env failed: {}", e))?; 
-        let rt = env.create_runtime(1024 * 2048).map_err(|e| anyhow::anyhow!("Wasm3 runtime failed: {}", e))?;
-        let mut module = rt.load_module(env.parse_module(wasm).map_err(|e| anyhow::anyhow!("Wasm parse failed: {}", e))?).map_err(|e| anyhow::anyhow!("Wasm module load failed: {}", e))?;
-        let bptr = module.find_function::<(), u32>("vello_get_shared_buffer_ptr").map_err(|e| anyhow::anyhow!("Wasm func not found: {}", e))?.call().map_err(|e| anyhow::anyhow!("Wasm call failed: {}", e))?;
+        let wasm = std::fs::read(&wasm_path).or_else(|_| std::fs::read("guest.wasm")).map_err(|e| anyhow::anyhow!("Failed to read WASM: {}", e))?;
+        let env = wasm3::Environment::new().map_err(|e| anyhow::anyhow!("Environment failed: {}", e))?; 
+        let rt = env.create_runtime(1024 * 2048).map_err(|e| anyhow::anyhow!("Runtime failed: {}", e))?;
+        let mut module = rt.load_module(env.parse_module(wasm).map_err(|e| anyhow::anyhow!("Parse failed: {}", e))?).map_err(|e| anyhow::anyhow!("Load failed: {}", e))?;
+        let bptr = module.find_function::<(), u32>("vello_get_shared_buffer_ptr").map_err(|e| anyhow::anyhow!("Func not found: {}", e))?.call().map_err(|e| anyhow::anyhow!("Call failed: {}", e))?;
         let s_inner = state.clone();
         let _ = module.link_closure("env", "ui_force_layout", move |ctx, ()| { let mem = unsafe { &mut *ctx.memory_mut() }; let _ = process_commands(mem, bptr, &s_inner); Ok(()) });
-        let main_fn = module.find_function::<(), ()>("main")
-            .or_else(|_| module.find_function::<(), ()>("_main"))
-            .map_err(|e| anyhow::anyhow!("Main func not found: {}", e))?;
-            
-        let tick_fn = module.find_function::<(), ()>("guest_tick")
-            .or_else(|_| module.find_function::<(), ()>("vello_tick"))
-            .or_else(|_| module.find_function::<(), ()>("_guest_tick"))
-            .map_err(|e| anyhow::anyhow!("Tick func ('guest_tick') not found in WASM: {}", e))?;
-            
-        let on_click_fn = module.find_function::<(u32,), ()>("on_node_click")
-            .or_else(|_| module.find_function::<(u32,), ()>("_on_node_click"))
-            .map_err(|e| anyhow::anyhow!("OnClick func ('on_node_click') not found in WASM: {}", e))?;
-        let _ = main_fn.call(); 
-        let memory = unsafe { &mut *rt.memory_mut() }; 
-        let _ = process_commands(memory, bptr, &state);
+        let main_fn = module.find_function::<(), ()>("main").or_else(|_| module.find_function::<(), ()>("_main")).map_err(|e| anyhow::anyhow!("Main not found"))?;
+        let get_hash_fn = module.find_function::<(), u64>("vello_get_protocol_hash").map_err(|e| anyhow::anyhow!("vello_get_protocol_hash not found"))?;
+        let guest_hash = get_hash_fn.call().map_err(|e| anyhow::anyhow!("Failed to call get_hash"))?;
+        if guest_hash != shared::PROTOCOL_HASH { return Err(anyhow::anyhow!("Protocol mismatch! Host: {}, Guest: {}", shared::PROTOCOL_HASH, guest_hash)); }
+        let tick_fn = module.find_function::<(), ()>("guest_tick").or_else(|_| module.find_function::<(), ()>("vello_tick")).or_else(|_| module.find_function::<(), ()>("_guest_tick")).map_err(|e| anyhow::anyhow!("Tick func not found"))?;
+        let on_click_fn = module.find_function::<(u32,), ()>("on_node_click").or_else(|_| module.find_function::<(u32,), ()>("_on_node_click")).map_err(|e| anyhow::anyhow!("OnClick func not found"))?;
+        let _ = main_fn.call(); let memory = unsafe { &mut *rt.memory_mut() }; let _ = process_commands(memory, bptr, &state);
         Ok(EngineState { context, renderer, shared_state: state, tick_fn: unsafe { std::mem::transmute(tick_fn) }, on_click_fn: unsafe { std::mem::transmute(on_click_fn) }, _rt: rt, shared_buffer_ptr: bptr, blit_bind_group_layout: blit_bl, sampler, blit_shader })
     }
-    #[cfg(not(feature = "wasm3-support"))] {
-        Ok(EngineState { context, renderer, shared_state: state, blit_bind_group_layout: blit_bl, sampler, blit_shader })
-    }
+    #[cfg(not(feature = "wasm3-support"))] { Ok(EngineState { context, renderer, shared_state: state, blit_bind_group_layout: blit_bl, sampler, blit_shader }) }
 }
 
 fn render_frame(e: &mut EngineState, s: &mut SurfaceState) {
-    let w = s.surface.config.width; let h = s.surface.config.height; 
-    if w == 0 || h == 0 { return; }
-    
-    let rid = { 
-        let mut g = e.shared_state.lock().unwrap(); 
-        g.root_id.map(|id| { 
-            if let Some(rn) = g.nodes.get(&id).map(|n| n.taffy_node) { 
-                let _ = g.taffy.compute_layout(rn, taffy::prelude::Size { width: AvailableSpace::Definite(w as f32), height: AvailableSpace::Definite(h as f32) }); 
-            } 
-            id 
-        }) 
-    };
-    
-    let mut scene = Scene::new(); 
-    if let Some(id) = rid { 
-        let g = e.shared_state.lock().unwrap(); 
-        render_node_recursive(id, &g, &mut scene, Vec2::ZERO); 
-    }
-    
+    let w = s.surface.config.width; let h = s.surface.config.height; if w == 0 || h == 0 { return; }
+    let rid = { let mut g = e.shared_state.lock().unwrap(); g.root_id.map(|id| { if let Some(rn) = g.nodes.get(&id).map(|n| n.taffy_node) { let _ = g.taffy.compute_layout(rn, taffy::prelude::Size { width: AvailableSpace::Definite(w as f32), height: AvailableSpace::Definite(h as f32) }); } id }) };
+    let mut scene = Scene::new(); if let Some(id) = rid { let g = e.shared_state.lock().unwrap(); render_node_recursive(id, &g, &mut scene, Vec2::ZERO); }
     if s.offscreen_texture.as_ref().map_or(true, |(t, _)| t.width() != w || t.height() != h) {
-        let texture = e.context.devices[s.surface.dev_id].device.create_texture(&vello::wgpu::TextureDescriptor { label: Some("Offscreen Texture"), size: vello::wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: vello::wgpu::TextureDimension::D2, format: vello::wgpu::TextureFormat::Rgba8Unorm, usage: vello::wgpu::TextureUsages::STORAGE_BINDING | vello::wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] });
+        let texture = e.context.devices[s.surface.dev_id].device.create_texture(&vello::wgpu::TextureDescriptor { label: None, size: vello::wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: vello::wgpu::TextureDimension::D2, format: vello::wgpu::TextureFormat::Rgba8Unorm, usage: vello::wgpu::TextureUsages::STORAGE_BINDING | vello::wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] });
         let bg = e.context.devices[s.surface.dev_id].device.create_bind_group(&vello::wgpu::BindGroupDescriptor { label: None, layout: &e.blit_bind_group_layout, entries: &[vello::wgpu::BindGroupEntry { binding: 0, resource: vello::wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())) }, vello::wgpu::BindGroupEntry { binding: 1, resource: vello::wgpu::BindingResource::Sampler(&e.sampler) }] });
         s.offscreen_texture = Some((texture, bg));
     }
-    
     let (off_t, blit_bg) = s.offscreen_texture.as_ref().unwrap();
     e.renderer.render_to_texture(&e.context.devices[s.surface.dev_id].device, &e.context.devices[s.surface.dev_id].queue, &scene, &off_t.create_view(&Default::default()), &vello::RenderParams { base_color: Color::BLACK, width: w, height: h, antialiasing_method: vello::AaConfig::Area }).unwrap();
-    
     if let Ok(st) = s.surface.surface.get_current_texture() {
         let mut enc = e.context.devices[s.surface.dev_id].device.create_command_encoder(&Default::default());
         { 
-            let mut rp = enc.begin_render_pass(&vello::wgpu::RenderPassDescriptor { 
-                label: Some("Blit Render Pass"), 
-                color_attachments: &[Some(vello::wgpu::RenderPassColorAttachment { 
-                    view: &st.texture.create_view(&Default::default()), 
-                    resolve_target: None, 
-                    ops: vello::wgpu::Operations { 
-                        load: vello::wgpu::LoadOp::Clear(vello::wgpu::Color::TRANSPARENT),
-                        store: vello::wgpu::StoreOp::Store 
-                    }, 
-                    depth_slice: None 
-                })], 
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None 
-            }); 
-            rp.set_pipeline(&s.blit_pipeline); 
-            rp.set_bind_group(0, blit_bg, &[]); 
-            rp.draw(0..3, 0..1); 
+            let mut rp = enc.begin_render_pass(&vello::wgpu::RenderPassDescriptor { label: None, color_attachments: &[Some(vello::wgpu::RenderPassColorAttachment { view: &st.texture.create_view(&Default::default()), resolve_target: None, ops: vello::wgpu::Operations { load: vello::wgpu::LoadOp::Clear(vello::wgpu::Color::TRANSPARENT), store: vello::wgpu::StoreOp::Store }, depth_slice: None })], depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None }); rp.set_pipeline(&s.blit_pipeline); rp.set_bind_group(0, blit_bg, &[]); rp.draw(0..3, 0..1); 
         }
-        e.context.devices[s.surface.dev_id].queue.submit(Some(enc.finish())); 
-        st.present();
+        e.context.devices[s.surface.dev_id].queue.submit(Some(enc.finish())); st.present();
     }
 }

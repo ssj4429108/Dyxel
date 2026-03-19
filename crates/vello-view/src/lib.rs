@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::cell::RefCell;
 use std::collections::HashMap;
 pub use shared::{FlexDirection, JustifyContent, AlignItems, PositionType, Dimension, Role, ViewType, OpCode, LayoutResult, MAX_COMMAND_BYTES, SharedBuffer};
+use shared::push_command;
 
 // --- Command Stream ---
 #[no_mangle]
@@ -16,26 +17,21 @@ pub static mut SHARED_BUFFER: SharedBuffer = SharedBuffer {
 };
 
 #[no_mangle]
+pub extern "C" fn vello_get_protocol_hash() -> u64 {
+    shared::PROTOCOL_HASH
+}
+
+#[no_mangle]
 pub extern "C" fn vello_get_shared_buffer_ptr() -> u32 {
     std::ptr::addr_of!(SHARED_BUFFER) as u32
 }
 
 static mut LAST_SELECTED_NODE: Option<u32> = None;
 
-fn push_op(op: OpCode, data: &[u8]) {
-    unsafe {
-        let len = SHARED_BUFFER.command_len as usize;
-        if len + 1 + data.len() > MAX_COMMAND_BYTES { return; }
-        SHARED_BUFFER.command_data[len] = op as u8;
-        if !data.is_empty() { SHARED_BUFFER.command_data[len + 1..len + 1 + data.len()].copy_from_slice(data); }
-        SHARED_BUFFER.command_len += 1 + data.len() as u32;
-    }
-}
-
 fn select_node(id: u32) {
     unsafe {
         if LAST_SELECTED_NODE == Some(id) { return; }
-        push_op(OpCode::SelectNode, &id.to_le_bytes());
+        push_command!(SHARED_BUFFER, SelectNode, id);
         LAST_SELECTED_NODE = Some(id);
     }
 }
@@ -100,69 +96,55 @@ pub trait BaseView {
     fn color<P: Into<Prop<(u32,u32,u32)>>>(self, p: P) -> Self where Self: Sized { 
         apply_prop(self.node_id(), p.into(), |id, (r, g, b)| {
             select_node(id);
-            push_op(OpCode::SetColorCompact, &[r as u8, g as u8, b as u8, 255]);
+            push_command!(SHARED_BUFFER, SetColorCompact, r as u8, g as u8, b as u8, 255u8);
         }); self 
     }
     fn width<P: Into<Prop<Dimension>>>(self, p: P) -> Self where Self: Sized { 
         apply_prop(self.node_id(), p.into(), |id, dim| {
             select_node(id);
             let (t, v) = match dim { Dimension::Auto => (0u8, 0.0f32), Dimension::Pixels(x) => (1, x), Dimension::Percent(x) => (2, x) };
-            let mut data = [0u8; 5]; data[0] = t; data[1..5].copy_from_slice(&v.to_le_bytes());
-            push_op(OpCode::SetWidthCompact, &data);
+            push_command!(SHARED_BUFFER, SetWidthCompact, t, v);
         }); self 
     }
     fn height<P: Into<Prop<Dimension>>>(self, p: P) -> Self where Self: Sized { 
         apply_prop(self.node_id(), p.into(), |id, dim| {
             select_node(id);
             let (t, v) = match dim { Dimension::Auto => (0u8, 0.0f32), Dimension::Pixels(x) => (1, x), Dimension::Percent(x) => (2, x) };
-            let mut data = [0u8; 5]; data[0] = t; data[1..5].copy_from_slice(&v.to_le_bytes());
-            push_op(OpCode::SetHeightCompact, &data);
+            push_command!(SHARED_BUFFER, SetHeightCompact, t, v);
         }); self 
     }
-    fn flex_direction<P: Into<Prop<FlexDirection>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, dir| { select_node(id); push_op(OpCode::SetFlexDirection, &(dir as u32).to_le_bytes()); }); self }
-    fn justify_content<P: Into<Prop<JustifyContent>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, j| { select_node(id); push_op(OpCode::SetJustifyContent, &(j as u32).to_le_bytes()); }); self }
-    fn align_items<P: Into<Prop<AlignItems>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, a| { select_node(id); push_op(OpCode::SetAlignItems, &(a as u32).to_le_bytes()); }); self }
-    fn position<P: Into<Prop<PositionType>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, pos| { select_node(id); push_op(OpCode::SetPosition, &(pos as u32).to_le_bytes()); }); self }
-    fn flex_grow<P: Into<Prop<f32>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, grow| { select_node(id); push_op(OpCode::SetFlexGrow, &grow.to_le_bytes()); }); self }
-    fn z_index<P: Into<Prop<i32>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, z| { select_node(id); push_op(OpCode::SetZIndex, &z.to_le_bytes()); }); self }
+    fn flex_direction<P: Into<Prop<FlexDirection>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, dir| { select_node(id); push_command!(SHARED_BUFFER, SetFlexDirection, id, dir as u32); }); self }
+    fn justify_content<P: Into<Prop<JustifyContent>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, j| { select_node(id); push_command!(SHARED_BUFFER, SetJustifyContent, id, j as u32); }); self }
+    fn align_items<P: Into<Prop<AlignItems>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, a| { select_node(id); push_command!(SHARED_BUFFER, SetAlignItems, id, a as u32); }); self }
+    fn position<P: Into<Prop<PositionType>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, pos| { select_node(id); push_command!(SHARED_BUFFER, SetPosition, id, pos as u32); }); self }
+    fn flex_grow<P: Into<Prop<f32>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, grow| { select_node(id); push_command!(SHARED_BUFFER, SetFlexGrow, id, grow); }); self }
+    fn z_index<P: Into<Prop<i32>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, z| { select_node(id); push_command!(SHARED_BUFFER, SetZIndex, id, z); }); self }
     fn inset<P: Into<Prop<(f32,f32,f32,f32)>>>(self, p: P) -> Self where Self: Sized { 
         apply_prop(self.node_id(), p.into(), |id, (t, r, b, l)| { 
             select_node(id);
-            let mut data = [0u8; 16]; 
-            data[0..4].copy_from_slice(&t.to_le_bytes()); data[4..8].copy_from_slice(&r.to_le_bytes()); 
-            data[8..12].copy_from_slice(&b.to_le_bytes()); data[12..16].copy_from_slice(&l.to_le_bytes());
-            let mut full_data = [0u8; 20];
-            full_data[0..4].copy_from_slice(&id.to_le_bytes());
-            full_data[4..20].copy_from_slice(&data);
-            push_op(OpCode::SetInset, &full_data); 
+            push_command!(SHARED_BUFFER, SetInset, id, t, r, b, l); 
         }); self 
     }
     fn padding<P: Into<Prop<(f32,f32,f32,f32)>>>(self, p: P) -> Self where Self: Sized { 
         apply_prop(self.node_id(), p.into(), |id, (t, r, b, l)| { 
             select_node(id); 
-            let mut data = [0u8; 20]; 
-            data[0..4].copy_from_slice(&id.to_le_bytes()); 
-            data[4..8].copy_from_slice(&t.to_le_bytes()); 
-            data[8..12].copy_from_slice(&r.to_le_bytes()); 
-            data[12..16].copy_from_slice(&b.to_le_bytes()); 
-            data[16..20].copy_from_slice(&l.to_le_bytes()); 
-            push_op(OpCode::SetPadding, &data); 
+            push_command!(SHARED_BUFFER, SetPadding, id, t, r, b, l); 
         }); self 
     }
 
-    fn border_radius<P: Into<Prop<f32>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, r| { select_node(id); push_op(OpCode::SetBorderRadius, &r.to_le_bytes()); }); self }
+    fn border_radius<P: Into<Prop<f32>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, r| { select_node(id); push_command!(SHARED_BUFFER, SetBorderRadius, id, r); }); self }
     fn on_click<F: FnMut() + 'static>(self, handler: F) -> Self where Self: Sized {
-        let id = self.node_id(); select_node(id); push_op(OpCode::AttachClick, &[]); 
+        let id = self.node_id(); select_node(id); push_command!(SHARED_BUFFER, AttachClick, id); 
         CLICK_HANDLERS.with(|handlers| { handlers.borrow_mut().insert(id, Box::new(handler)); }); self
     }
-    fn child(self, child_id: u32) -> Self where Self: Sized { select_node(self.node_id()); push_op(OpCode::AddChild, &child_id.to_le_bytes()); self }
+    fn child(self, child_id: u32) -> Self where Self: Sized { select_node(self.node_id()); push_command!(SHARED_BUFFER, AddChild, self.node_id(), child_id); self }
 }
 
 pub struct View { pub id: u32 }
 impl View {
     pub fn new() -> Self {
         let id = NODE_COUNTER.fetch_add(1, Ordering::SeqCst); track_node(id);
-        push_op(OpCode::CreateNode, &id.to_le_bytes());
+        push_command!(SHARED_BUFFER, CreateNode, id);
         unsafe { LAST_SELECTED_NODE = Some(id); } 
         let v = Self { id }; v.width("auto").height("auto") 
     }
@@ -173,22 +155,25 @@ pub struct Text { pub id: u32 }
 impl Text {
     pub fn new() -> Self {
         let id = NODE_COUNTER.fetch_add(1, Ordering::SeqCst); track_node(id);
-        push_op(OpCode::CreateNode, &id.to_le_bytes());
+        push_command!(SHARED_BUFFER, CreateNode, id);
         unsafe { LAST_SELECTED_NODE = Some(id); }
-        push_op(OpCode::SetViewType, &(ViewType::Text as u32).to_le_bytes());
+        push_command!(SHARED_BUFFER, SetViewType, id, ViewType::Text as u32);
         Self { id }
     }
-    pub fn value<P: Into<Prop<String>>>(self, p: P) -> Self { apply_prop(self.id, p.into(), |id, s| { select_node(id); let mut data = [0u8; 4]; data.copy_from_slice(&(s.len() as u32).to_le_bytes()); let mut full = data.to_vec(); full.extend_from_slice(s.as_bytes()); push_op(OpCode::SetText, &full); }); self }
+    pub fn value<P: Into<Prop<String>>>(self, p: P) -> Self { apply_prop(self.id, p.into(), |id, s| { 
+        select_node(id); 
+        let len = s.len() as u32;
+        push_command!(SHARED_BUFFER, SetText, id, len);
+        // 手动拷贝变长文本数据
+        unsafe {
+            let offset = SHARED_BUFFER.command_len as usize;
+            if offset + s.len() <= MAX_COMMAND_BYTES {
+                SHARED_BUFFER.command_data[offset..offset+s.len()].copy_from_slice(s.as_bytes());
+                SHARED_BUFFER.command_len = (offset + s.len()) as u32;
+            }
+        }
+    }); self }
 }
 impl BaseView for Text { fn node_id(&self) -> u32 { self.id } }
 
-pub fn force_layout() { push_op(OpCode::UpdateLayout, &[]); unsafe { ui_force_layout(); } }
-
-#[macro_export]
-macro_rules! rsx {
-    ($tag:ident { $($inner:tt)* }) => {{ use $crate::BaseView; let mut n = $crate::$tag::new(); $crate::rsx!(@internal n { $($inner)* }); n.node_id() }};
-    (@internal $n:ident { $prop:ident : ~ $val:expr ; $($rest:tt)* }) => { let $n = $n.$prop($val.signal().sig()); $crate::rsx!(@internal $n { $($rest)* }); };
-    (@internal $n:ident { $prop:ident : $val:expr ; $($rest:tt)* }) => { let $n = $n.$prop($val); $crate::rsx!(@internal $n { $($rest)* }); };
-    (@internal $n:ident { on_click : $val:expr ; $($rest:tt)* }) => { let $n = $n.on_click($val); $crate::rsx!(@internal $n { $($rest)* }); };
-    (@internal $n:ident { }) => {};
-}
+pub fn force_layout() { push_command!(SHARED_BUFFER, UpdateLayout); unsafe { ui_force_layout(); } }
