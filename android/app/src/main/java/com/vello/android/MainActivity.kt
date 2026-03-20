@@ -74,7 +74,6 @@ class MainActivity : AppCompatActivity() {
                     try {
                         // 等待 VSync 信号对齐
                         awaitFrame()
-                        
                         if (engine.host.isInitialized()) {
                             engine.host.tick()
                         }

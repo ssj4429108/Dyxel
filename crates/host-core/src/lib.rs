@@ -208,16 +208,39 @@ pub fn process_command_stream(state: &Arc<Mutex<SharedState>>, command_data: &[u
 }
 
 pub fn process_commands(memory: &mut [u8], buffer_ptr: u32, state: &Arc<Mutex<SharedState>>) -> anyhow::Result<()> {
-    let bs = buffer_ptr as usize; let clen = u32::from_le_bytes(memory[bs..bs+4].try_into()?);
+    let bs = buffer_ptr as usize; 
+    
+    // Bounds check for command length
+    if bs + 4 > memory.len() {
+        return Err(anyhow::anyhow!("WASM memory out of bounds reading command_len"));
+    }
+    
+    let clen = u32::from_le_bytes(memory[bs..bs+4].try_into()?);
     if clen == 0 { return Ok(()); }
-    let _ = process_command_stream(state, &memory[bs+16 .. bs+16+clen as usize]);
-    memory[bs..bs + 4].copy_from_slice(&0u32.to_le_bytes()); Ok(())
+    
+    // Bounds check for command data
+    let data_start = bs + 16;
+    let data_end = data_start + clen as usize;
+    if data_end > memory.len() {
+        return Err(anyhow::anyhow!("WASM memory out of bounds reading command_data. Length: {}, Buffer End: {}", clen, memory.len()));
+    }
+
+    let _ = process_command_stream(state, &memory[data_start .. data_end]);
+    memory[bs..bs + 4].copy_from_slice(&0u32.to_le_bytes()); 
+    Ok(())
 }
 
 pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedState) -> anyhow::Result<()> {
     let bs = buffer_ptr as usize;
     let ls = bs + 16 + MAX_COMMAND_BYTES;
     let ms = ls + (MAX_NODES * 16); 
+    
+    // Bounds check for layout buffer and dirty mask
+    let total_required = ms + (MAX_NODES / 32 * 4); // Include dirty mask size
+    if total_required > memory.len() {
+        return Err(anyhow::anyhow!("WASM memory too small for layout buffer. Required: {}, Actual: {}", total_required, memory.len()));
+    }
+    
     for (&id, node) in &state.nodes {
         if id as usize >= MAX_NODES { continue; }
         if let Ok(layout) = state.taffy.layout(node.taffy_node) {
@@ -262,12 +285,31 @@ impl VelloHost {
             let mut surfs = self.surfaces.lock().unwrap();
             if let (Some(e), Some(s)) = (&mut *eg, surfs.get_mut(&id.0)) {
                 #[cfg(feature = "wasm3-support")] {
-                    let mem = unsafe { &mut *e._rt.memory_mut() };
-                    let _ = process_commands(mem, e.shared_buffer_ptr, &e.shared_state);
-                    if let Err(err) = e.tick_fn.call() { log::error!("Wasm tick failed: {}", err); }
-                    let _ = sync_layout_to_wasm(mem, e.shared_buffer_ptr, &e.shared_state.lock().unwrap());
+                    // 1. Guest Logic: 执行 WASM 业务逻辑，WASM 会在此过程中写入新的 UI 指令
+                    if let Err(err) = e.tick_fn.call() { 
+                        log::error!("Wasm tick failed: {}", err); 
+                    }
+                    
+                    // 2. Host Process Commands: 解析刚才 WASM 写入的所有指令，更新 Taffy 树和渲染状态
+                    {
+                        // 动态获取内存句柄，应对可能发生的内存增长
+                        let mem = unsafe { &mut *e._rt.memory_mut() };
+                        if let Err(err) = process_commands(mem, e.shared_buffer_ptr, &e.shared_state) {
+                            log::error!("Failed to process commands after logic: {}", err);
+                        }
+                    }
                 }
+                
+                // 3. Host Layout & Render: 执行 Taffy 布局计算并使用 Vello 进行 GPU 渲染
                 render_frame(e, s); 
+
+                #[cfg(feature = "wasm3-support")] {
+                    // 4. Host Sync Layout: 将刚刚计算出的最终布局坐标同步回 WASM 内存，供下一帧业务逻辑读取
+                    let mem = unsafe { &mut *e._rt.memory_mut() };
+                    if let Err(err) = sync_layout_to_wasm(mem, e.shared_buffer_ptr, &e.shared_state.lock().unwrap()) {
+                        log::error!("Failed to sync layout results: {}", err);
+                    }
+                }
             }
         }
     }
