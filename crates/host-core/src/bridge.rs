@@ -1,9 +1,13 @@
 use std::collections::HashMap;
-use std::sync::{Arc, mpsc, atomic::{AtomicU64, Ordering}};
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
 use kurbo::Vec2;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use std::sync::Mutex as StdMutex;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use crate::platform::{SurfaceId, SurfaceState, SafeWindowHandle};
@@ -131,8 +135,13 @@ impl VelloHost {
                         }
                         EngineMessage::Input(event) => { inputs.push(event); }
                         EngineMessage::Suspend => { *lc = Lifecycle::Stopped; }
-                        EngineMessage::Shutdown => { return true; }
-                    }
+                        EngineMessage::Shutdown => { 
+                            let status = pollster::block_on(status_ptr.lock());
+                            if let EngineStatus::Ready(ref e) = *status {
+                                e.save_cache();
+                            }
+                            return true; 
+                        }                    }
                     false
                 };
 
@@ -314,9 +323,11 @@ impl VelloHost {
                 let nid = self.next_surface_id.fetch_add(1, Ordering::SeqCst);
                 let mut ss = SurfaceState { surface, blit_pipeline: blit_p, offscreen_texture: None, window_handle: handle };
                 render_frame(e, &mut ss);
-                
-                self.surfaces.lock().unwrap().insert(nid, ss);
-                
+
+                // 首帧渲染后保存缓存
+                e.save_cache();
+
+                self.surfaces.lock().unwrap().insert(nid, ss);                
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(tx) = &*self.command_tx.lock().unwrap() {
                     let _ = tx.send(EngineMessage::SetSurfaceActive(SurfaceId(nid)));

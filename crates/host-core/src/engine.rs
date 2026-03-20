@@ -1,8 +1,6 @@
 use std::sync::{Arc, Mutex};
 use vello::{Renderer, RendererOptions, util::RenderContext};
 use crate::state::SharedState;
-use std::sync::atomic::AtomicBool;
-use std::num::NonZeroUsize;
 
 pub struct EngineState { 
     pub context: RenderContext, 
@@ -15,14 +13,29 @@ pub struct EngineState {
     pub blit_bind_group_layout: vello::wgpu::BindGroupLayout, 
     pub sampler: vello::wgpu::Sampler, 
     pub blit_shader: vello::wgpu::ShaderModule,
-    pub cache_saved: AtomicBool,
+    pub cache_saved: std::sync::atomic::AtomicBool,
+    pub pipeline_cache: Option<vello::wgpu::PipelineCache>,
+    pub cache_path: Option<String>,
 }
 
 unsafe impl Send for EngineState {}
 unsafe impl Sync for EngineState {}
 
 impl EngineState {
-    pub fn save_cache(&self) {}
+    pub fn save_cache(&self) {
+        if self.cache_saved.load(std::sync::atomic::Ordering::SeqCst) { return; }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(cache), Some(path)) = (&self.pipeline_cache, &self.cache_path) {
+            if let Some(data) = cache.get_data() {
+                if let Err(e) = std::fs::write(path, &data) {
+                    log::error!("Engine: Failed to save pipeline cache: {}", e);
+                } else {
+                    log::info!("Engine: Pipeline cache saved to {} ({} bytes)", path, data.len());
+                    self.cache_saved.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+    }
 }
 
 pub async fn setup_engine(_ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -> anyhow::Result<EngineState> {
@@ -62,12 +75,42 @@ pub async fn setup_engine(_ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -
         ..Default::default() 
     });
 
-    // 关键修复：强制将并行初始化线程数设为 1
-    log::info!("Engine: Initializing Renderer with serial shader compilation...");
+    #[cfg(not(target_arch = "wasm32"))]
+    let cache_path = Some(format!("{}/vello_v1.cache", _ddir));
+    #[cfg(target_arch = "wasm32")]
+    let cache_path: Option<String> = None;
+
+    let cache_data = cache_path.as_ref().and_then(|path| std::fs::read(path).ok());
+    if cache_data.is_some() {
+        log::info!("Engine: Loading pipeline cache...");
+    }
+
+    // Only create pipeline cache if the feature is enabled on the device
+    // In wgpu 27.x, this feature must be requested during device creation
+    let pipeline_cache = if dev.features().contains(vello::wgpu::Features::PIPELINE_CACHE) {
+        Some(unsafe {
+            dev.create_pipeline_cache(&vello::wgpu::PipelineCacheDescriptor {
+                label: Some("Vello Pipeline Cache"),
+                data: cache_data.as_deref(),
+                fallback: true,
+            })
+        })
+    } else {
+        log::warn!("Engine: PIPELINE_CACHE feature not enabled on device, skipping cache.");
+        None
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let num_threads = std::thread::available_parallelism().ok();
+    #[cfg(target_arch = "wasm32")]
+    let num_threads = None;
+
+    log::info!("Engine: Initializing Renderer with {:?} threads...", num_threads);
+    
     let renderer = Renderer::new(dev, RendererOptions { 
         antialiasing_support: vello::AaSupport::all(), 
-        pipeline_cache: None, 
-        num_init_threads: NonZeroUsize::new(1), 
+        pipeline_cache: pipeline_cache.clone(), 
+        num_init_threads: num_threads, 
         use_cpu: false 
     }).map_err(|e| anyhow::anyhow!("Failed to create renderer: {}", e))?;
 
@@ -109,7 +152,9 @@ pub async fn setup_engine(_ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -
             tick_fn: unsafe { std::mem::transmute(tick_fn) }, 
             on_click_fn: unsafe { std::mem::transmute(on_click_fn) }, 
             _rt: rt, shared_buffer_ptr: bptr, blit_bind_group_layout: blit_bl, sampler, blit_shader,
-            cache_saved: AtomicBool::new(false),
+            cache_saved: std::sync::atomic::AtomicBool::new(false),
+            pipeline_cache,
+            cache_path: cache_path,
         })
     }
 
@@ -117,7 +162,9 @@ pub async fn setup_engine(_ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -
     {
         Ok(EngineState { 
             context, renderer, shared_state, blit_bind_group_layout: blit_bl, sampler, blit_shader,
-            cache_saved: AtomicBool::new(false),
+            cache_saved: std::sync::atomic::AtomicBool::new(false),
+            pipeline_cache,
+            cache_path: cache_path,
         })
     }
 }
