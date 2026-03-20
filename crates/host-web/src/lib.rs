@@ -29,10 +29,12 @@ impl WebHost {
         s.set_property("pointer-events", "none")?;
         canvas.parent_element().unwrap().append_child(&semantics_root)?;
 
-        // 初始化渲染，传入 Canvas 作为 SurfaceTarget
+        // 1. 异步加载引擎 (在 Web 上这会启动 spawn_local)
+        host.prepare_engine_async(".".to_string()).await;
+
+        // 2. 初始化渲染，传入 Canvas 作为 SurfaceTarget
         host.setup(
             vello::wgpu::SurfaceTarget::Canvas(canvas.clone()),
-            ".".to_string(), // data_dir
             canvas.width(),
             canvas.height(),
             None
@@ -40,8 +42,8 @@ impl WebHost {
 
         let font_data = load_font(font_url).await?;
         // 设置字体
-        if let Some(s) = &mut *host.get_state_mut() {
-            s.shared_state.lock().unwrap().set_font_data(font_data);
+        if let Some(ss) = host.get_shared_state() {
+            ss.lock().unwrap().set_font_data(font_data);
         }
 
         Ok(WebHost {
@@ -52,8 +54,8 @@ impl WebHost {
     }
 
     pub fn render(&mut self) {
+        // 在 Web 上，我们依然手动调用 tick()
         self.host.tick();
-        // 如果是 Web 原生模式（无 Wasm Guest），仍可同步语义层
         self.sync_semantics();
     }
 
@@ -61,47 +63,35 @@ impl WebHost {
     pub fn wasm_sync_tick(&mut self, guest_memory: &js_sys::Uint8Array, buffer_ptr: u32) {
         let mut mem = guest_memory.to_vec();
         
-        // 1. 先提取 shared_state 句柄，立即释放 host 锁
-        let ss_arc = {
-            let guard = self.host.get_state();
-            guard.as_ref().map(|e| e.shared_state.clone())
-        };
-
-        if let Some(ss) = ss_arc {
-            // 2. 处理 Guest 指令 (内部会锁 ss)
+        if let Some(ss) = self.host.get_shared_state() {
+            // 处理 Guest 指令
             let _ = host_core::process_commands(&mut mem, buffer_ptr, &ss);
             
-            // 3. 宿主渲染及布局计算 (内部会锁 host.engine 和 ss)
+            // 执行渲染
             self.host.tick();
             
-            // 4. 将新布局同步回 Guest 内存 (此时 tick 已完成，安全锁 ss)
+            // 将新布局同步回 Guest 内存
             let _ = host_core::sync_layout_to_wasm(&mut mem, buffer_ptr, &ss.lock().unwrap());
         }
         
-        // 5. 写回 Guest 内存
         guest_memory.copy_from(&mem);
     }
 
     fn sync_semantics(&mut self) {
-        let rid = {
-            let s_opt = &*self.host.get_state();
-            if let Some(s) = s_opt {
-                s.shared_state.lock().unwrap().root_id
-            } else {
-                None
-            }
-        };
-
+        let rid = self.host.get_shared_state().and_then(|ss| ss.lock().unwrap().root_id);
         if let Some(rid) = rid {
             self.sync_node_dom_recursive(rid, Vec2::ZERO);
         }
     }
 
     fn sync_node_dom_recursive(&mut self, id: u32, parent_pos: Vec2) {
+        let ss = match self.host.get_shared_state() {
+            Some(s) => s,
+            None => return,
+        };
+
         let (node_data, global_pos) = {
-            let s_opt = &*self.host.get_state();
-            let s = s_opt.as_ref().unwrap();
-            let shared_guard = s.shared_state.lock().unwrap();
+            let shared_guard = ss.lock().unwrap();
             let node = shared_guard.nodes.get(&id).unwrap();
             let layout = shared_guard.taffy.layout(node.taffy_node).unwrap();
             let global_pos = parent_pos + Vec2::new(layout.location.x as f64, layout.location.y as f64);
@@ -161,9 +151,9 @@ impl WebHost {
     }
 
     pub fn handle_click(&self, x: f64, y: f64) -> Option<u32> {
-        if let Some(s) = &*self.host.get_state() {
+        if let Some(ss) = self.host.get_shared_state() {
             let mouse_pos = Vec2::new(x, y);
-            let s_guard = s.shared_state.lock().unwrap();
+            let s_guard = ss.lock().unwrap();
             return s_guard.root_id.and_then(|rid| {
                 hit_test_recursive(rid, mouse_pos, &s_guard.nodes, &s_guard.taffy, Vec2::ZERO, &s_guard.click_listeners)
             });
@@ -172,15 +162,14 @@ impl WebHost {
     }
 
     pub fn apply_commands(&self, command_data: &[u8]) {
-        if let Some(s) = &*self.host.get_state() {
-            let _ = host_core::process_command_stream(&s.shared_state, command_data);
+        if let Some(ss) = self.host.get_shared_state() {
+            let _ = host_core::process_command_stream(&ss, command_data);
         }
     }
 
     pub fn force_layout(&self, width: u32, height: u32) {
-        let e_guard = self.host.get_state();
-        if let Some(e) = &*e_guard {
-            let mut g = e.shared_state.lock().unwrap();
+        if let Some(ss) = self.host.get_shared_state() {
+            let mut g = ss.lock().unwrap();
             if let Some(rid) = g.root_id {
                 if let Some(rn) = g.nodes.get(&rid).map(|n| n.taffy_node) {
                     let _ = g.taffy.compute_layout(rn, taffy::prelude::Size {
@@ -194,8 +183,8 @@ impl WebHost {
 
     pub fn get_layout_buffer(&self) -> Vec<f32> {
         let mut results = Vec::new();
-        if let Some(e) = &*self.host.get_state() {
-            let g = e.shared_state.lock().unwrap();
+        if let Some(ss) = self.host.get_shared_state() {
+            let g = ss.lock().unwrap();
             for id in 0..shared::MAX_NODES as u32 {
                 if let Some(node) = g.nodes.get(&id) {
                     let layout = g.taffy.layout(node.taffy_node).unwrap();

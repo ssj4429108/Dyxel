@@ -10,15 +10,15 @@ class VelloEngine {
 
     fun setup(context: android.content.Context) {
         initLogger()
-        // 1. 立即同步解压资产，确保文件存在
+        // 1. 同步解压资产
         extractAssets(context)
         
         // 2. 异步预热引擎
         scope.launch {
             try {
-                host.prepareEngine(context.filesDir.absolutePath)
+                host.prepareEngineAsync(context.filesDir.absolutePath)
             } catch (e: Exception) {
-                android.util.Log.e("VelloEngine", "Failed to prepare engine", e)
+                android.util.Log.e("VelloEngine", "Failed to start background engine preparation", e)
             }
         }
     }

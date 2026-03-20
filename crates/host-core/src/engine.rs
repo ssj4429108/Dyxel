@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 use vello::{Renderer, RendererOptions, util::RenderContext};
 use crate::state::SharedState;
+use std::sync::atomic::AtomicBool;
+use std::num::NonZeroUsize;
 
 pub struct EngineState { 
     pub context: RenderContext, 
@@ -13,19 +15,26 @@ pub struct EngineState {
     pub blit_bind_group_layout: vello::wgpu::BindGroupLayout, 
     pub sampler: vello::wgpu::Sampler, 
     pub blit_shader: vello::wgpu::ShaderModule,
+    pub cache_saved: AtomicBool,
 }
 
 unsafe impl Send for EngineState {}
 unsafe impl Sync for EngineState {}
 
+impl EngineState {
+    pub fn save_cache(&self) {}
+}
+
 pub async fn setup_engine(_ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -> anyhow::Result<EngineState> {
     let mut context = RenderContext::new(); 
     let dev_id = context.device(None).await.ok_or_else(|| anyhow::anyhow!("No device found"))?;
     let dev = &context.devices[dev_id].device;
+
     let blit_shader = dev.create_shader_module(vello::wgpu::ShaderModuleDescriptor { 
         label: Some("Blit Shader"), 
         source: vello::wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()) 
     });
+
     let blit_bl = dev.create_bind_group_layout(&vello::wgpu::BindGroupLayoutDescriptor { 
         label: None, 
         entries: &[
@@ -52,16 +61,20 @@ pub async fn setup_engine(_ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -
         min_filter: vello::wgpu::FilterMode::Linear, 
         ..Default::default() 
     });
+
+    // 关键修复：强制将并行初始化线程数设为 1
+    log::info!("Engine: Initializing Renderer with serial shader compilation...");
     let renderer = Renderer::new(dev, RendererOptions { 
         antialiasing_support: vello::AaSupport::all(), 
         pipeline_cache: None, 
-        num_init_threads: None, 
+        num_init_threads: NonZeroUsize::new(1), 
         use_cpu: false 
     }).map_err(|e| anyhow::anyhow!("Failed to create renderer: {}", e))?;
-    
-    let state = Arc::new(Mutex::new(SharedState::new()));
-    
-    #[cfg(feature = "wasm3-support")] {
+
+    let shared_state = Arc::new(Mutex::new(SharedState::new()));
+
+    #[cfg(feature = "wasm3-support")]
+    {
         use crate::runtime::process_commands;
         let wasm_path = format!("{}/guest.wasm", _ddir); 
         let wasm = std::fs::read(&wasm_path).or_else(|_| std::fs::read("guest.wasm")).map_err(|e| anyhow::anyhow!("Failed to read WASM: {}", e))?;
@@ -70,7 +83,7 @@ pub async fn setup_engine(_ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -
         let mut module = rt.load_module(env.parse_module(wasm).map_err(|e| anyhow::anyhow!("Parse failed: {}", e))?).map_err(|e| anyhow::anyhow!("Load failed: {}", e))?;
         let bptr = module.find_function::<(), u32>("vello_get_shared_buffer_ptr").map_err(|e| anyhow::anyhow!("Func not found: {}", e))?.call().map_err(|e| anyhow::anyhow!("Call failed: {}", e))?;
         
-        let s_inner = state.clone();
+        let s_inner = shared_state.clone();
         let _ = module.link_closure("env", "ui_force_layout", move |ctx, ()| { 
             let mem = unsafe { &mut *ctx.memory_mut() }; 
             let _ = process_commands(mem, bptr, &s_inner); 
@@ -89,22 +102,22 @@ pub async fn setup_engine(_ddir: String, _es: Arc<Mutex<Option<EngineState>>>) -
         
         let _ = main_fn.call(); 
         let memory = unsafe { &mut *rt.memory_mut() }; 
-        let _ = process_commands(memory, bptr, &state);
+        let _ = process_commands(memory, bptr, &shared_state);
         
         Ok(EngineState { 
-            context, 
-            renderer, 
-            shared_state: state, 
+            context, renderer, shared_state, 
             tick_fn: unsafe { std::mem::transmute(tick_fn) }, 
             on_click_fn: unsafe { std::mem::transmute(on_click_fn) }, 
-            _rt: rt, 
-            shared_buffer_ptr: bptr, 
-            blit_bind_group_layout: blit_bl, 
-            sampler, 
-            blit_shader 
+            _rt: rt, shared_buffer_ptr: bptr, blit_bind_group_layout: blit_bl, sampler, blit_shader,
+            cache_saved: AtomicBool::new(false),
         })
     }
-    #[cfg(not(feature = "wasm3-support"))] { 
-        Ok(EngineState { context, renderer, shared_state: state, blit_bind_group_layout: blit_bl, sampler, blit_shader }) 
+
+    #[cfg(not(feature = "wasm3-support"))]
+    {
+        Ok(EngineState { 
+            context, renderer, shared_state, blit_bind_group_layout: blit_bl, sampler, blit_shader,
+            cache_saved: AtomicBool::new(false),
+        })
     }
 }

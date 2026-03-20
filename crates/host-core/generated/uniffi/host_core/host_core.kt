@@ -737,6 +737,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -764,13 +768,17 @@ internal interface UniffiLib : Library {
     ): Pointer
     fun uniffi_host_core_fn_method_vellohost_init_native(`ptr`: Pointer,`surfacePtr`: Long,`ddir`: RustBuffer.ByValue,`w`: Int,`h`: Int,
     ): Long
+    fun uniffi_host_core_fn_method_vellohost_is_engine_ready(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     fun uniffi_host_core_fn_method_vellohost_is_initialized(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_host_core_fn_method_vellohost_on_touch(`ptr`: Pointer,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_host_core_fn_method_vellohost_prepare_engine(`ptr`: Pointer,`ddir`: RustBuffer.ByValue,
+    fun uniffi_host_core_fn_method_vellohost_prepare_engine_async(`ptr`: Pointer,`ddir`: RustBuffer.ByValue,
     ): Long
     fun uniffi_host_core_fn_method_vellohost_resize_native(`ptr`: Pointer,`width`: Int,`height`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_host_core_fn_method_vellohost_shutdown(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_host_core_fn_method_vellohost_stop_native(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -890,13 +898,17 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_host_core_checksum_method_vellohost_init_native(
     ): Short
+    fun uniffi_host_core_checksum_method_vellohost_is_engine_ready(
+    ): Short
     fun uniffi_host_core_checksum_method_vellohost_is_initialized(
     ): Short
     fun uniffi_host_core_checksum_method_vellohost_on_touch(
     ): Short
-    fun uniffi_host_core_checksum_method_vellohost_prepare_engine(
+    fun uniffi_host_core_checksum_method_vellohost_prepare_engine_async(
     ): Short
     fun uniffi_host_core_checksum_method_vellohost_resize_native(
+    ): Short
+    fun uniffi_host_core_checksum_method_vellohost_shutdown(
     ): Short
     fun uniffi_host_core_checksum_method_vellohost_stop_native(
     ): Short
@@ -921,7 +933,10 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_host_core_checksum_method_vellohost_init_native() != 61492.toShort()) {
+    if (lib.uniffi_host_core_checksum_method_vellohost_init_native() != 30504.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_host_core_checksum_method_vellohost_is_engine_ready() != 4095.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_host_core_checksum_method_vellohost_is_initialized() != 21838.toShort()) {
@@ -930,10 +945,13 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_host_core_checksum_method_vellohost_on_touch() != 50756.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_host_core_checksum_method_vellohost_prepare_engine() != 48243.toShort()) {
+    if (lib.uniffi_host_core_checksum_method_vellohost_prepare_engine_async() != 17204.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_host_core_checksum_method_vellohost_resize_native() != 47159.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_host_core_checksum_method_vellohost_shutdown() != 49917.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_host_core_checksum_method_vellohost_stop_native() != 2718.toShort()) {
@@ -1347,13 +1365,17 @@ public interface VelloHostInterface {
     
     suspend fun `initNative`(`surfacePtr`: kotlin.ULong, `ddir`: kotlin.String, `w`: kotlin.UInt, `h`: kotlin.UInt)
     
+    fun `isEngineReady`(): kotlin.Boolean
+    
     fun `isInitialized`(): kotlin.Boolean
     
     fun `onTouch`(`x`: kotlin.Float, `y`: kotlin.Float)
     
-    suspend fun `prepareEngine`(`ddir`: kotlin.String)
+    suspend fun `prepareEngineAsync`(`ddir`: kotlin.String)
     
     fun `resizeNative`(`width`: kotlin.UInt, `height`: kotlin.UInt)
+    
+    fun `shutdown`()
     
     fun `stopNative`()
     
@@ -1471,6 +1493,18 @@ open class VelloHost: Disposable, AutoCloseable, VelloHostInterface {
     )
     }
 
+    override fun `isEngineReady`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_host_core_fn_method_vellohost_is_engine_ready(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
     override fun `isInitialized`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithPointer {
@@ -1496,10 +1530,10 @@ open class VelloHost: Disposable, AutoCloseable, VelloHostInterface {
 
     
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `prepareEngine`(`ddir`: kotlin.String) {
+    override suspend fun `prepareEngineAsync`(`ddir`: kotlin.String) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
-            UniffiLib.INSTANCE.uniffi_host_core_fn_method_vellohost_prepare_engine(
+            UniffiLib.INSTANCE.uniffi_host_core_fn_method_vellohost_prepare_engine_async(
                 thisPtr,
                 FfiConverterString.lower(`ddir`),
             )
@@ -1521,6 +1555,17 @@ open class VelloHost: Disposable, AutoCloseable, VelloHostInterface {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_host_core_fn_method_vellohost_resize_native(
         it, FfiConverterUInt.lower(`width`),FfiConverterUInt.lower(`height`),_status)
+}
+    }
+    
+    
+
+    override fun `shutdown`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_host_core_fn_method_vellohost_shutdown(
+        it, _status)
 }
     }
     

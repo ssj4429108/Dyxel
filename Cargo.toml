@@ -14,7 +14,7 @@ taffy = "0.9"
 vello = "0.7"
 wasm3 = { path = "crates/wasm3", default-features = false, features = ["build-bindgen", "std", "use-32bit-slots"] }
 # 锁定版本
-wgpu = "0.20"
+wgpu = { version = "27.0.1", features = ["spirv"] }
 wasm-bindgen = "0.2.91"
 web-sys = "0.3.68"
 

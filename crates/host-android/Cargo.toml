@@ -9,7 +9,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 host-core = { path = "../host-core", features = ["wasm3-support"] }
 jni = "0.21"
-ndk-sys = "0.4"
+ndk-sys = "0.6"
 android_logger = "0.13"
 log = "0.4"
 
