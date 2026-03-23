@@ -1,15 +1,15 @@
 #!/bin/bash
 set -e
 
-# 1. 进入项目根目录
+# 1. Enter project root directory
 cd "$(dirname "$0")"
 
-# 2. 构建渲染引擎 (host-web)
-# 使用 wasm-pack 构建 web 目标，输出到 web/pkg
-wasm-pack build crates/host-web --target web --out-dir ../../web/pkg
+# 2. Build rendering engine (dyxel-web)
+# Use wasm-pack to build web target, output to web/pkg
+wasm-pack build ./web --target web --out-dir ./pkg --out-name dyxel_web
 
-# 3. 构建应用业务 (sample)
-# 这是一个独立的 WASM 模块
+# 3. Build application business logic (sample)
+# This is a standalone WASM module
 cargo build --target wasm32-unknown-unknown -p sample --release
 cp target/wasm32-unknown-unknown/release/sample.wasm web/sample.wasm
 

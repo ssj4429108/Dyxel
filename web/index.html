@@ -2,76 +2,113 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>VelloView Engine</title>
+    <title>Dyxel Engine</title>
     <style>
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #1e1e1e; }
         canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
     </style>
 </head>
 <body>
-    <canvas id="vello-canvas"></canvas>
+    <canvas id="dyxel-canvas"></canvas>
     <script type="module">
-        import init, { WebHost } from './pkg/host_web.js';
+        import init, { WebHost } from './pkg/dyxel_web.js';
 
         async function run() {
             await init();
-            const canvas = document.getElementById('vello-canvas');
+            const canvas = document.getElementById('dyxel-canvas');
             const dpr = window.devicePixelRatio || 1;
             canvas.width = window.innerWidth * dpr;
             canvas.height = window.innerHeight * dpr;
             
             console.log("Creating WebHost...");
-            const fontUrl = "https://raw.githubusercontent.com/googlefonts/roboto/main/src/hinted/Roboto-Regular.ttf";
-            const host = await WebHost.create(canvas, fontUrl);
+            const host = await new WebHost(canvas);
             console.log("WebHost Created Successfully.");
 
-            let wasmInstance;
-            const MAX_COMMAND_BYTES = 1024 * 64;
-
-            const importObject = {
-                env: {
-                    ui_force_layout: () => {
-                        const memory = new Uint8Array(wasmInstance.exports.memory.buffer);
-                        const bptr = wasmInstance.exports.vello_get_shared_buffer_ptr();
-                        host.wasm_sync_tick(memory, bptr);
-                    }
-                }
-            };
-
-            console.log("Loading sample.wasm...");
-            const response = await fetch('sample.wasm');
-            const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), importObject);
-            wasmInstance = instance;
+            // Try to load business logic WASM
+            let wasmInstance = null;
+            let sharedBufferPtr = 0;
             
-            console.log("sample.wasm Instantiated. Running main()...");
-            instance.exports.main();
+            try {
+                console.log("Loading business WASM...");
+                const wasmResponse = await fetch('sample.wasm');
+                if (!wasmResponse.ok) {
+                    throw new Error(`Failed to fetch: ${wasmResponse.status}`);
+                }
+                const wasmBytes = await wasmResponse.arrayBuffer();
+                
+                const wasmMemory = new WebAssembly.Memory({ initial: 10, maximum: 100 });
+                
+                const importObject = {
+                    env: {
+                        memory: wasmMemory,
+                        ui_force_layout: () => {}
+                    }
+                };
+                
+                const { instance } = await WebAssembly.instantiate(wasmBytes, importObject);
+                wasmInstance = instance;
+                
+                // Check if it's a compatible WASM (has dyxel exports)
+                const getBufferPtr = wasmInstance.exports.dyxel_get_shared_buffer_ptr || wasmInstance.exports.vello_get_shared_buffer_ptr;
+                if (getBufferPtr) {
+                    sharedBufferPtr = getBufferPtr();
+                    console.log("Shared buffer ptr:", sharedBufferPtr);
+                    
+                    if (wasmInstance.exports.main) {
+                        wasmInstance.exports.main();
+                    }
+                    console.log("Business WASM loaded.");
+                } else {
+                    console.log("WASM loaded but no dyxel interface found.");
+                    console.log("Available exports:", Object.keys(wasmInstance.exports));
+                    wasmInstance = null;
+                }
+            } catch (e) {
+                console.warn("Failed to load business WASM:", e);
+                console.log("Running in demo mode without business logic.");
+            }
 
+            // Render loop
             function render() {
                 if (wasmInstance) {
-                    const memory = new Uint8Array(wasmInstance.exports.memory.buffer);
-                    const bptr = wasmInstance.exports.vello_get_shared_buffer_ptr();
-                    host.wasm_sync_tick(memory, bptr);
-                    wasmInstance.exports.guest_tick();
+                    // Call guest tick
+                    const tickFn = wasmInstance.exports.guest_tick || wasmInstance.exports.vello_tick || wasmInstance.exports.dyxel_tick;
+                    if (tickFn) {
+                        tickFn();
+                    }
+                    
+                    // Sync to Rust Host
+                    if (sharedBufferPtr && host.wasmSyncTick) {
+                        const memoryView = new Uint8Array(wasmInstance.exports.memory.buffer);
+                        host.wasmSyncTick(memoryView, sharedBufferPtr);
+                    }
                 } else {
-                    host.render();
+                    // Demo mode: call tick directly
+                    host.tick();
                 }
+                
                 requestAnimationFrame(render);
             }
             requestAnimationFrame(render);
 
+            // Click handler
             window.addEventListener('click', (e) => {
                 const rect = canvas.getBoundingClientRect();
                 const x = (e.clientX - rect.left) * dpr;
                 const y = (e.clientY - rect.top) * dpr;
-                const hitId = host.handle_click(x, y);
+                
+                const hitId = host.handleClick(x, y);
                 if (hitId !== undefined) {
                     console.log("Node Clicked:", hitId);
-                    instance.exports.on_node_click(hitId);
+                    const onClickFn = wasmInstance?.exports.on_node_click || wasmInstance?.exports.dyxel_on_click;
+                    if (onClickFn) {
+                        onClickFn(hitId);
+                    }
                 }
             });
         }
 
-        run();
+        run().catch(console.error);
     </script>
 </body>
 </html>

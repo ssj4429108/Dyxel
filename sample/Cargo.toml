@@ -7,5 +7,5 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-vello-view = { path = "../crates/vello-view" }
+dyxel-view = { path = "../crates/dyxel-view" }
 futures-signals = "0.3"

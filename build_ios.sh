@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# 配置参数
+# Configuration parameters
 LIB_NAME="host_core"
 OUTPUT_DIR="target/ios_dist"
 SWIFT_OUT_DIR="target/ios_dist/Swift"
@@ -18,8 +18,8 @@ cp target/wasm32-unknown-unknown/release/sample.wasm "$OUTPUT_DIR/guest.wasm"
 echo "Guest WASM copied to $OUTPUT_DIR."
 
 echo "--- 2. Building Rust Libraries for iOS ---"
-# 编译真机和模拟器架构
-# 注意：这需要安装完整的 Xcode 并在环境下运行
+# Compile device and simulator architectures
+# Note: This requires full Xcode installation and running in the environment
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
 echo "Building for aarch64-apple-ios (iPhone)..."
@@ -29,20 +29,20 @@ echo "Building for aarch64-apple-ios-sim (Simulator)..."
 cargo build -p host-core --release --target aarch64-apple-ios-sim
 
 echo "--- 3. Generating UniFFI Bindings ---"
-# 获取编译出的静态库路径
-# 我们需要生成 Swift 绑定所需的 C 头文件
+# Get the compiled static library path
+# We need to generate C header files required for Swift bindings
 LIB_PATH="target/aarch64-apple-ios/release/lib${LIB_NAME}.a"
 
 mkdir -p "$SWIFT_OUT_DIR"
-# 生成 Swift 绑定
+# Generate Swift bindings
 cargo run -p host-core --bin uniffi-bindgen generate --library "$LIB_PATH" --language swift --out-dir "$SWIFT_OUT_DIR" --no-format
 
 echo "--- 4. Creating XCFramework ---"
-# 清理旧的 XCFramework
+# Clean up old XCFramework
 rm -rf "$OUTPUT_DIR/$XCFRAMEWORK_NAME"
 
-# 创建包含真机和模拟器的 XCFramework
-# 注意：UniFFI 还会生成一个 modulemap 和头文件，需要正确打包
+# Create XCFramework containing device and simulator
+# Note: UniFFI also generates a modulemap and headers, which need to be properly packaged
 xcodebuild -create-xcframework \
     -library "target/aarch64-apple-ios/release/lib${LIB_NAME}.a" \
     -headers "$SWIFT_OUT_DIR" \

@@ -9,9 +9,9 @@ cmake_minimum_required(VERSION 3.22.1)
 # Since this is the top level CMakeLists.txt, the project name is also accessible
 # with ${CMAKE_PROJECT_NAME} (both CMake variables are in-sync within the top level
 # build script scope).
-project("vello-test")
+project("dyxel-demo")
 
-# 增加 16KB 页大小支持
+# Add 16KB page size support
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 
 # Creates and names a library, sets it as either STATIC

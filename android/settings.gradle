@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "vello-test"
+rootProject.name = "dyxel"
 include ':app'

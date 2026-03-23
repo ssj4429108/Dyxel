@@ -1,23 +1,23 @@
 #!/bin/bash
 set -e
 
-# 1. 编译 WASM 模块 (sample)
+# 1. Compile WASM module (sample)
 echo "Building sample.wasm..."
 cd sample
-# 移除显式导出，让所有 #[no_mangle] 符号自动导出
+# Remove explicit exports, let all #[no_mangle] symbols be exported automatically
 RUSTFLAGS="-C target-feature=+bulk-memory,+mutable-globals,+nontrapping-fptoint" \
 cargo build --release --target wasm32-unknown-unknown
 
-# 2. 拷贝并处理
+# 2. Copy and process
 cd ..
 mkdir -p target/mac_dist
 cp target/wasm32-unknown-unknown/release/sample.wasm target/mac_dist/guest.wasm
 
-# 3. 编译 Native Host (macOS)
-echo "Building host-mac..."
-cargo build -p host-mac --release
+# 3. Compile Native Host (macOS)
+echo "Building dyxel-mac..."
+cargo build -p dyxel-mac --release
 
-# 4. 运行
-echo "Running host-mac..."
+# 4. Run
+echo "Running dyxel-mac with RUST_LOG=info..."
 cp target/mac_dist/guest.wasm .
-./target/release/host-mac
+RUST_LOG=info ./target/release/dyxel-mac

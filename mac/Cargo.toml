@@ -1,0 +1,14 @@
+[package]
+name = "dyxel-mac"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dyxel-core = { path = "../crates/dyxel-core" }
+winit = "0.29"
+env_logger = "0.10"
+kurbo = "0.13"
+pollster = "0.3"
+anyhow = "1.0"
+log = "0.4"
+vello = "0.7"

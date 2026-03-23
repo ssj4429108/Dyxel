@@ -1,19 +1,30 @@
 [workspace]
-members = ["crates/host-mac", "crates/host-core", "crates/host-web", "sample", "crates/shared", "crates/vello-view", "crates/wasm3", "crates/host-android"]
+members = [
+    "crates/dyxel-core",
+    "sample",
+    "mac",
+    "web",
+    "crates/dyxel-shared",
+    "crates/dyxel-view",
+    "crates/wasm3",
+    "crates/dyxel-render-api",
+    "crates/dyxel-render-impeller",
+    "crates/dyxel-render-vello"
+]
 resolver = "2"
 
 [workspace.dependencies]
 bincode = "=1.3.3"
 serde = { version = "1.0", features = ["derive"] }
-shared = { path = "crates/shared" }
-vello-view = { path = "crates/vello-view" }
-host-core = { path = "crates/host-core" }
+dyxel-shared = { path = "crates/dyxel-shared" }
+dyxel-view = { path = "crates/dyxel-view" }
+dyxel-core = { path = "crates/dyxel-core" }
 futures-signals = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 taffy = "0.9"
 vello = "0.7"
 wasm3 = { path = "crates/wasm3", default-features = false, features = ["build-bindgen", "std", "use-32bit-slots"] }
-# 锁定版本
+# Pin version
 wgpu = { version = "27.0.1", features = ["spirv"] }
 wasm-bindgen = "0.2.91"
 web-sys = "0.3.68"

@@ -1,0 +1,27 @@
+[package]
+name = "dyxel-render-vello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dyxel-render-api = { path = "../dyxel-render-api" }
+dyxel-shared = { path = "../dyxel-shared" }
+vello = { workspace = true, features = ["wgpu"] }
+anyhow = "1.0"
+log = "0.4"
+kurbo = "0.13"
+peniko = "0.6"
+taffy = "0.9"
+pollster = "0.3"
+wgpu = { workspace = true, features = ["spirv"] }
+bytemuck = "1.12"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", features = ["sync"] }
+
+[build-dependencies]
+naga = { version = "27.0.3", features = ["wgsl-in", "spv-out"] }
+bytemuck = "1.12"

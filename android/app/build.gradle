@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'com.vello.android'
+    namespace 'com.dyxel.android'
     compileSdk 36
     ndkVersion "27.1.12297006"
     defaultConfig {
-        applicationId "com.vello.android"
+        applicationId "com.dyxel.android"
         minSdk 24
         targetSdk 36
         versionCode 1

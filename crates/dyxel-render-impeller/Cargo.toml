@@ -1,0 +1,32 @@
+[package]
+name = "dyxel-render-impeller"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dyxel-render-api = { path = "../dyxel-render-api" }
+dyxel-shared = { path = "../dyxel-shared" }
+vello = { workspace = true, features = ["wgpu"] }
+anyhow = "1.0"
+log = "0.4"
+impellers = { version = "0.4.1" }
+kurbo = "0.13"
+taffy = "0.9"
+pollster = "0.3"
+raw-window-handle = "0.6"
+
+[features]
+prebuilt_libs = ["impellers/prebuilt_libs"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.29"
+cocoa = "0.25"
+objc = "0.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = "0.6"
+ndk = "0.8"
+ash = "0.38"
+# For Vulkan library loading
+libloading = "0.8"
+ash-window = "0.13"

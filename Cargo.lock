@@ -193,6 +193,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash-window"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52bca67b61cb81e5553babde81b8211f713cb6db79766f80168f3e5f40ea6c82"
+dependencies = [
+ "ash",
+ "raw-window-handle",
+ "raw-window-metal",
+]
+
+[[package]]
 name = "askama"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -299,27 +310,12 @@ dependencies = [
 
 [[package]]
 name = "bit-set"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
-dependencies = [
- "bit-vec 0.6.3",
-]
-
-[[package]]
-name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
 dependencies = [
- "bit-vec 0.8.0",
+ "bit-vec",
 ]
-
-[[package]]
-name = "bit-vec"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
 name = "bit-vec"
@@ -566,13 +562,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "codespan-reporting"
-version = "0.11.1"
+name = "cocoa"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3538270d33cc669650c4b093848450d380def10c331d38c768e34cac80576e6e"
+checksum = "f6140449f97a6e97f9511815c5632d84c8aacf8ac271ad77c559218161a1373c"
 dependencies = [
- "termcolor",
- "unicode-width 0.1.14",
+ "bitflags 1.3.2",
+ "block",
+ "cocoa-foundation",
+ "core-foundation 0.9.4",
+ "core-graphics",
+ "foreign-types",
+ "libc",
+ "objc",
+]
+
+[[package]]
+name = "cocoa-foundation"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c6234cbb2e4c785b456c0644748b1ac416dd045799740356f8363dfe00c93f7"
+dependencies = [
+ "bitflags 1.3.2",
+ "block",
+ "core-foundation 0.9.4",
+ "core-graphics-types 0.1.3",
+ "libc",
+ "objc",
 ]
 
 [[package]]
@@ -768,6 +784,141 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "dyxel-core"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
+ "anyhow",
+ "bytemuck",
+ "console_log",
+ "dyxel-render-api",
+ "dyxel-render-vello",
+ "dyxel-shared",
+ "gloo-timers",
+ "jni",
+ "kurbo",
+ "log",
+ "naga",
+ "ndk-sys 0.6.0+11769913",
+ "peniko",
+ "pollster",
+ "raw-window-handle",
+ "skrifa 0.22.3",
+ "taffy",
+ "tokio",
+ "uniffi",
+ "vello",
+ "wasm-bindgen-futures",
+ "wasm3",
+ "web-sys",
+ "wgpu",
+]
+
+[[package]]
+name = "dyxel-mac"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dyxel-core",
+ "env_logger 0.10.2",
+ "kurbo",
+ "log",
+ "pollster",
+ "vello",
+ "winit",
+]
+
+[[package]]
+name = "dyxel-render-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dyxel-shared",
+ "vello",
+]
+
+[[package]]
+name = "dyxel-render-impeller"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "ash-window",
+ "cocoa",
+ "dyxel-render-api",
+ "dyxel-shared",
+ "impellers",
+ "kurbo",
+ "libloading",
+ "log",
+ "metal 0.29.0",
+ "ndk",
+ "ndk-sys 0.6.0+11769913",
+ "objc",
+ "pollster",
+ "raw-window-handle",
+ "taffy",
+ "vello",
+]
+
+[[package]]
+name = "dyxel-render-vello"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "dyxel-render-api",
+ "dyxel-shared",
+ "kurbo",
+ "log",
+ "naga",
+ "peniko",
+ "pollster",
+ "taffy",
+ "tokio",
+ "vello",
+ "wgpu",
+]
+
+[[package]]
+name = "dyxel-shared"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "peniko",
+ "serde",
+ "taffy",
+]
+
+[[package]]
+name = "dyxel-view"
+version = "0.1.0"
+dependencies = [
+ "dyxel-shared",
+ "futures-signals",
+ "futures-util",
+]
+
+[[package]]
+name = "dyxel-web"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "dyxel-core",
+ "dyxel-render-api",
+ "dyxel-shared",
+ "futures-util",
+ "js-sys",
+ "kurbo",
+ "log",
+ "vello",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-logger",
+ "web-sys",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -821,6 +972,7 @@ version = "0.22.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df61bf483e837f88d5c2291dcf55c67be7e676b3a51acc48db3a7b163b91ed63"
 dependencies = [
+ "bytemuck",
  "num-traits",
 ]
 
@@ -1235,82 +1387,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "host-android"
-version = "0.1.0"
-dependencies = [
- "android_logger",
- "host-core",
- "jni",
- "log",
- "ndk-context",
- "ndk-sys 0.6.0+11769913",
- "raw-window-handle 0.5.2",
- "uniffi",
-]
-
-[[package]]
-name = "host-core"
-version = "0.1.0"
-dependencies = [
- "android_logger",
- "anyhow",
- "console_log",
- "gloo-timers",
- "kurbo",
- "log",
- "naga 0.20.0",
- "ndk-sys 0.6.0+11769913",
- "peniko",
- "pollster",
- "raw-window-handle 0.6.2",
- "shared",
- "skrifa 0.22.3",
- "taffy",
- "tokio",
- "uniffi",
- "vello",
- "wasm-bindgen-futures",
- "wasm3",
- "web-sys",
- "wgpu",
-]
-
-[[package]]
-name = "host-mac"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger 0.10.2",
- "host-core",
- "kurbo",
- "log",
- "pollster",
- "shared",
- "taffy",
- "tokio",
- "vello",
- "wasm3",
- "winit",
-]
-
-[[package]]
-name = "host-web"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "console_error_panic_hook",
- "host-core",
- "js-sys",
- "kurbo",
- "shared",
- "taffy",
- "vello",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
 name = "humantime"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1332,6 +1408,17 @@ name = "id-arena"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
+
+[[package]]
+name = "impellers"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba4e386594bea31c8979276ad90557420ee69080ada9475f0453ba1e149f028e"
+dependencies = [
+ "bitflags 2.11.0",
+ "bytemuck",
+ "euclid",
+]
 
 [[package]]
 name = "indexmap"
@@ -1555,6 +1642,21 @@ dependencies = [
 
 [[package]]
 name = "metal"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ecfd3296f8c56b7c1f6fbac3c71cefa9d78ce009850c45000015f206dc7fa21"
+dependencies = [
+ "bitflags 2.11.0",
+ "block",
+ "core-graphics-types 0.1.3",
+ "foreign-types",
+ "log",
+ "objc",
+ "paste",
+]
+
+[[package]]
+name = "metal"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00c15a6f673ff72ddcc22394663290f870fb224c1bfce55734a75c414150e605"
@@ -1602,37 +1704,16 @@ dependencies = [
 
 [[package]]
 name = "naga"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e536ae46fcab0876853bd4a632ede5df4b1c2527a58f6c5a4150fe86be858231"
-dependencies = [
- "arrayvec",
- "bit-set 0.5.3",
- "bitflags 2.11.0",
- "codespan-reporting 0.11.1",
- "hexf-parse",
- "indexmap",
- "log",
- "num-traits",
- "rustc-hash",
- "spirv",
- "termcolor",
- "thiserror 1.0.69",
- "unicode-xid",
-]
-
-[[package]]
-name = "naga"
 version = "27.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "066cf25f0e8b11ee0df221219010f213ad429855f57c494f995590c861a9a7d8"
 dependencies = [
  "arrayvec",
- "bit-set 0.8.0",
+ "bit-set",
  "bitflags 2.11.0",
  "cfg-if",
  "cfg_aliases 0.2.1",
- "codespan-reporting 0.12.0",
+ "codespan-reporting",
  "half",
  "hashbrown 0.16.1",
  "hexf-parse",
@@ -1659,7 +1740,7 @@ dependencies = [
  "log",
  "ndk-sys 0.5.0+25.2.9519653",
  "num_enum",
- "raw-window-handle 0.6.2",
+ "raw-window-handle",
  "thiserror 1.0.69",
 ]
 
@@ -2028,15 +2109,21 @@ checksum = "ca45419789ae5a7899559e9512e58ca889e41f04f1f2445e9f4b290ceccd1d08"
 
 [[package]]
 name = "raw-window-handle"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ff9a1f06a88b01621b7ae906ef0211290d1c8a168a15542486a8f61c0833b9"
-
-[[package]]
-name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+
+[[package]]
+name = "raw-window-metal"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76e8caa82e31bb98fee12fa8f051c94a6aa36b07cddb03f0d4fc558988360ff1"
+dependencies = [
+ "cocoa",
+ "core-graphics",
+ "objc",
+ "raw-window-handle",
+]
 
 [[package]]
 name = "read-fonts"
@@ -2171,8 +2258,8 @@ dependencies = [
 name = "sample"
 version = "0.1.0"
 dependencies = [
+ "dyxel-view",
  "futures-signals",
- "vello-view",
 ]
 
 [[package]]
@@ -2280,14 +2367,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8bbf91e5a4d6315eee45e704372590b30e260ee83af6639d64557f51b067776"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "shared"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "serde",
 ]
 
 [[package]]
@@ -2866,15 +2945,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vello-view"
-version = "0.1.0"
-dependencies = [
- "futures-signals",
- "futures-util",
- "shared",
-]
-
-[[package]]
 name = "vello_encoding"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2895,7 +2965,7 @@ checksum = "7a765d44d4bd354146e44f9a860f4e92effd91a97302549be9e47f0a18d8128c"
 dependencies = [
  "bytemuck",
  "log",
- "naga 27.0.3",
+ "naga",
  "thiserror 2.0.18",
  "vello_encoding",
 ]
@@ -3001,6 +3071,17 @@ checksum = "990065f2fe63003fe337b932cfb5e3b80e0b4d0f5ff650e6985b1048f62c8319"
 dependencies = [
  "leb128fmt",
  "wasmparser",
+]
+
+[[package]]
+name = "wasm-logger"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "074649a66bb306c8f2068c9016395fa65d8e08d2affcbf95acf3c24c3ab19718"
+dependencies = [
+ "log",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -3198,11 +3279,11 @@ dependencies = [
  "hashbrown 0.16.1",
  "js-sys",
  "log",
- "naga 27.0.3",
+ "naga",
  "parking_lot",
  "portable-atomic",
  "profiling",
- "raw-window-handle 0.6.2",
+ "raw-window-handle",
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
@@ -3220,8 +3301,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27a75de515543b1897b26119f93731b385a19aea165a1ec5f0e3acecc229cae7"
 dependencies = [
  "arrayvec",
- "bit-set 0.8.0",
- "bit-vec 0.8.0",
+ "bit-set",
+ "bit-vec",
  "bitflags 2.11.0",
  "bytemuck",
  "cfg_aliases 0.2.1",
@@ -3229,12 +3310,12 @@ dependencies = [
  "hashbrown 0.16.1",
  "indexmap",
  "log",
- "naga 27.0.3",
+ "naga",
  "once_cell",
  "parking_lot",
  "portable-atomic",
  "profiling",
- "raw-window-handle 0.6.2",
+ "raw-window-handle",
  "rustc-hash",
  "smallvec",
  "thiserror 2.0.18",
@@ -3281,7 +3362,7 @@ dependencies = [
  "android_system_properties",
  "arrayvec",
  "ash",
- "bit-set 0.8.0",
+ "bit-set",
  "bitflags 2.11.0",
  "block",
  "bytemuck",
@@ -3299,8 +3380,8 @@ dependencies = [
  "libc",
  "libloading",
  "log",
- "metal",
- "naga 27.0.3",
+ "metal 0.32.0",
+ "naga",
  "ndk-sys 0.6.0+11769913",
  "objc",
  "once_cell",
@@ -3310,7 +3391,7 @@ dependencies = [
  "portable-atomic-util",
  "profiling",
  "range-alloc",
- "raw-window-handle 0.6.2",
+ "raw-window-handle",
  "renderdoc-sys",
  "smallvec",
  "thiserror 2.0.18",
@@ -3689,7 +3770,7 @@ dependencies = [
  "once_cell",
  "orbclient",
  "percent-encoding",
- "raw-window-handle 0.6.2",
+ "raw-window-handle",
  "redox_syscall 0.3.5",
  "rustix 0.38.44",
  "sctk-adwaita",

@@ -382,7 +382,7 @@ private fun findLibraryName(componentName: String): String {
     if (libOverride != null) {
         return libOverride
     }
-    return "host_android"
+    return "host_core"
 }
 
 private inline fun <reified Lib : Library> loadIndirect(
@@ -741,6 +741,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -772,9 +776,13 @@ internal interface UniffiLib : Library {
     ): Byte
     fun uniffi_host_core_fn_method_vellohost_is_initialized(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    fun uniffi_host_core_fn_method_vellohost_load_wasm(`ptr`: Pointer,`wasmPath`: RustBuffer.ByValue,
+    ): Long
     fun uniffi_host_core_fn_method_vellohost_on_touch(`ptr`: Pointer,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_host_core_fn_method_vellohost_prepare_engine_async(`ptr`: Pointer,`ddir`: RustBuffer.ByValue,
+    fun uniffi_host_core_fn_method_vellohost_prepare_engine(`ptr`: Pointer,`ddir`: RustBuffer.ByValue,
+    ): Long
+    fun uniffi_host_core_fn_method_vellohost_prepare_engine_async(`ptr`: Pointer,`ddir`: RustBuffer.ByValue,`wasmBytes`: RustBuffer.ByValue,
     ): Long
     fun uniffi_host_core_fn_method_vellohost_resize_native(`ptr`: Pointer,`width`: Int,`height`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -902,7 +910,11 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_host_core_checksum_method_vellohost_is_initialized(
     ): Short
+    fun uniffi_host_core_checksum_method_vellohost_load_wasm(
+    ): Short
     fun uniffi_host_core_checksum_method_vellohost_on_touch(
+    ): Short
+    fun uniffi_host_core_checksum_method_vellohost_prepare_engine(
     ): Short
     fun uniffi_host_core_checksum_method_vellohost_prepare_engine_async(
     ): Short
@@ -942,10 +954,16 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_host_core_checksum_method_vellohost_is_initialized() != 21838.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_host_core_checksum_method_vellohost_load_wasm() != 54373.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_host_core_checksum_method_vellohost_on_touch() != 50756.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_host_core_checksum_method_vellohost_prepare_engine_async() != 17204.toShort()) {
+    if (lib.uniffi_host_core_checksum_method_vellohost_prepare_engine() != 48243.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_host_core_checksum_method_vellohost_prepare_engine_async() != 59283.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_host_core_checksum_method_vellohost_resize_native() != 47159.toShort()) {
@@ -1199,6 +1217,25 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     }
 }
 
+/**
+ * @suppress
+ */
+public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
+    override fun read(buf: ByteBuffer): ByteArray {
+        val len = buf.getInt()
+        val byteArr = ByteArray(len)
+        buf.get(byteArr)
+        return byteArr
+    }
+    override fun allocationSize(value: ByteArray): ULong {
+        return 4UL + value.size.toULong()
+    }
+    override fun write(value: ByteArray, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        buf.put(value)
+    }
+}
+
 
 // This template implements a class for working with a Rust struct via a Pointer/Arc<T>
 // to the live Rust struct on the other side of the FFI.
@@ -1369,9 +1406,13 @@ public interface VelloHostInterface {
     
     fun `isInitialized`(): kotlin.Boolean
     
+    suspend fun `loadWasm`(`wasmPath`: kotlin.String)
+    
     fun `onTouch`(`x`: kotlin.Float, `y`: kotlin.Float)
     
-    suspend fun `prepareEngineAsync`(`ddir`: kotlin.String)
+    suspend fun `prepareEngine`(`ddir`: kotlin.String)
+    
+    suspend fun `prepareEngineAsync`(`ddir`: kotlin.String, `wasmBytes`: kotlin.ByteArray)
     
     fun `resizeNative`(`width`: kotlin.UInt, `height`: kotlin.UInt)
     
@@ -1517,6 +1558,27 @@ open class VelloHost: Disposable, AutoCloseable, VelloHostInterface {
     }
     
 
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `loadWasm`(`wasmPath`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_host_core_fn_method_vellohost_load_wasm(
+                thisPtr,
+                FfiConverterString.lower(`wasmPath`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_host_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_host_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_host_core_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
     override fun `onTouch`(`x`: kotlin.Float, `y`: kotlin.Float)
         = 
     callWithPointer {
@@ -1530,12 +1592,33 @@ open class VelloHost: Disposable, AutoCloseable, VelloHostInterface {
 
     
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `prepareEngineAsync`(`ddir`: kotlin.String) {
+    override suspend fun `prepareEngine`(`ddir`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithPointer { thisPtr ->
+            UniffiLib.INSTANCE.uniffi_host_core_fn_method_vellohost_prepare_engine(
+                thisPtr,
+                FfiConverterString.lower(`ddir`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.INSTANCE.ffi_host_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.INSTANCE.ffi_host_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.INSTANCE.ffi_host_core_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `prepareEngineAsync`(`ddir`: kotlin.String, `wasmBytes`: kotlin.ByteArray) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_host_core_fn_method_vellohost_prepare_engine_async(
                 thisPtr,
-                FfiConverterString.lower(`ddir`),
+                FfiConverterString.lower(`ddir`),FfiConverterByteArray.lower(`wasmBytes`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_host_core_rust_future_poll_void(future, callback, continuation) },

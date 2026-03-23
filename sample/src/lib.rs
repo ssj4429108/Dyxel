@@ -1,15 +1,18 @@
+// Copyright 2024 Dyxel Contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 use std::sync::atomic::{AtomicU32, Ordering};
-use vello_view::{View, BaseView, PositionType};
+use dyxel_view::{View, BaseView, PositionType};
 
 #[no_mangle]
 pub extern "C" fn main() {
-    // 1. 根容器 (ID 0)
+    // 1. Root container (ID 0)
     let _root = View::new()
         .width("100%")
         .height("100%")
         .color((10, 10, 40)); 
     
-    // 2. 创建 100 个动态方块并挂载
+    // 2. Create 100 dynamic blocks and mount them
     for _ in 1..101 {
         let child = View::new()
             .position(PositionType::Absolute)
@@ -28,16 +31,16 @@ pub extern "C" fn guest_tick() {
     
     for i in 1..101 {
         let idx = i as f32;
-        // 使用正弦和余弦函数创建平滑的环形/随机运动
-        // x 和 y 作为百分比 (0-100)
+        // Use sine and cosine functions to create smooth circular/random motion
+        // x and y as percentages (0-100)
         let x = 50.0 + (f * 0.03 + idx * 0.5).cos() * 40.0; 
         let y = 50.0 + (f * 0.02 + idx * 0.3).sin() * 40.0; 
         
         let _ = View { id: i }
-            // 修正参数顺序：(top, right, bottom, left)
-            // 我们设置 top = y, left = x，并将 right/bottom 设为较大的值避免干扰布局
+            // Correct parameter order: (top, right, bottom, left)
+            // We set top = y, left = x, and set right/bottom to larger values to avoid interfering with layout
             .inset((y, 0.0, 0.0, x)) 
-            // 颜色变换更平滑一些
+            // Smoother color transitions
             .color((
                 (128.0 + (f * 0.02 + idx).cos() * 127.0) as u32,
                 (128.0 + (f * 0.03 + idx * 0.5).sin() * 127.0) as u32,
@@ -45,5 +48,5 @@ pub extern "C" fn guest_tick() {
             ));
     }
     
-    vello_view::vello_view_tick();
+    dyxel_view::dyxel_view_tick();
 }
