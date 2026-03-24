@@ -49,8 +49,9 @@ pub const fn fnv1a_hash(bytes: &[u8]) -> u64 {
     hash
 }
 
-macro_rules! define_protocol {
+macro_rules! define_protocol_inner {
     (
+        $dol:tt,
         $( [$id:expr] $name:ident ($($arg:ident : $typ:ty),*) ),* $(,)?
     ) => {
         #[repr(u8)]
@@ -85,57 +86,57 @@ macro_rules! define_protocol {
             }
         }
 
-        // Use nested macro trick to generate push_command! and dispatch_op! macros with $ symbols
-        macro_rules! generate_helpers {
-            ($dol:tt) => {
-                #[macro_export]
-                macro_rules! push_command {
-                    ( $dol buffer:expr, $dol op:ident $dol(, $dol val:expr)* ) => {
-                        #[allow(unused_assignments)]
-                        unsafe {
-                            let mut offset = $dol buffer.command_len as usize;
-                            let mut data_size = 0;
-                            $dol( data_size += std::mem::size_of_val(&$dol val); )*
-                            
-                            if offset + 1 + data_size <= $crate::MAX_COMMAND_BYTES {
-                                $dol buffer.command_data[offset] = $crate::OpCode::$dol op as u8;
-                                offset += 1;
-                                $dol(
-                                    let bytes = $dol val.to_le_bytes();
-                                    let n = bytes.len();
-                                    $dol buffer.command_data[offset..offset+n].copy_from_slice(&bytes);
-                                    offset += n;
-                                )*
-                                $dol buffer.command_len = offset as u32;
-                            }
-                        }
-                    };
-                }
-
-                #[macro_export]
-                macro_rules! dispatch_op {
-                    ($dol op:expr, $dol buf:expr, $dol offset:expr, $dol body:ident, $dol($dol state:tt)*) => {
-                        match $dol op {
-                            $(
-                                $crate::OpCode::$name => {
-                                    $(
-                                        let $arg = <$typ>::from_le_bytes(
-                                            $dol buf[$dol offset .. $dol offset + std::mem::size_of::<$typ>()]
-                                                .try_into()
-                                                .expect("Decoding failed")
-                                        );
-                                        $dol offset += std::mem::size_of::<$typ>();
-                                    )*
-                                    $dol body ! ($name, $dol($dol state)* $(, $arg)*);
-                                }
-                            )*
-                        }
-                    };
+        #[macro_export]
+        macro_rules! push_command {
+            ( $dol buffer:expr, $dol op:ident $dol(, $dol val:expr)* ) => {
+                #[allow(unused_assignments)]
+                unsafe {
+                    let mut offset = $dol buffer.command_len as usize;
+                    let mut data_size = 0;
+                    $dol( data_size += std::mem::size_of_val(&$dol val); )*
+                    
+                    if offset + 1 + data_size <= $crate::MAX_COMMAND_BYTES {
+                        $dol buffer.command_data[offset] = $crate::OpCode::$dol op as u8;
+                        offset += 1;
+                        $dol(
+                            let bytes = $dol val.to_le_bytes();
+                            let n = bytes.len();
+                            $dol buffer.command_data[offset..offset+n].copy_from_slice(&bytes);
+                            offset += n;
+                        )*
+                        $dol buffer.command_len = offset as u32;
+                    }
                 }
             };
         }
-        generate_helpers!($);
+
+        #[macro_export]
+        macro_rules! dispatch_op {
+            ($dol op:expr, $dol buf:expr, $dol offset:expr, $dol body:ident, $dol($dol state:tt)*) => {
+                match $dol op {
+                    $(
+                        $crate::OpCode::$name => {
+                            $(
+                                let $arg = <$typ>::from_le_bytes(
+                                    $dol buf[$dol offset .. $dol offset + std::mem::size_of::<$typ>()]
+                                        .try_into()
+                                        .expect("Decoding failed")
+                                );
+                                $dol offset += std::mem::size_of::<$typ>();
+                            )*
+                            $dol body ! ($name, $dol($dol state)* $(, $arg)*);
+                        }
+                    )*
+                }
+            };
+        }
     };
+}
+
+macro_rules! define_protocol {
+    ($($t:tt)*) => {
+        define_protocol_inner! { $, $($t)* }
+    }
 }
 
 // Single source of truth: define opcodes and their parameter types
