@@ -4,6 +4,8 @@
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle};
 #[cfg(target_os = "android")] use raw_window_handle::AndroidNdkWindowHandle;
 #[cfg(target_os = "ios")] use raw_window_handle::{UiKitDisplayHandle, UiKitWindowHandle};
+#[cfg(target_os = "macos")] use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle};
+#[cfg(target_arch = "wasm32")] use raw_window_handle::{WebCanvasWindowHandle, WebDisplayHandle};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,6 +33,25 @@ impl SafeWindowHandle {
             #[cfg(target_os = "android")] android_window: None, 
             raw_window_handle: RawWindowHandle::UiKit(raw_window_handle::UiKitWindowHandle::new(std::ptr::NonNull::new(surface_ptr as *mut _).unwrap())), 
             raw_display_handle: RawDisplayHandle::UiKit(raw_window_handle::UiKitDisplayHandle::new()) 
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn new_macos(surface_ptr: u64) -> Self {
+        Self { 
+            #[cfg(target_os = "android")] android_window: None, 
+            raw_window_handle: RawWindowHandle::AppKit(AppKitWindowHandle::new(std::ptr::NonNull::new(surface_ptr as *mut _).unwrap())), 
+            raw_display_handle: RawDisplayHandle::AppKit(AppKitDisplayHandle::new()) 
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_web(id: u32) -> Self {
+        let mut handle = WebCanvasWindowHandle::new();
+        handle.id = id;
+        Self { 
+            raw_window_handle: RawWindowHandle::WebCanvas(handle), 
+            raw_display_handle: RawDisplayHandle::Web(WebDisplayHandle::new()) 
         }
     }
 }
@@ -69,13 +90,13 @@ pub extern "C" fn Java_com_dyxel_android_DyxelEngine_initLogger(
 
 impl HasWindowHandle for SafeWindowHandle { 
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> { 
-        unsafe { Ok(WindowHandle::borrow_raw(self.raw_window_handle)) } 
+        unsafe { Ok(WindowHandle::borrow_raw(self.raw_window_handle.clone())) } 
     } 
 }
 
 impl HasDisplayHandle for SafeWindowHandle { 
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> { 
-        unsafe { Ok(DisplayHandle::borrow_raw(self.raw_display_handle)) } 
+        unsafe { Ok(DisplayHandle::borrow_raw(self.raw_display_handle.clone())) } 
     } 
 }
 
