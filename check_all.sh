@@ -2,7 +2,7 @@
 set -e
 
 echo "Checking Android (aarch64)..."
-cargo check --target aarch64-linux-android
+cargo ndk -t arm64-v8a check
 
 echo "Checking macOS (Apple Silicon)..."
 cargo check --target aarch64-apple-darwin
