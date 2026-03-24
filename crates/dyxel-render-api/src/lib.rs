@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::any::Any;
-use dyxel_shared::SharedState;
+use dyxel_core::SharedState;
 pub use vello::wgpu;
 pub use vello::util::RenderContext;
 
