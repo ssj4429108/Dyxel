@@ -4,6 +4,7 @@ set -e
 # Configuration parameters
 TARGET_ARCH="arm64-v8a" # Options: arm64-v8a, armeabi-v7a, x86_64, x86
 API_LEVEL=24
+export ANDROID_NDK_HOME=/Users/angle-789/Library/Android/sdk/ndk/27.1.12297006
 ANDROID_PROJECT_DIR="android"
 JNI_LIBS_DIR="$ANDROID_PROJECT_DIR/app/src/main/jniLibs"
 KOTLIN_OUT_DIR="$ANDROID_PROJECT_DIR/app/src/main/java"
