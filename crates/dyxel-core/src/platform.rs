@@ -5,7 +5,7 @@ use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowH
 #[cfg(target_os = "android")] use raw_window_handle::AndroidNdkWindowHandle;
 #[cfg(target_os = "ios")] use raw_window_handle::{UiKitDisplayHandle, UiKitWindowHandle};
 #[cfg(target_os = "macos")] use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle};
-#[cfg(target_arch = "wasm32")] use raw_window_handle::{WebCanvasWindowHandle, WebDisplayHandle};
+#[cfg(target_arch = "wasm32")] use raw_window_handle::{WebDisplayHandle, WebWindowHandle};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,10 +47,8 @@ impl SafeWindowHandle {
 
     #[cfg(target_arch = "wasm32")]
     pub fn new_web(id: u32) -> Self {
-        let mut handle = WebCanvasWindowHandle::new();
-        handle.id = id;
         Self { 
-            raw_window_handle: RawWindowHandle::WebCanvas(handle), 
+            raw_window_handle: RawWindowHandle::Web(WebWindowHandle::new(id)), 
             raw_display_handle: RawDisplayHandle::Web(WebDisplayHandle::new()) 
         }
     }
