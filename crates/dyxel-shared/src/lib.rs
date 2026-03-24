@@ -49,7 +49,7 @@ pub const fn fnv1a_hash(bytes: &[u8]) -> u64 {
     hash
 }
 
-macro_rules! define_protocol_inner {
+macro_rules! define_protocol {
     (
         $dol:tt,
         $( [$id:expr] $name:ident ($($arg:ident : $typ:ty),*) ),* $(,)?
@@ -133,14 +133,9 @@ macro_rules! define_protocol_inner {
     };
 }
 
-macro_rules! define_protocol {
-    ($($t:tt)*) => {
-        define_protocol_inner! { $, $($t)* }
-    }
-}
-
 // Single source of truth: define opcodes and their parameter types
 define_protocol! {
+    $,
     [1] CreateNode(id: u32),
     [2] SetViewType(id: u32, vt: u32),
     [3] SetColor(id: u32, r: u8, g: u8, b: u8),
