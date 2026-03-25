@@ -5,7 +5,7 @@ use futures_signals::signal::{Signal, SignalExt};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::cell::RefCell;
 use std::collections::HashMap;
-pub use dyxel_shared::{FlexDirection, JustifyContent, AlignItems, PositionType, Dimension, Role, ViewType, OpCode, LayoutResult, MAX_COMMAND_BYTES, SharedBuffer};
+pub use dyxel_shared::{FlexDirection, JustifyContent, AlignItems, FlexWrap, AlignContent, Dimension, Role, ViewType, OpCode, LayoutResult, MAX_COMMAND_BYTES, SharedBuffer};
 use dyxel_shared::push_command;
 
 // --- Command Stream ---
@@ -75,10 +75,31 @@ pub extern "C" fn on_node_click(id: u32) {
 }
 
 pub enum Prop<T> { Static(T), Dynamic(Box<dyn Signal<Item = T> + Unpin + 'static>) }
-impl<T: 'static + Copy> From<T> for Prop<T> { fn from(v: T) -> Self { Prop::Static(v) } }
+
+// Specific implementations for common types to avoid overlapping blanket impls
+impl From<Dimension> for Prop<Dimension> { fn from(v: Dimension) -> Self { Prop::Static(v) } }
+impl From<FlexDirection> for Prop<FlexDirection> { fn from(v: FlexDirection) -> Self { Prop::Static(v) } }
+impl From<JustifyContent> for Prop<JustifyContent> { fn from(v: JustifyContent) -> Self { Prop::Static(v) } }
+impl From<AlignItems> for Prop<AlignItems> { fn from(v: AlignItems) -> Self { Prop::Static(v) } }
+impl From<FlexWrap> for Prop<FlexWrap> { fn from(v: FlexWrap) -> Self { Prop::Static(v) } }
+impl From<AlignContent> for Prop<AlignContent> { fn from(v: AlignContent) -> Self { Prop::Static(v) } }
+
+impl From<f32> for Prop<f32> { fn from(v: f32) -> Self { Prop::Static(v) } }
+impl From<i32> for Prop<i32> { fn from(v: i32) -> Self { Prop::Static(v) } }
+impl From<u16> for Prop<u16> { fn from(v: u16) -> Self { Prop::Static(v) } }
+impl From<(u32,u32,u32)> for Prop<(u32,u32,u32)> { fn from(v: (u32,u32,u32)) -> Self { Prop::Static(v) } }
+impl From<(u8,u8,u8,u8)> for Prop<(u8,u8,u8,u8)> { fn from(v: (u8,u8,u8,u8)) -> Self { Prop::Static(v) } }
+impl From<(f32,f32,f32,f32)> for Prop<(f32,f32,f32,f32)> { fn from(v: (f32,f32,f32,f32)) -> Self { Prop::Static(v) } }
+
 impl From<&str> for Prop<Dimension> { fn from(v: &str) -> Self { Prop::Static(Dimension::from(v)) } }
 impl From<f32> for Prop<Dimension> { fn from(v: f32) -> Self { Prop::Static(Dimension::from(v)) } }
 impl From<i32> for Prop<Dimension> { fn from(v: i32) -> Self { Prop::Static(Dimension::from(v)) } }
+
+// String conversions
+impl From<String> for Prop<String> { fn from(v: String) -> Self { Prop::Static(v) } }
+impl From<&str> for Prop<String> { fn from(v: &str) -> Self { Prop::Static(v.to_string()) } }
+impl From<&String> for Prop<String> { fn from(v: &String) -> Self { Prop::Static(v.to_string()) } }
+
 pub trait SignalPropExt: Signal + Sized { fn sig(self) -> Prop<Self::Item> where Self: Unpin + 'static { Prop::Dynamic(Box::new(self)) } }
 impl<S: Signal + SignalExt> SignalPropExt for S {}
 
@@ -119,15 +140,10 @@ pub trait BaseView {
     fn flex_direction<P: Into<Prop<FlexDirection>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, dir| { select_node(id); push_command!(SHARED_BUFFER, SetFlexDirection, id, dir as u32); }); self }
     fn justify_content<P: Into<Prop<JustifyContent>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, j| { select_node(id); push_command!(SHARED_BUFFER, SetJustifyContent, id, j as u32); }); self }
     fn align_items<P: Into<Prop<AlignItems>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, a| { select_node(id); push_command!(SHARED_BUFFER, SetAlignItems, id, a as u32); }); self }
-    fn position<P: Into<Prop<PositionType>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, pos| { select_node(id); push_command!(SHARED_BUFFER, SetPosition, id, pos as u32); }); self }
+    fn flex_wrap<P: Into<Prop<FlexWrap>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, w| { select_node(id); push_command!(SHARED_BUFFER, SetFlexWrap, id, w as u32); }); self }
+    fn align_content<P: Into<Prop<AlignContent>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, ac| { select_node(id); push_command!(SHARED_BUFFER, SetAlignContent, id, ac as u32); }); self }
     fn flex_grow<P: Into<Prop<f32>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, grow| { select_node(id); push_command!(SHARED_BUFFER, SetFlexGrow, id, grow); }); self }
     fn z_index<P: Into<Prop<i32>>>(self, p: P) -> Self where Self: Sized { apply_prop(self.node_id(), p.into(), |id, z| { select_node(id); push_command!(SHARED_BUFFER, SetZIndex, id, z); }); self }
-    fn inset<P: Into<Prop<(f32,f32,f32,f32)>>>(self, p: P) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, (t, r, b, l)| { 
-            select_node(id);
-            push_command!(SHARED_BUFFER, SetInset, id, t, r, b, l); 
-        }); self 
-    }
     fn padding<P: Into<Prop<(f32,f32,f32,f32)>>>(self, p: P) -> Self where Self: Sized { 
         apply_prop(self.node_id(), p.into(), |id, (t, r, b, l)| { 
             select_node(id); 
@@ -149,7 +165,11 @@ impl View {
         let id = NODE_COUNTER.fetch_add(1, Ordering::SeqCst); track_node(id);
         push_command!(SHARED_BUFFER, CreateNode, id);
         unsafe { LAST_SELECTED_NODE = Some(id); } 
-        let v = Self { id }; v.width("auto").height("auto") 
+        let v = Self { id }; 
+        v.width("auto").height("auto")
+         .flex_direction(FlexDirection::Row)
+         .justify_content(JustifyContent::FlexStart)
+         .align_items(AlignItems::FlexStart)
     }
 }
 impl BaseView for View { fn node_id(&self) -> u32 { self.id } }
@@ -158,17 +178,17 @@ pub struct Text { pub id: u32 }
 impl Text {
     pub fn new() -> Self {
         let id = NODE_COUNTER.fetch_add(1, Ordering::SeqCst); track_node(id);
-        push_command!(SHARED_BUFFER, CreateNode, id);
-        unsafe { LAST_SELECTED_NODE = Some(id); }
-        push_command!(SHARED_BUFFER, SetViewType, id, ViewType::Text as u32);
+        unsafe {
+            push_command!(SHARED_BUFFER, CreateTextNode, id);
+            LAST_SELECTED_NODE = Some(id);
+        }
         Self { id }
     }
-    pub fn value<P: Into<Prop<String>>>(self, p: P) -> Self { apply_prop(self.id, p.into(), |id, s| { 
-        select_node(id); 
+    pub fn value<P: Into<Prop<String>>>(self, p: P) -> Self { apply_prop(self.id, p.into(), |id, s| {
+        select_node(id);
         let len = s.len() as u32;
-        push_command!(SHARED_BUFFER, SetText, id, len);
-        // Manually copy variable-length text data
         unsafe {
+            push_command!(SHARED_BUFFER, SetTextContent, id, len);
             let offset = SHARED_BUFFER.command_len as usize;
             if offset + s.len() <= MAX_COMMAND_BYTES {
                 SHARED_BUFFER.command_data[offset..offset+s.len()].copy_from_slice(s.as_bytes());
@@ -176,6 +196,21 @@ impl Text {
             }
         }
     }); self }
+    pub fn font_size<P: Into<Prop<f32>>>(self, p: P) -> Self { apply_prop(self.id, p.into(), |id, size| { select_node(id); push_command!(SHARED_BUFFER, SetFontSize, id, size); }); self }
+    pub fn font_weight<P: Into<Prop<u16>>>(self, p: P) -> Self { apply_prop(self.id, p.into(), |id, weight| { select_node(id); push_command!(SHARED_BUFFER, SetTextWeight, id, weight); }); self }
+    pub fn font_family<P: Into<Prop<String>>>(self, p: P) -> Self { apply_prop(self.id, p.into(), |id, s| {
+        select_node(id);
+        let len = s.len() as u32;
+        unsafe {
+            push_command!(SHARED_BUFFER, SetTextFontFamily, id, len);
+            let offset = SHARED_BUFFER.command_len as usize;
+            if offset + s.len() <= MAX_COMMAND_BYTES {
+                SHARED_BUFFER.command_data[offset..offset+s.len()].copy_from_slice(s.as_bytes());
+                SHARED_BUFFER.command_len = (offset + s.len()) as u32;
+            }
+        }
+    }); self }
+    pub fn text_color<P: Into<Prop<(u8,u8,u8,u8)>>>(self, p: P) -> Self { apply_prop(self.id, p.into(), |id, (r,g,b,a)| { select_node(id); push_command!(SHARED_BUFFER, SetTextColor, id, r, g, b, a); }); self }
 }
 impl BaseView for Text { fn node_id(&self) -> u32 { self.id } }
 

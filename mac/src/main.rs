@@ -34,14 +34,21 @@ fn main() -> anyhow::Result<()> {
 
         match event {
             // Execute Setup when window is ready and engine is also ready
-            Event::WindowEvent { event: WindowEvent::Resized(_), .. } | Event::AboutToWait => {
+            Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
+                if surface_setup_done {
+                    // Window was resized after initial setup, notify engine
+                    host.resize_native(new_size.width, new_size.height);
+                }
+            }
+            Event::AboutToWait => {
                 if !surface_setup_done && host.is_engine_ready() {
                     let h = host.clone();
                     let w = window.clone();
+                    let size = w.inner_size();
                     pollster::block_on(h.setup(
                         vello::wgpu::SurfaceTarget::from(w.clone()),
-                        w.inner_size().width,
-                        w.inner_size().height,
+                        size.width,
+                        size.height,
                         None
                     ));
                     surface_setup_done = true;

@@ -30,11 +30,11 @@ macro_rules! handle_op {
     (SetAlignItems, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $a:expr) => {
         $s.set_align_items($id, $a);
     };
-    (SetPosition, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $p:expr) => {
-        $s.set_position($id, $p);
+    (SetFlexWrap, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $w:expr) => {
+        $s.set_flex_wrap($id, $w);
     };
-    (SetInset, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $t:expr, $r:expr, $b:expr, $l:expr) => {
-        $s.set_inset($id, $t, $r, $b, $l);
+    (SetAlignContent, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $ac:expr) => {
+        $s.set_align_content($id, $ac);
     };
     (SetFlexGrow, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $grow:expr) => {
         $s.set_flex_grow($id, $grow);
@@ -83,6 +83,37 @@ macro_rules! handle_op {
     };
     (UpdateLayout, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident) => {};
     (SetSemantics, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $role:expr) => {};
+    (CreateTextNode, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr) => {
+        $s.create_text_node($id); $cur_id = Some($id);
+    };
+    (CreateSpanNode, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr) => {
+        // Implement span node creation later
+    };
+    (CreateRichTextNode, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr) => {
+        // Implement rich text node creation later
+    };
+    (SetTextContent, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $len_u32:expr) => {
+        let len = $len_u32 as usize;
+        if $offset + len <= $command_data.len() {
+            let text = String::from_utf8_lossy(&$command_data[$offset..$offset+len]).to_string();
+            $s.set_text($id, text);
+            $offset += len;
+        }
+    };
+    (SetTextColor, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $r:expr, $g:expr, $b:expr, $a:expr) => {
+        $s.set_color_rgba($id, $r, $g, $b, $a);
+    };
+    (SetTextWeight, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $weight:expr) => {
+        $s.set_font_weight($id, $weight);
+    };
+    (SetTextFontFamily, $s:ident, $cur_id:ident, $offset:ident, $command_data:ident, $id:expr, $len_u32:expr) => {
+        let len = $len_u32 as usize;
+        if $offset + len <= $command_data.len() {
+            let family = String::from_utf8_lossy(&$command_data[$offset..$offset+len]).to_string();
+            $s.set_font_family($id, family);
+            $offset += len;
+        }
+    };
 }
 
 // Internal implementation function

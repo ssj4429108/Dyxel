@@ -390,9 +390,32 @@ impl DyxelHost {
         if let Some(tx) = &*self.command_tx.lock().unwrap() { let _ = tx.send(EngineMessage::Input(InputEvent::TouchDown { x, y: _y })); }
     }
 
-    pub fn resize_native(&self, _width: u32, _height: u32) { 
+    pub fn resize_native(&self, width: u32, height: u32) { 
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.command_tx.lock().unwrap() { let _ = tx.send(EngineMessage::Resize { width: _width, height: _height }); }
+        if let Some(tx) = &*self.command_tx.lock().unwrap() { 
+            let _ = tx.send(EngineMessage::Resize { width, height }); 
+        }
+        
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Directly handle resize on WASM platform
+            use std::ops::DerefMut;
+            if let Some(mut status) = self.engine_status.try_async_lock() {
+                if let EngineStatus::Ready(ref mut e) = *status {
+                    if let Some(active_id_guard) = self.active_surface_id.try_lock_guard() {
+                        if let Some(active_id) = active_id_guard.as_ref() {
+                            if let Some(mut surfs) = self.surfaces.try_lock_guard() {
+                                if let Some(surface) = surfs.get_mut(&active_id.0) {
+                                    surface.resize(&mut e.context, width, height);
+                                    // Trigger a re-render
+                                    render_frame(e, surface.deref_mut());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn is_initialized(&self) -> bool { 

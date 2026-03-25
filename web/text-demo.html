@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Dyxel Text Rendering Demo</title>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #1e1e1e; }
+        canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: sans-serif;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">Loading font...</div>
+    <canvas id="dyxel-canvas"></canvas>
+    
+    <script type="module">
+        import init, { WebHost } from './pkg/dyxel_web.js';
+
+        async function run() {
+            await init();
+            const canvas = document.getElementById('dyxel-canvas');
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = window.innerWidth * dpr;
+            canvas.height = window.innerHeight * dpr;
+            
+            const info = document.getElementById('info');
+            
+            console.log("Creating WebHost...");
+            const host = await new WebHost(canvas);
+            console.log("WebHost Created Successfully.");
+            
+            // Load a TTF font from CDN for text rendering demo
+            // Using Google Fonts CDN with proper CORS headers
+            const fontUrl = 'https://fonts.gstatic.com/s/roboto/v32/KFOmCnqEu92Fr1Mu4mxKKTU1Kg.woff2';
+            
+            try {
+                info.textContent = "Loading font from: " + fontUrl;
+                const fontResponse = await fetch(fontUrl);
+                if (!fontResponse.ok) {
+                    throw new Error(`Failed to fetch font: ${fontResponse.status}`);
+                }
+                const fontData = await fontResponse.arrayBuffer();
+                console.log("Font loaded:", fontData.byteLength, "bytes");
+                info.textContent = `Font loaded: ${fontData.byteLength} bytes`;
+                
+                // In a full implementation, you would pass this font data to the Rust side
+                // to register it with the font system for Vello rendering
+                // For now, the DOM overlay will handle text rendering
+                
+            } catch (e) {
+                console.warn("Failed to load font:", e);
+                info.textContent = "Font load failed, using system font";
+            }
+            
+            // Try to load business logic WASM
+            let wasmInstance = null;
+            let sharedBufferPtr = 0;
+            
+            try {
+                console.log("Loading business WASM...");
+                const wasmResponse = await fetch('sample.wasm');
+                if (!wasmResponse.ok) {
+                    throw new Error(`Failed to fetch: ${wasmResponse.status}`);
+                }
+                const wasmBytes = await wasmResponse.arrayBuffer();
+                
+                const wasmMemory = new WebAssembly.Memory({ initial: 10, maximum: 100 });
+                
+                const importObject = {
+                    env: {
+                        memory: wasmMemory,
+                        ui_force_layout: () => {}
+                    }
+                };
+                
+                const { instance } = await WebAssembly.instantiate(wasmBytes, importObject);
+                wasmInstance = instance;
+                
+                const getBufferPtr = wasmInstance.exports.dyxel_get_shared_buffer_ptr || wasmInstance.exports.vello_get_shared_buffer_ptr;
+                if (getBufferPtr) {
+                    sharedBufferPtr = getBufferPtr();
+                    console.log("Shared buffer ptr:", sharedBufferPtr);
+                    
+                    if (wasmInstance.exports.main) {
+                        wasmInstance.exports.main();
+                    }
+                    console.log("Business WASM loaded.");
+                    info.textContent += " | WASM loaded";
+                } else {
+                    console.log("WASM loaded but no dyxel interface found.");
+                    wasmInstance = null;
+                }
+            } catch (e) {
+                console.warn("Failed to load business WASM:", e);
+                info.textContent += " | Demo mode";
+            }
+
+            // Render loop
+            function render() {
+                if (wasmInstance && sharedBufferPtr && host.wasmSyncTick) {
+                    const tickFn = wasmInstance.exports.guest_tick || wasmInstance.exports.vello_tick || wasmInstance.exports.dyxel_tick;
+                    if (tickFn) {
+                        tickFn();
+                    }
+                    
+                    const memoryView = new Uint8Array(wasmInstance.exports.memory.buffer);
+                    host.wasmSyncTick(memoryView, sharedBufferPtr);
+                } else {
+                    host.tick();
+                }
+                
+                requestAnimationFrame(render);
+            }
+            requestAnimationFrame(render);
+
+            // Click handler
+            window.addEventListener('click', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = (e.clientX - rect.left) * dpr;
+                const y = (e.clientY - rect.top) * dpr;
+                
+                const hitId = host.handleClick(x, y);
+                if (hitId !== undefined) {
+                    console.log("Node Clicked:", hitId);
+                    info.textContent = `Clicked node: ${hitId}`;
+                }
+            });
+
+            // Resize handler - update canvas size and notify engine
+            window.addEventListener('resize', () => {
+                const newDpr = window.devicePixelRatio || 1;
+                const newWidth = window.innerWidth * newDpr;
+                const newHeight = window.innerHeight * newDpr;
+                
+                canvas.width = newWidth;
+                canvas.height = newHeight;
+                
+                // Notify WebHost about resize
+                if (host.resize) {
+                    host.resize(newWidth, newHeight);
+                }
+            });
+        }
+
+        run().catch(console.error);
+    </script>
+</body>
+</html>

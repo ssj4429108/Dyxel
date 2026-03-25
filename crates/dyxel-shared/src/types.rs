@@ -17,6 +17,14 @@ pub enum AlignItems { FlexStart = 0, Center = 1, FlexEnd = 2, Stretch = 3 }
 
 #[repr(u32)]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum FlexWrap { NoWrap = 0, Wrap = 1, WrapReverse = 2 }
+
+#[repr(u32)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum AlignContent { FlexStart = 0, Center = 1, FlexEnd = 2, Stretch = 3, SpaceBetween = 4, SpaceAround = 5, SpaceEvenly = 6 }
+
+#[repr(u32)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum PositionType { Relative = 0, Absolute = 1 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]

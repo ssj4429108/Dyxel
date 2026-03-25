@@ -7,6 +7,7 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+#[cfg(needs_manual_err_defs)]
 extern "C" {
     pub static m3Err_none: M3Result;
     pub static m3Err_mallocFailed: M3Result;

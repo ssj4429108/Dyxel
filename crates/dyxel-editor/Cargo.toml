@@ -1,0 +1,13 @@
+[package]
+name = "dyxel-editor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parley.workspace = true
+vello = { workspace = true }
+peniko = { workspace = true }
+kurbo = { workspace = true }
+
+[dependencies.dyxel-shared]
+path = "../dyxel-shared"

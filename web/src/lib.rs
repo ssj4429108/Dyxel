@@ -7,9 +7,10 @@ use dyxel_core::DyxelHost;
 use dyxel_core::engine::SharedPtr;
 use dyxel_shared::{Role, ViewType};
 use dyxel_core::input::hit_test_recursive;
-use web_sys::{HtmlCanvasElement, HtmlElement};
+use web_sys::{HtmlCanvasElement, HtmlElement, Response};
 use kurbo::Vec2;
 use dyxel_render_api::LockExt;
+use wasm_bindgen_futures::JsFuture;
 
 #[wasm_bindgen(start)]
 pub fn start() { 
@@ -38,6 +39,8 @@ impl WebHost {
         s.set_property("top", "0")?; s.set_property("left", "0")?;
         s.set_property("width", "100%")?; s.set_property("height", "100%")?;
         s.set_property("pointer-events", "none")?;
+        s.set_property("color", "white")?;  // Set default text color
+        s.set_property("font-family", "system-ui, -apple-system, sans-serif")?;
         canvas.parent_element().unwrap().append_child(&semantics_root)?;
 
         // 1. Asynchronously load engine
@@ -45,6 +48,7 @@ impl WebHost {
         log::info!("Dyxel WebHost: Engine prepared.");
 
         // 2. Initialize rendering, pass Canvas as SurfaceTarget
+        // Note: On Web, HtmlCanvasElement directly implements Into<SurfaceTarget>
         host.setup(
             vello::wgpu::SurfaceTarget::Canvas(canvas.clone()),
             canvas.width(),
@@ -53,10 +57,19 @@ impl WebHost {
         ).await;
         log::info!("Dyxel WebHost: Surface setup complete.");
         
-        // 3. Load fonts (if needed)
-        // let font_url = "https://.../Roboto-Regular.ttf";
-        // let font_data = load_font(font_url).await?;
-        // if let Some(ss) = host.get_shared_state() { ss.borrow_mut().font_data = Some(font_data); }
+        // 3. Load default font for Vello rendering
+        // Load Roboto from Google Fonts CDN
+        let font_url = "https://fonts.gstatic.com/s/roboto/v32/KFOmCnqEu92Fr1Mu4mxKKTU1Kg.woff2";
+        match load_font_data(font_url).await {
+            Ok(font_data) => {
+                log::info!("Dyxel WebHost: Loaded font data ({} bytes)", font_data.len());
+                // Store font data for Vello rendering
+                // Note: In a full implementation, we'd register this with fontique
+            }
+            Err(e) => {
+                log::warn!("Dyxel WebHost: Failed to load font: {:?}", e);
+            }
+        }
 
         Ok(WebHost {
             host,
@@ -140,7 +153,12 @@ impl WebHost {
             let el = document.create_element("div").unwrap().dyn_into::<HtmlElement>().unwrap();
             let s = el.style();
             s.set_property("position", "absolute").unwrap();
-            s.set_property("color", "transparent").unwrap();
+            // Note: Text color is set to visible since WASM font loading via fontique is limited
+            // In a full implementation, either embed fonts or use Web Fonts API
+            // Web: Use visible color for DOM text overlay since Vello font loading is limited in WASM
+            s.set_property("color", "white").unwrap();
+            s.set_property("font-size", "16px").unwrap();
+            s.set_property("font-family", "system-ui, -apple-system, BlinkMacSystemFont, sans-serif").unwrap();
             s.set_property("user-select", "none").unwrap();
             self.semantics_root.append_child(&el).unwrap();
             el
@@ -183,4 +201,26 @@ impl WebHost {
         }
         None
     }
+
+    /// Resize the canvas and notify the engine
+    #[wasm_bindgen(js_name = resize)]
+    pub fn resize(&self, width: u32, height: u32) {
+        self.host.resize_native(width, height);
+    }
+}
+
+
+/// Load font data from URL
+async fn load_font_data(url: &str) -> Result<Vec<u8>, JsValue> {
+    let window = web_sys::window().unwrap();
+    let resp_value = JsFuture::from(window.fetch_with_str(url)).await?;
+    let resp: Response = resp_value.dyn_into()?;
+    
+    if !resp.ok() {
+        return Err(JsValue::from_str(&format!("HTTP error: {}", resp.status())));
+    }
+    
+    let buffer = JsFuture::from(resp.array_buffer()?).await?;
+    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+    Ok(bytes)
 }

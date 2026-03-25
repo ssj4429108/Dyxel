@@ -10,7 +10,9 @@ use dyxel_render_api::LockExt;
 use vello::wgpu;
 use kurbo::{Affine, Rect as KRect, RoundedRect, Vec2};
 use taffy::style::AvailableSpace;
-use dyxel_shared::SharedState;
+use dyxel_shared::{SharedState, ViewType};
+
+use dyxel_editor::Editor;
 
 #[cfg(target_os = "macos")]
 pub mod mac;
@@ -28,6 +30,7 @@ pub struct VelloBackend {
     pub pipeline_cache: SharedMutex<Option<wgpu::PipelineCache>>,
     pub cache_path: SharedMutex<Option<String>>,
     pub cache_saved: AtomicBool,
+    pub editors: SharedMutex<std::collections::HashMap<u32, Editor>>,
 }
 
 const BLIT_SHADER_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.spv"));
@@ -43,6 +46,7 @@ impl VelloBackend {
             pipeline_cache: SharedMutex::new(None),
             cache_path: SharedMutex::new(None),
             cache_saved: AtomicBool::new(false),
+            editors: SharedMutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -124,24 +128,86 @@ impl VelloBackend {
         let h = v_surface_surface.config.height;
         if w == 0 || h == 0 { return Ok(()); }
 
-        let rid = { 
-            let mut g = shared_state.lock().unwrap(); 
-            g.root_id.map(|id| { 
-                if let Some(rn) = g.nodes.get(&id).map(|n| n.taffy_node) { 
-                    let _ = g.taffy.compute_layout(rn, taffy::prelude::Size { 
-                        width: AvailableSpace::Definite(w as f32), 
-                        height: AvailableSpace::Definite(h as f32) 
-                    }); 
-                } 
-                id 
-            }) 
+        // Get or create editors for text nodes and compute layout
+        let rid = {
+            let mut g = shared_state.lock().unwrap();
+            let mut editors = self.editors.lock().unwrap();
+
+            // First pass: create/update editors for text nodes
+            for (&id, node) in &g.nodes {
+                if node.view_type == ViewType::Text {
+                    let editor = editors.entry(id).or_insert_with(|| {
+                        let mut ed = Editor::new(node.font_size);
+                        ed.set_text(&node.text);
+                        // node.color is already peniko::Color
+                        ed.set_text_color(node.color);
+                        ed
+                    });
+                    
+                    // Update editor if text/font changed
+                    if editor.text() != node.text {
+                        editor.set_text(&node.text);
+                    }
+                }
+            }
+
+            // Remove editors for deleted nodes
+            let node_ids: std::collections::HashSet<u32> = g.nodes.keys().copied().collect();
+            editors.retain(|id, _| node_ids.contains(id));
+
+            // Build map from taffy_node to editor id for measurement
+            let taffy_to_id: std::collections::HashMap<taffy::NodeId, u32> = g.nodes
+                .iter()
+                .filter(|(_, n)| n.view_type == ViewType::Text)
+                .map(|(id, n)| (n.taffy_node, *id))
+                .collect();
+
+            // Compute layout with text measurement
+            // First pass: measure with unconstrained width to get natural size
+            for (&id, node) in &g.nodes {
+                if node.view_type == ViewType::Text {
+                    if let Some(editor) = editors.get_mut(&id) {
+                        // Measure natural size (no wrapping)
+                        editor.set_width(None);
+                    }
+                }
+            }
+            
+            let rid = g.root_id.map(|id| {
+                if let Some(rn) = g.nodes.get(&id).map(|n| n.taffy_node) {
+                    let _ = g.taffy.compute_layout_with_measure(rn, taffy::prelude::Size {
+                        width: AvailableSpace::Definite(w as f32),
+                        height: AvailableSpace::Definite(h as f32)
+                    }, |known_dimensions, _available_space, node_id, _node_context, _style| {
+                        // Look up editor by taffy_node
+                        if let Some(&editor_id) = taffy_to_id.get(&node_id) {
+                            if let Some(editor) = editors.get_mut(&editor_id) {
+                                // Use known width if definite, otherwise use natural width
+                                let use_width = known_dimensions.width;
+                                editor.set_width(use_width);
+                                let (lw, lh) = editor.layout_size();
+                                return taffy::geometry::Size { width: lw, height: lh };
+                            }
+                        }
+                        // Not a text node, return default
+                        taffy::geometry::Size { 
+                            width: known_dimensions.width.unwrap_or(0.0), 
+                            height: known_dimensions.height.unwrap_or(0.0) 
+                        }
+                    });
+                }
+                id
+            });
+
+            rid
         };
         
         let mut scene = Scene::new();
 
-        if let Some(id) = rid { 
-            let g = shared_state.lock().unwrap(); 
-            render_node_recursive_with_transform(id, &g, &mut scene, Vec2::ZERO, Affine::IDENTITY); 
+        if let Some(id) = rid {
+            let g = shared_state.lock().unwrap();
+            let mut editors = self.editors.lock().unwrap();
+            render_node_recursive_with_transform(id, &g, &mut editors, &mut scene, Vec2::ZERO, Affine::IDENTITY, h as f64);
         }
 
         // Offscreen logic alignment
@@ -219,19 +285,136 @@ impl VelloBackend {
     }
 }
 
-fn render_node_recursive_with_transform(id: u32, state: &SharedState, scene: &mut Scene, parent_pos: Vec2, transform: Affine) {
+// =============================================================================
+// Coordinate System Adapter
+// =============================================================================
+// 
+// UI Layer (Taffy/User Code):
+//   - Origin: Top-left (0, 0)
+//   - Y-axis: Downward (screen coordinates)
+//
+// Physical Layer (Vello) - OBSERVED BEHAVIOR:
+//   - Android: Cartesian (Y-up, origin bottom-left) - NEEDS FLIP
+//   - macOS:   Screen coordinates (Y-down, origin top-left) - NO FLIP
+//   - Web:     Screen coordinates (Y-down, origin top-left) - NO FLIP
+//
+// Adapter Strategy:
+//   - Android: Flip UI Y to Cartesian
+//   - macOS/Web: Use UI Y directly
+
+// =============================================================================
+// Coordinate System Adapter
+// =============================================================================
+// 
+// OBSERVED Vello Behavior:
+//   - Android: Cartesian (Y-up, origin bottom-left) → NEEDS FLIP
+//   - macOS:   Screen coords (Y-down, origin top-left) → NO FLIP
+//   - Web:     Screen coords (Y-down, origin top-left) → NO FLIP
+//
+// Taffy Limitation:
+//   - position:absolute not fully supported
+//   - Flexbox layout works consistently across all platforms
+
+/// Platform identifier for coordinate system
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Platform {
+    Android,
+    MacOS,
+    Web,
+}
+
+impl Platform {
+    /// Detect current platform
+    pub fn current() -> Self {
+        #[cfg(target_os = "android")]
+        return Platform::Android;
+        #[cfg(target_os = "macos")]
+        return Platform::MacOS;
+        #[cfg(target_arch = "wasm32")]
+        return Platform::Web;
+        #[cfg(not(any(target_os = "android", target_os = "macos", target_arch = "wasm32")))]
+        return Platform::MacOS; // Default to macOS behavior
+    }
+    
+    /// Check if platform needs Y-flip for Vello
+    /// true = Cartesian (Y-up), false = Screen (Y-down)
+    pub fn needs_y_flip(&self) -> bool {
+        matches!(self, Platform::Android)
+    }
+}
+
+/// Transform UI Y coordinate (Y-down, origin top-left) to Vello physical layer
+#[inline]
+pub fn ui_to_physical_y(ui_y: f64, viewport_height: f64, node_height: f64) -> f64 {
+    if Platform::current().needs_y_flip() {
+        // Cartesian: flip Y
+        viewport_height - ui_y - node_height
+    } else {
+        // Screen coords: use as-is
+        ui_y
+    }
+}
+
+fn render_node_recursive_with_transform(
+    id: u32, 
+    state: &SharedState, 
+    editors: &mut std::collections::HashMap<u32, Editor>,
+    scene: &mut Scene, 
+    parent_pos: Vec2, 
+    transform: Affine,
+    viewport_height: f64,
+) {
     if let Some(node) = state.nodes.get(&id) {
         let layout = state.taffy.layout(node.taffy_node).unwrap();
-        let global_pos = parent_pos + Vec2::new(layout.location.x as f64, layout.location.y as f64);
-        let rect = KRect::from_origin_size((global_pos.x, global_pos.y), (layout.size.width as f64, layout.size.height as f64));
-        if node.border_radius > 0.0 {
-            let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
-            scene.fill(Fill::NonZero, transform, node.color, None, &rounded);
+        let taffy_x = layout.location.x as f64;
+        let taffy_y = layout.location.y as f64;  // UI coordinate (Y-down)
+        let node_height = layout.size.height as f64;
+        let global_pos = parent_pos + Vec2::new(taffy_x, taffy_y);
+        
+        // Transform UI Y to physical layer based on platform
+        let rect_y = ui_to_physical_y(taffy_y, viewport_height, node_height);
+        let rect = KRect::from_origin_size(
+            (global_pos.x, rect_y), 
+            (layout.size.width as f64, node_height)
+        );
+        
+        if node.view_type == ViewType::Text {
+            // Render text using Editor
+            if let Some(editor) = editors.get_mut(&id) {
+                // IMPORTANT: Use the exact same width as Taffy computed
+                // to ensure measurement and rendering are consistent
+                let final_width = layout.size.width;
+                editor.set_width(Some(final_width));
+                
+                // Debug: log text node position
+                log::info!("Text node {}: taffy_y={}, rect_y={}, parent_pos.y={}, node_height={}",
+                    id, taffy_y, rect_y, parent_pos.y, node_height);
+                
+                // Platform-specific text transform:
+                // Android uses Cartesian (Y-up), need to flip text rendering
+                #[cfg(target_os = "android")]
+                let text_transform = {
+                    // Use original UI Y (taffy_y + parent_pos.y) for positioning
+                    // This is the Y-down coordinate from top-left
+                    let ui_y = taffy_y + parent_pos.y;
+                    let flip = Affine::scale_non_uniform(1.0, -1.0);
+                    transform * Affine::translate((global_pos.x, ui_y)) * flip
+                };
+                #[cfg(not(target_os = "android"))]
+                let text_transform = transform * Affine::translate((global_pos.x, rect_y));
+                
+                editor.draw(scene, text_transform);
+            }
         } else {
-            scene.fill(Fill::NonZero, transform, node.color, None, &rect);
+            if node.border_radius > 0.0 {
+                let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
+                scene.fill(Fill::NonZero, transform, node.color, None, &rounded);
+            } else {
+                scene.fill(Fill::NonZero, transform, node.color, None, &rect);
+            }
         }
-        for &child_id in &node.children { 
-            render_node_recursive_with_transform(child_id, state, scene, global_pos, transform); 
+        for &child_id in &node.children {
+            render_node_recursive_with_transform(child_id, state, editors, scene, global_pos, transform, viewport_height);
         }
     }
 }

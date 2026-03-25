@@ -116,6 +116,14 @@ fn gen_bindings() {
 fn main() {
     gen_bindings();
 
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let bindings_path = out_path.join("bindings.rs");
+    if let Ok(content) = fs::read_to_string(&bindings_path) {
+        if !content.contains("pub static m3Err_none") {
+            println!("cargo:rustc-cfg=needs_manual_err_defs");
+        }
+    }
+
     let mut cfg = cc::Build::new();
 
     let has_wasi = env::var("CARGO_FEATURE_WASI").is_ok();

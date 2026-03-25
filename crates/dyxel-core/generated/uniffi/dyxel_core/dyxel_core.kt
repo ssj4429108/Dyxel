@@ -966,7 +966,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_prepare_engine_async() != 41957.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_resize_native() != 32240.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_resize_native() != 58182.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_shutdown() != 44311.toShort()) {

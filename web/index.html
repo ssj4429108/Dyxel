@@ -106,6 +106,21 @@
                     }
                 }
             });
+
+            // Resize handler - update canvas size and notify engine
+            window.addEventListener('resize', () => {
+                const newDpr = window.devicePixelRatio || 1;
+                const newWidth = window.innerWidth * newDpr;
+                const newHeight = window.innerHeight * newDpr;
+                
+                canvas.width = newWidth;
+                canvas.height = newHeight;
+                
+                // Notify WebHost about resize
+                if (host.resize) {
+                    host.resize(newWidth, newHeight);
+                }
+            });
         }
 
         run().catch(console.error);

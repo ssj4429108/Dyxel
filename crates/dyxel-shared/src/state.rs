@@ -12,8 +12,10 @@ pub struct ViewNode {
     pub children: Vec<u32>, 
     pub z_index: i32, 
     pub label: String, 
-    pub text: String, 
-    pub font_size: f32, 
+    pub text: String,
+    pub font_size: f32,
+    pub font_family: String,
+    pub font_weight: u16,
     pub border_radius: f32, 
     pub role: Role, 
     pub view_type: ViewType, 
@@ -51,8 +53,10 @@ impl SharedState {
             children: vec![], 
             z_index: 0, 
             label: String::new(), 
-            text: String::new(), 
-            font_size: 16.0, 
+            text: String::new(),
+            font_size: 16.0,
+            font_family: String::new(),
+            font_weight: 400,
             border_radius: 0.0, 
             role: Role::None, 
             view_type: ViewType::Container, 
@@ -62,6 +66,23 @@ impl SharedState {
         if self.root_id.is_none() { self.root_id = Some(id); }
     }
     
+    pub fn create_text_node(&mut self, id: u32) {
+        self.create_node(id);
+        self.set_view_type(id, 1); // ViewType::Text
+    }
+
+    pub fn set_font_family(&mut self, id: u32, family: String) {
+        if let Some(node) = self.nodes.get_mut(&id) { node.font_family = family; }
+    }
+
+    pub fn set_font_weight(&mut self, id: u32, weight: u16) {
+        if let Some(node) = self.nodes.get_mut(&id) { node.font_weight = weight; }
+    }
+
+    pub fn set_color_rgba(&mut self, id: u32, r: u8, g: u8, b: u8, a: u8) {
+        if let Some(node) = self.nodes.get_mut(&id) { node.color = Color::from_rgba8(r, g, b, a); }
+    }
+
     pub fn set_view_type(&mut self, id: u32, vt: u32) { 
         if let Some(node) = self.nodes.get_mut(&id) { 
             node.view_type = match vt { 1 => ViewType::Text, 2 => ViewType::Button, _ => ViewType::Container }; 
@@ -92,25 +113,6 @@ impl SharedState {
         if let Some(node) = self.nodes.get(&id) { 
             let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
             s.size.height = match dt { 1 => taffy::style::Dimension::length(v), 2 => taffy::style::Dimension::percent(v / 100.0), _ => taffy::style::Dimension::auto() }; 
-            self.taffy.set_style(node.taffy_node, s).unwrap(); 
-        } 
-    }
-    
-    pub fn set_inset(&mut self, id: u32, t: f32, r: f32, b: f32, l: f32) { 
-        if let Some(node) = self.nodes.get(&id) { 
-            let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
-            s.inset.top = LengthPercentage::percent(t / 100.0).into(); 
-            s.inset.right = LengthPercentage::percent(r / 100.0).into(); 
-            s.inset.bottom = LengthPercentage::percent(b / 100.0).into(); 
-            s.inset.left = LengthPercentage::percent(l / 100.0).into(); 
-            self.taffy.set_style(node.taffy_node, s).unwrap(); 
-        } 
-    }
-    
-    pub fn set_position(&mut self, id: u32, p: u32) { 
-        if let Some(node) = self.nodes.get(&id) { 
-            let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
-            s.position = if p == 1 { Position::Absolute } else { Position::Relative }; 
             self.taffy.set_style(node.taffy_node, s).unwrap(); 
         } 
     }
@@ -151,6 +153,34 @@ impl SharedState {
                 2 => taffy::prelude::AlignItems::FlexEnd, 
                 3 => taffy::prelude::AlignItems::Stretch, 
                 _ => taffy::prelude::AlignItems::FlexStart 
+            }); 
+            self.taffy.set_style(node.taffy_node, s).unwrap(); 
+        } 
+    }
+    
+    pub fn set_flex_wrap(&mut self, id: u32, w: u32) { 
+        if let Some(node) = self.nodes.get(&id) { 
+            let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
+            s.flex_wrap = match w { 
+                1 => taffy::prelude::FlexWrap::Wrap, 
+                2 => taffy::prelude::FlexWrap::WrapReverse, 
+                _ => taffy::prelude::FlexWrap::NoWrap 
+            }; 
+            self.taffy.set_style(node.taffy_node, s).unwrap(); 
+        } 
+    }
+    
+    pub fn set_align_content(&mut self, id: u32, ac: u32) { 
+        if let Some(node) = self.nodes.get(&id) { 
+            let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
+            s.align_content = Some(match ac { 
+                1 => taffy::prelude::AlignContent::Center, 
+                2 => taffy::prelude::AlignContent::FlexEnd, 
+                3 => taffy::prelude::AlignContent::Stretch, 
+                4 => taffy::prelude::AlignContent::SpaceBetween, 
+                5 => taffy::prelude::AlignContent::SpaceAround, 
+                6 => taffy::prelude::AlignContent::SpaceEvenly, 
+                _ => taffy::prelude::AlignContent::FlexStart 
             }); 
             self.taffy.set_style(node.taffy_node, s).unwrap(); 
         } 
