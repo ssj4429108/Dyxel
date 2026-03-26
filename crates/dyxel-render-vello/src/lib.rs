@@ -207,7 +207,12 @@ impl VelloBackend {
         if let Some(id) = rid {
             let g = shared_state.lock().unwrap();
             let mut editors = self.editors.lock().unwrap();
-            render_node_recursive_with_transform(id, &g, &mut editors, &mut scene, Vec2::ZERO, Affine::IDENTITY, h as f64);
+            
+            // Apply platform correction at the root level
+            // This ensures all rendering (rects, text, glyphs) uses consistent coordinates
+            let root_transform = platform_correction(h as f64);
+            
+            render_node_recursive_with_transform(id, &g, &mut editors, &mut scene, Vec2::ZERO, root_transform);
         }
 
         // Offscreen logic alignment
@@ -286,72 +291,43 @@ impl VelloBackend {
 }
 
 // =============================================================================
-// Coordinate System Adapter
+// Platform Coordinate System Correction
 // =============================================================================
 // 
 // UI Layer (Taffy/User Code):
 //   - Origin: Top-left (0, 0)
 //   - Y-axis: Downward (screen coordinates)
 //
-// Physical Layer (Vello) - OBSERVED BEHAVIOR:
-//   - Android: Cartesian (Y-up, origin bottom-left) - NEEDS FLIP
-//   - macOS:   Screen coordinates (Y-down, origin top-left) - NO FLIP
-//   - Web:     Screen coordinates (Y-down, origin top-left) - NO FLIP
+// Vello Physical Layer (OBSERVED):
+//   - Android: Cartesian (Y-up, origin bottom-left) - NEEDS CORRECTION
+//   - macOS:   Screen coordinates (Y-down, origin top-left) - NO CORRECTION
+//   - Web:     Screen coordinates (Y-down, origin top-left) - NO CORRECTION
 //
-// Adapter Strategy:
-//   - Android: Flip UI Y to Cartesian
-//   - macOS/Web: Use UI Y directly
-
-// =============================================================================
-// Coordinate System Adapter
-// =============================================================================
-// 
-// OBSERVED Vello Behavior:
-//   - Android: Cartesian (Y-up, origin bottom-left) → NEEDS FLIP
-//   - macOS:   Screen coords (Y-down, origin top-left) → NO FLIP
-//   - Web:     Screen coords (Y-down, origin top-left) → NO FLIP
+// Correction Strategy:
+//   - Android: Apply platform_correction transform to align rendering with touch
+//   - macOS/Web: Use identity transform (no correction needed)
 //
-// Taffy Limitation:
-//   - position:absolute not fully supported
-//   - Flexbox layout works consistently across all platforms
+// The correction matrix: translate((0, height)) * scale(1, -1)
+//   - Flips Y axis (scale_y = -1) to convert Y-down to Y-up
+//   - Translates by viewport height to move origin back to top-left
 
-/// Platform identifier for coordinate system
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Platform {
-    Android,
-    MacOS,
-    Web,
-}
-
-impl Platform {
-    /// Detect current platform
-    pub fn current() -> Self {
-        #[cfg(target_os = "android")]
-        return Platform::Android;
-        #[cfg(target_os = "macos")]
-        return Platform::MacOS;
-        #[cfg(target_arch = "wasm32")]
-        return Platform::Web;
-        #[cfg(not(any(target_os = "android", target_os = "macos", target_arch = "wasm32")))]
-        return Platform::MacOS; // Default to macOS behavior
-    }
-    
-    /// Check if platform needs Y-flip for Vello
-    /// true = Cartesian (Y-up), false = Screen (Y-down)
-    pub fn needs_y_flip(&self) -> bool {
-        matches!(self, Platform::Android)
-    }
-}
-
-/// Transform UI Y coordinate (Y-down, origin top-left) to Vello physical layer
+/// Returns the platform-specific coordinate correction transform.
+/// 
+/// This transform should be applied at the top level of the render pipeline
+/// to convert UI coordinates (origin top-left, Y-down) to Vello's expected
+/// coordinates on Android (origin bottom-left, Y-up).
+/// 
+/// On macOS and Web, this returns identity since Vello uses screen coordinates.
 #[inline]
-pub fn ui_to_physical_y(ui_y: f64, viewport_height: f64, node_height: f64) -> f64 {
-    if Platform::current().needs_y_flip() {
-        // Cartesian: flip Y
-        viewport_height - ui_y - node_height
-    } else {
-        // Screen coords: use as-is
-        ui_y
+pub fn platform_correction(viewport_height: f64) -> Affine {
+    #[cfg(target_os = "android")]
+    {
+        Affine::translate((0.0, viewport_height)) * Affine::scale_non_uniform(1.0, -1.0)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = viewport_height; // Silence unused warning on non-Android
+        Affine::IDENTITY
     }
 }
 
@@ -362,77 +338,60 @@ fn render_node_recursive_with_transform(
     scene: &mut Scene, 
     parent_pos: Vec2, 
     transform: Affine,
-    viewport_height: f64,
 ) {
     if let Some(node) = state.nodes.get(&id) {
         let layout = state.taffy.layout(node.taffy_node).unwrap();
         let taffy_x = layout.location.x as f64;
         let taffy_y = layout.location.y as f64;  // UI coordinate (Y-down)
+        let node_width = layout.size.width as f64;
         let node_height = layout.size.height as f64;
         let global_pos = parent_pos + Vec2::new(taffy_x, taffy_y);
         
-        // Transform UI Y to physical layer based on platform
-        let rect_y = ui_to_physical_y(taffy_y, viewport_height, node_height);
-        let rect = KRect::from_origin_size(
-            (global_pos.x, rect_y), 
-            (layout.size.width as f64, node_height)
-        );
+        // Build local transform for this node (UI coordinates, origin top-left)
+        let local_transform = transform * Affine::translate((global_pos.x, global_pos.y));
         
         if node.view_type == ViewType::Text {
             // Render text using Editor
             if let Some(editor) = editors.get_mut(&id) {
-                // IMPORTANT: Use the exact same width as Taffy computed
-                // to ensure measurement and rendering are consistent
-                let final_width = layout.size.width;
-                editor.set_width(Some(final_width));
+                // Sync the editor's layout width with Taffy's computed layout.
+                // The Editor::set_width method is idempotent - it only triggers
+                // a re-layout if the width has actually changed.
+                let target_width = layout.size.width;
+                editor.set_width(Some(target_width));
                 
-                // Debug: log text node position
-                log::info!("Text node {}: taffy_y={}, rect_y={}, parent_pos.y={}, node_height={}",
-                    id, taffy_y, rect_y, parent_pos.y, node_height);
-                
-                // Platform-specific text transform:
-                // Android uses Cartesian (Y-up), need to flip text rendering
-                #[cfg(target_os = "android")]
-                let text_transform = {
-                    // Use original UI Y (taffy_y + parent_pos.y) for positioning
-                    // This is the Y-down coordinate from top-left
-                    let ui_y = taffy_y + parent_pos.y;
-                    let flip = Affine::scale_non_uniform(1.0, -1.0);
-                    transform * Affine::translate((global_pos.x, ui_y)) * flip
-                };
-                #[cfg(not(target_os = "android"))]
-                let text_transform = transform * Affine::translate((global_pos.x, rect_y));
-                
-                editor.draw(scene, text_transform);
+                // Pass the local transform to editor
+                // The platform correction is already applied at the root level
+                editor.draw(scene, local_transform);
             }
         } else {
+            // Render rectangle at local position
+            // Note: rect is defined at (0, 0) with node dimensions,
+            // the transform handles positioning
+            let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
+            
             if node.border_radius > 0.0 {
                 let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
-                scene.fill(Fill::NonZero, transform, node.color, None, &rounded);
+                scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
             } else {
-                scene.fill(Fill::NonZero, transform, node.color, None, &rect);
+                scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
             }
         }
+        
+        // Recursively render children with updated parent position
         for &child_id in &node.children {
-            render_node_recursive_with_transform(child_id, state, editors, scene, global_pos, transform, viewport_height);
+            render_node_recursive_with_transform(child_id, state, editors, scene, global_pos, transform);
         }
     }
 }
 
 impl RenderBackend for VelloBackend {
     fn init(&self, device: &wgpu::Device, queue: &wgpu::Queue, config: BackendConfig) -> anyhow::Result<()> {
-        log::info!("VelloBackend: Initializing...");
-        
         // Try using pre-compiled SPIR-V, fall back to WGSL if it fails
         let blit_shader = if cfg!(target_os = "android") {
-            log::info!("VelloBackend: Attempting to use SPIR-V for blit shader on Android");
-            // Ensure SPIR-V data is properly aligned
             let spv_words: Vec<u32> = BLIT_SHADER_SPV
                 .chunks_exact(4)
                 .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                 .collect();
-            
-            log::info!("VelloBackend: SPIR-V data size: {} bytes, {} words", BLIT_SHADER_SPV.len(), spv_words.len());
             
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Blit Shader (SPIR-V)"),
@@ -492,11 +451,19 @@ impl RenderBackend for VelloBackend {
             None
         };
 
-                #[cfg(not(target_arch = "wasm32"))]
-        let num_threads = std::thread::available_parallelism().ok().map(|n| n.get().max(8));
+        // Android 上限制最大线程数避免 ANR，其他平台动态获取
+        #[cfg(not(target_arch = "wasm32"))]
+        let num_threads = std::thread::available_parallelism()
+            .ok()
+            .map(|n| {
+                #[cfg(target_os = "android")]
+                return n.get().min(4);  // Android 最多 4 线程
+                #[cfg(not(target_os = "android"))]
+                return n.get().max(4);
+            });
         #[cfg(target_arch = "wasm32")]
         let num_threads = None;
-
+        
         let renderer = Renderer::new(device, RendererOptions {
             antialiasing_support: vello::AaSupport::area_only(),
             pipeline_cache: pipeline_cache.clone(),
@@ -511,7 +478,6 @@ impl RenderBackend for VelloBackend {
         *self.pipeline_cache.lock().unwrap() = pipeline_cache;
         *self.cache_path.lock().unwrap() = Some(cache_path);
 
-        // Prewarm pipelines
         self.prewarm_pipelines(device, wgpu::TextureFormat::Rgba8Unorm);
 
         // Warmup draw
@@ -537,9 +503,8 @@ impl RenderBackend for VelloBackend {
                 antialiasing_method: vello::AaConfig::Area,
             };
             let _ = renderer.render_to_texture(device, queue, &scene, &dummy_view, &params);
-            log::info!("VelloBackend: Warmup draw complete.");
         }
-
+        
         Ok(())
     }
 

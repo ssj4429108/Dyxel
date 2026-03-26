@@ -84,6 +84,50 @@ pub extern "C" fn Java_com_dyxel_android_DyxelEngine_initLogger(
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
+    
+    // Set custom panic hook to capture backtrace and log to logcat
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = backtrace::Backtrace::new();
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unknown>");
+        
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic payload".to_string()
+        };
+        
+        let location = if let Some(loc) = info.location() {
+            format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
+        } else {
+            "<unknown location>".to_string()
+        };
+        
+        log::error!("╔══════════════════════════════════════════════════════════════╗");
+        log::error!("║ RUST PANIC                                                   ║");
+        log::error!("╠══════════════════════════════════════════════════════════════╣");
+        log::error!("║ Thread: {}", thread_name);
+        log::error!("║ Location: {}", location);
+        log::error!("║ Payload: {}", payload);
+        log::error!("╠══════════════════════════════════════════════════════════════╣");
+        log::error!("║ Backtrace:");
+        for (i, frame) in backtrace.frames().iter().enumerate() {
+            for symbol in frame.symbols() {
+                let name = symbol.name().map(|n| n.to_string()).unwrap_or_else(|| "<unknown>".to_string());
+                let file = symbol.filename().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "<unknown>".to_string());
+                let line = symbol.lineno().map(|l| l.to_string()).unwrap_or_else(|| "?".to_string());
+                log::error!("║   {}: {} at {}:{}", i, name, file, line);
+            }
+        }
+        log::error!("╚══════════════════════════════════════════════════════════════╝");
+        
+        // Also print to stderr as fallback
+        eprintln!("RUST PANIC in thread '{}' at {}", thread_name, location);
+        eprintln!("Payload: {}", payload);
+        eprintln!("Backtrace:\n{:?}", backtrace);
+    }));
 }
 
 impl HasWindowHandle for SafeWindowHandle { 

@@ -47,15 +47,16 @@ impl EngineState {
 }
 
 pub async fn setup_engine(ddir: String, _es: SharedPtr<SharedMutex<Option<EngineState>>>) -> anyhow::Result<EngineState> {
-    #[cfg(not(target_arch = "wasm32"))]
-    let total_start = Instant::now();
-
     let mut context = RenderContext::new(); 
-    let dev_id = context.device(None).await.ok_or_else(|| anyhow::anyhow!("No device found"))?;
+    
+    // 使用 pollster 阻塞等待设备初始化，避免异步调度问题
+    let dev_id = pollster::block_on(async {
+        context.device(None).await
+    }).ok_or_else(|| anyhow::anyhow!("No device found"))?;
+    
     let device = &context.devices[dev_id].device;
     let queue = &context.devices[dev_id].queue;
 
-    // Create and initialize Vello backend
     let backend = VelloBackend::new();
     backend.init(device, queue, BackendConfig { data_dir: ddir })?;
 
@@ -77,8 +78,6 @@ pub async fn setup_engine(ddir: String, _es: SharedPtr<SharedMutex<Option<Engine
         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] shared_buffer_ptr: Mutex::new(None), 
     };
 
-    #[cfg(not(target_arch = "wasm32"))]
-    log::info!("PERF: setup_engine total took {:?}", total_start.elapsed());
     Ok(engine)
 }
 

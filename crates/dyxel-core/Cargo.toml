@@ -45,6 +45,7 @@ tokio = { version = "1", features = ["sync"] }
 android_logger = "0.13"
 ndk-sys = "0.6"
 jni = "0.21"
+backtrace = "0.3"
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }

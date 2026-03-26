@@ -41,15 +41,15 @@ pub extern "C" fn main() {
 
     let _ = View { id: 0 }.child(text_node.id);
 
-    // for i in 1..100 {
-    //     let child = View::new()
-    //         .align_items(AlignItems::FlexStart)
-    //         .width(30.0)
-    //         .height(30.0)
-    //         .color((200, 50, 50));
+    for i in 1..100 {
+        let child = View::new()
+            .align_items(AlignItems::FlexStart)
+            .width(30.0)
+            .height(30.0)
+            .color((200, 50, 50));
 
-    //     let _ = View { id: 0 }.child(child.id);
-    // }
+        let _ = View { id: 0 }.child(child.id);
+    }
 }
 
 static FRAME_COUNT: AtomicU32 = AtomicU32::new(0);

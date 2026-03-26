@@ -19,6 +19,9 @@ pub struct Editor {
     layout_cx: LayoutContext<Brush>,
     editor: PlainEditor<Brush>,
     cursor_visible: bool,
+    /// Track the current layout width to avoid unnecessary re-layouts.
+    /// This is the width that was last passed to PlainEditor.
+    current_width: Option<f32>,
 }
 
 impl Editor {
@@ -38,6 +41,7 @@ impl Editor {
             layout_cx: LayoutContext::default(),
             editor,
             cursor_visible: true,
+            current_width: None,
         }
     }
     
@@ -69,9 +73,29 @@ impl Editor {
         self.editor.edit_styles().insert(StyleProperty::Brush(Brush::Solid(color)));
     }
     
-    /// Set layout width (for line wrapping)
+    /// Set layout width (for line wrapping).
+    /// This method is idempotent - it only updates the underlying PlainEditor
+    /// if the width has actually changed. This prevents unnecessary re-layouts
+    /// that can cause text wrapping issues.
     pub fn set_width(&mut self, width: Option<f32>) {
-        self.editor.set_width(width);
+        // Only update if width has changed (with small epsilon for float comparison)
+        let changed = match (self.current_width, width) {
+            (Some(old), Some(new)) => (old - new).abs() > 0.001,
+            (None, None) => false,
+            _ => true, // One is Some and other is None
+        };
+        
+        if changed {
+            self.current_width = width;
+            self.editor.set_width(width);
+        }
+    }
+    
+    /// Get the current layout width that was set.
+    /// This may differ from layout_size().0 if the width was just set
+    /// but layout hasn't been computed yet.
+    pub fn width(&self) -> Option<f32> {
+        self.current_width
     }
     
     /// Get current generation (for dirty checking)
@@ -257,10 +281,9 @@ impl Editor {
                     .skew()
                     .map(|angle| Affine::skew(angle.to_radians().tan() as f64, 0.0));
                 
-                // Get the line height for Android offset calculation
-                #[cfg(target_os = "android")]
-                let line_height = layout.height();
-                
+                // Build glyph iterator
+                // Note: glyph positions are in UI coordinates (origin top-left, Y-down)
+                // The renderer applies platform_correction transform to convert to Vello's coordinate system
                 let glyphs = glyph_run.glyphs().map(|glyph| {
                     let gx = x + glyph.x;
                     let gy = y + glyph.y;

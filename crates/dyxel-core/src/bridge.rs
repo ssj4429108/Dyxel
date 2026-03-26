@@ -305,16 +305,22 @@ impl DyxelHost {
     }
 
     pub async fn prepare_engine_async(&self, ddir: String, _wasm_bytes: Vec<u8>) {
+        log::info!("prepare_engine_async: START - ddir={}", ddir);
         {
             let mut status = self.engine_status.async_lock().await;
             if !matches!(*status, EngineStatus::Uninitialized) { 
+                log::warn!("prepare_engine_async: Engine already initialized (status not Uninitialized), skipping");
                 return; 
             }
+            log::info!("prepare_engine_async: Setting status to Loading");
             *status = EngineStatus::Loading;
         }
+        
         use crate::engine::SharedPtr as EngineSharedPtr;
         use crate::engine::SharedMutex as EngineSharedMutex;
+        
         let result = setup_engine(ddir, EngineSharedPtr::new(EngineSharedMutex::new(None))).await;
+        
         match result {
             Ok(engine) => {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -339,13 +345,10 @@ impl DyxelHost {
     pub async fn load_wasm(&self, wasm_path: String) {
         loop {
             let n = self.engine_ready_notify.wait();
-            
             {
                 let status = self.engine_status.async_lock().await;
                 match *status {
-                    EngineStatus::Ready(_) => {
-                        break;
-                    }
+                    EngineStatus::Ready(_) => break,
                     EngineStatus::Error(ref e) => {
                         log::error!("DyxelHost: Cannot load WASM: Engine is in error state: {}", e);
                         return;
@@ -366,7 +369,6 @@ impl DyxelHost {
             #[cfg(any(not(feature = "wasm3-support"), target_arch = "wasm32"))] {
                 let _ = wasm_path;
                 let _ = e;
-                log::warn!("DyxelHost: load_wasm called but wasm3-support is not enabled or on WASM platform");
             }
         }
     }
@@ -451,10 +453,23 @@ impl DyxelHost {
     }
 
     pub async fn init_native(&self, _surface_ptr: u64, ddir: String, _w: u32, _h: u32) {
-        self.prepare_engine(ddir.clone()).await;
-        #[cfg(target_os = "android")] let sh = SharedPtr::new(SafeWindowHandle::new_android(_surface_ptr));
-        #[cfg(target_os = "ios")] let sh = SharedPtr::new(SafeWindowHandle::new_ios(_surface_ptr));
-        #[cfg(any(target_os = "android", target_os = "ios"))] self.setup(vello::wgpu::SurfaceTarget::from(sh.clone()), _w, _h, Some(sh)).await;
+        // 检查引擎状态，如果未初始化则准备引擎
+        {
+            let status = self.engine_status.async_lock().await;
+            if matches!(*status, EngineStatus::Uninitialized) {
+                drop(status);
+                self.prepare_engine(ddir.clone()).await;
+            }
+        }
+        
+        #[cfg(target_os = "android")] {
+            let sh = SharedPtr::new(SafeWindowHandle::new_android(_surface_ptr));
+            self.setup(vello::wgpu::SurfaceTarget::from(sh.clone()), _w, _h, Some(sh)).await;
+        }
+        #[cfg(target_os = "ios")] {
+            let sh = SharedPtr::new(SafeWindowHandle::new_ios(_surface_ptr));
+            self.setup(vello::wgpu::SurfaceTarget::from(sh.clone()), _w, _h, Some(sh)).await;
+        }
     }
 
     pub fn stop_native(&self) { 
@@ -486,15 +501,12 @@ impl DyxelHost {
     pub async fn setup(&self, target: vello::wgpu::SurfaceTarget<'static>, width: u32, height: u32, _handle: Option<SharedPtr<SafeWindowHandle>>) {
         loop {
             let n = self.engine_ready_notify.wait();
-
             {
                 let status = self.engine_status.async_lock().await;
                 match *status {
-                    EngineStatus::Ready(_) => {
-                        break;
-                    }
-                    EngineStatus::Error(_) => {
-                        log::error!("DyxelHost: setup engine is in Error state, aborting");
+                    EngineStatus::Ready(_) => break,
+                    EngineStatus::Error(ref err) => {
+                        log::error!("DyxelHost: setup engine is in Error state: {}, aborting", err);
                         return;
                     }
                     _ => {}
@@ -506,29 +518,35 @@ impl DyxelHost {
         let mut status_lock = self.engine_status.async_lock().await;
         if let EngineStatus::Ready(ref mut e) = *status_lock {
             let nid = self.next_surface_id.fetch_add(1, Ordering::SeqCst);
-            if let Ok(mut ss) = e.backend.create_surface_state(&mut e.context, Some(target), 0, width, height) {
-                render_frame(e, ss.as_mut());
-                e.on_lifecycle_event(dyxel_render_api::LifecycleEvent::FirstFrameDone);
+            
+            match e.backend.create_surface_state(&mut e.context, Some(target), 0, width, height) {
+                Ok(mut ss) => {
+                    render_frame(e, ss.as_mut());
+                    e.on_lifecycle_event(dyxel_render_api::LifecycleEvent::FirstFrameDone);
 
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    self.surfaces.lock_guard().unwrap().insert(nid, ss);                
-                    if let Some(tx) = &*self.command_tx.lock().unwrap() {
-                        let _ = tx.send(EngineMessage::SetSurfaceActive(SurfaceId(nid)));
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.surfaces.lock_guard().unwrap().insert(nid, ss);                
+                        if let Some(tx) = &*self.command_tx.lock().unwrap() {
+                            let _ = tx.send(EngineMessage::SetSurfaceActive(SurfaceId(nid)));
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if let Some(mut surfs) = self.surfaces.try_lock_guard() {
+                            surfs.insert(nid, ss);
+                        }
+                        if let Some(mut id) = self.active_surface_id.try_lock_guard() {
+                            *id = Some(SurfaceId(nid));
+                        }
                     }
                 }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    if let Some(mut surfs) = self.surfaces.try_lock_guard() {
-                        surfs.insert(nid, ss);
-                    }
-                    if let Some(mut id) = self.active_surface_id.try_lock_guard() {
-                        *id = Some(SurfaceId(nid));
-                    }
+                Err(err) => {
+                    log::error!("DyxelHost: Failed to create surface state: {:?}", err);
                 }
-            } else {
-                log::error!("DyxelHost: Failed to create surface state");
             }
+        } else {
+            log::error!("setup: Engine not in Ready state when creating surface");
         }
     }
 

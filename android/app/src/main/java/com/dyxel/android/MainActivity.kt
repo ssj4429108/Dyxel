@@ -11,6 +11,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var engine: DyxelEngine
     private var surfaceView: SurfaceView? = null
+    private var isInitialized = false
+    private var isInitializing = false
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -29,29 +31,68 @@ class MainActivity : AppCompatActivity() {
             override fun surfaceCreated(holder: SurfaceHolder) {}
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                val ptr = engine.getNativeSurface(holder.surface)
-                lifecycleScope.launch(Dispatchers.Default) {
-                    if (engine.host.isInitialized()) {
+                if (isInitialized) {
+                    lifecycleScope.launch(Dispatchers.Default) {
                         engine.host.resizeNative(width.toUInt(), height.toUInt())
-                    } else {
-                        val wasmPath = "${filesDir.absolutePath}/guest.wasm"
-                        // Just call initNative, it will automatically prepare engine and start auto loop internally
-                        engine.host.initNative(ptr.toULong(), filesDir.absolutePath, width.toUInt(), height.toUInt())
-                        // Load business WASM after engine is ready
+                    }
+                    return
+                }
+                
+                if (isInitializing) return
+                isInitializing = true
+                
+                lifecycleScope.launch(Dispatchers.Default) {
+                    try {
+                        val dataDir = filesDir.absolutePath
+                        val wasmPath = "$dataDir/guest.wasm"
+                        
+                        // Wait for engine ready
+                        var waitCount = 0
+                        while (!engine.host.isEngineReady() && waitCount < 200) {
+                            delay(50)
+                            waitCount++
+                        }
+                        if (!engine.host.isEngineReady()) {
+                            throw IllegalStateException("Engine failed to become ready")
+                        }
+                        
+                        val ptr = engine.getNativeSurface(holder.surface)
+                        engine.host.initNative(ptr.toULong(), dataDir, width.toUInt(), height.toUInt())
+                        
+                        // Wait for surface initialized
+                        waitCount = 0
+                        while (!engine.host.isInitialized() && waitCount < 100) {
+                            delay(50)
+                            waitCount++
+                        }
+                        if (!engine.host.isInitialized()) {
+                            throw IllegalStateException("Surface failed to initialize")
+                        }
+                        
                         engine.host.loadWasm(wasmPath)
+                        isInitialized = true
+                        
+                    } catch (e: Exception) {
+                        android.util.Log.e("DyxelMain", "Initialization failed", e)
+                        isInitializing = false
                     }
                 }
             }
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                // Stop auto loop and destroy Surface
-                engine.host.stopNative()
+                isInitialized = false
+                isInitializing = false
+                lifecycleScope.launch(Dispatchers.Default) {
+                    engine.host.stopNative()
+                }
             }
         })
 
         sv.setOnTouchListener { v, event ->
             if (event.action == MotionEvent.ACTION_DOWN) {
-                engine.host.onTouch(event.x, event.y)
+                if (isInitialized) {
+                    engine.host.onTouch(event.x, event.y)
+                }
                 v.performClick()
             }
             true
