@@ -260,30 +260,36 @@ impl VelloBackend {
             }
         ).map_err(|e| anyhow::anyhow!("Vello render error: {:?}", e))?;
         
-        if let Ok(st) = v_surface_surface.surface.get_current_texture() {
-            let mut enc = device.create_command_encoder(&Default::default());
-            { 
-                let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor { 
-                    label: Some("Vello Blit Pass"), 
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
-                        view: &st.texture.create_view(&Default::default()), 
-                        resolve_target: None, 
-                        ops: wgpu::Operations { 
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 
-                            store: wgpu::StoreOp::Store 
-                        }, 
-                        depth_slice: None 
-                    })], 
-                    depth_stencil_attachment: None, 
+        match v_surface_surface.surface.get_current_texture() {
+            Ok(st) => {
+                let mut enc = device.create_command_encoder(&Default::default());
+                { 
+                    let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor { 
+                        label: Some("Vello Blit Pass"), 
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
+                            view: &st.texture.create_view(&Default::default()), 
+                            resolve_target: None, 
+                            ops: wgpu::Operations { 
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 
+                                store: wgpu::StoreOp::Store 
+                            }, 
+                            depth_slice: None 
+                        })], 
+                        depth_stencil_attachment: None, 
                     timestamp_writes: None, 
-                    occlusion_query_set: None 
-                }); 
-                rp.set_pipeline(blit_pipeline); 
-                rp.set_bind_group(0, blit_bg, &[]); 
-                rp.draw(0..3, 0..1); 
+                        occlusion_query_set: None 
+                    }); 
+                    rp.set_pipeline(blit_pipeline); 
+                    rp.set_bind_group(0, blit_bg, &[]); 
+                    rp.draw(0..3, 0..1); 
+                }
+                queue.submit(Some(enc.finish())); 
+                st.present();
             }
-            queue.submit(Some(enc.finish())); 
-            st.present();
+            Err(e) => {
+                log::error!("VelloBackend: get_current_texture failed: {:?}", e);
+                return Err(anyhow::anyhow!("Surface texture acquisition failed: {:?}", e));
+            }
         }
 
         Ok(())
@@ -517,6 +523,9 @@ impl RenderBackend for VelloBackend {
         width: u32,
         height: u32,
     ) -> anyhow::Result<Box<dyn SurfaceState>> {
+        log::info!("VelloBackend: create_surface_state START - size: {}x{}, has_precreated_surface: {}", 
+            width, height, surface.is_some());
+        
         let surface = if let Some(s) = surface {
             log::info!("VelloBackend: Using pre-created surface");
             pollster::block_on(context.create_render_surface(s, width, height, wgpu::PresentMode::AutoVsync))
@@ -526,6 +535,8 @@ impl RenderBackend for VelloBackend {
             pollster::block_on(context.create_surface(target.expect("Vello requires a surface target"), width, height, wgpu::PresentMode::AutoVsync))
                 .map_err(|e| anyhow::anyhow!("Failed to create surface: {:?}", e))?
         };
+        
+        log::info!("VelloBackend: Surface created, format: {:?}, dev_id: {}", surface.config.format, surface.dev_id);
         
         let blit_layout_lock = self.blit_bind_group_layout.lock().unwrap();
         let blit_shader_lock = self.blit_shader.lock().unwrap();
@@ -564,26 +575,37 @@ impl RenderBackend for VelloBackend {
             cache: self.pipeline_cache.lock().unwrap().as_ref()
         });
 
+        log::info!("VelloBackend: Blit pipeline created successfully");
+        
         #[cfg(target_os = "macos")]
-        return Ok(Box::new(mac::MacVelloSurfaceState {
-            surface,
-            blit_pipeline: blit_p,
-            offscreen_texture: None,
-        }));
-
+        {
+            log::info!("VelloBackend: Creating MacVelloSurfaceState");
+            return Ok(Box::new(mac::MacVelloSurfaceState {
+                surface,
+                blit_pipeline: blit_p,
+                offscreen_texture: None,
+            }));
+        }
+        
         #[cfg(target_os = "android")]
-        return Ok(Box::new(android::AndroidVelloSurfaceState {
-            surface,
-            blit_pipeline: blit_p,
-            offscreen_texture: None,
-        }));
+        {
+            log::info!("VelloBackend: Creating AndroidVelloSurfaceState");
+            return Ok(Box::new(android::AndroidVelloSurfaceState {
+                surface,
+                blit_pipeline: blit_p,
+                offscreen_texture: None,
+            }));
+        }
 
         #[cfg(target_arch = "wasm32")]
-        return Ok(Box::new(web::WebVelloSurfaceState {
-            surface,
-            blit_pipeline: blit_p,
-            offscreen_texture: None,
-        }));
+        {
+            log::info!("VelloBackend: Creating WebVelloSurfaceState");
+            return Ok(Box::new(web::WebVelloSurfaceState {
+                surface,
+                blit_pipeline: blit_p,
+                offscreen_texture: None,
+            }));
+        }
 
         #[cfg(all(not(target_os = "macos"), not(target_os = "android"), not(target_arch = "wasm32")))]
         Err(anyhow::anyhow!("Unsupported platform"))
@@ -636,7 +658,13 @@ impl RenderBackend for VelloBackend {
             let _ = tx.send(());
         });
         
-        // Block the current thread until the GPU work is actually done.
-        let _ = rx.recv();
+        // Block the current thread until the GPU work is actually done, with timeout.
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(_) => log::debug!("VelloBackend: sync_gpu completed successfully"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                log::warn!("VelloBackend: sync_gpu timed out, GPU may be unresponsive");
+            }
+            Err(e) => log::error!("VelloBackend: sync_gpu error: {:?}", e),
+        }
     }
 }

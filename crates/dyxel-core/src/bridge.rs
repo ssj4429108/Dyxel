@@ -372,10 +372,11 @@ impl DyxelHost {
                                     nid,
                                 } => {
                                     log::info!(
-                                        "RenderThread: Creating surface id: {}, size: {}x{}",
+                                        "RenderThread: Creating surface id: {}, size: {}x{}, render_opt is_none: {}",
                                         nid,
                                         width,
-                                        height
+                                        height,
+                                        render_opt.is_none()
                                     );
                                     if let Some(ref mut r) = render_opt {
                                         match r.backend.create_surface_state(
@@ -650,14 +651,20 @@ impl DyxelHost {
             };
 
             log::info!("setup: Sending CreateSurface message");
-            let _ = tx.send(RenderMessage::CreateSurface {
+            match tx.send(RenderMessage::CreateSurface {
                 target,
                 surface,
                 width,
                 height,
                 nid,
-            });
-            let _ = tx.send(RenderMessage::RequestDraw);
+            }) {
+                Ok(_) => log::info!("setup: CreateSurface message sent successfully"),
+                Err(e) => log::error!("setup: Failed to send CreateSurface: {:?}", e),
+            }
+            match tx.send(RenderMessage::RequestDraw) {
+                Ok(_) => log::info!("setup: RequestDraw message sent successfully"),
+                Err(e) => log::error!("setup: Failed to send RequestDraw: {:?}", e),
+            }
         }
 
         // Resume LogicThread if it was paused (e.g., after Back button/activity restart)
