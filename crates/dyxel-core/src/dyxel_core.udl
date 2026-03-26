@@ -10,6 +10,8 @@ interface DyxelHost {
     void tick();
     void on_touch(f32 x, f32 y);
     boolean is_initialized();
+    boolean is_engine_ready();
+    boolean is_ready();
     [Async]
     void prepare_engine(string data_dir);
     [Async]

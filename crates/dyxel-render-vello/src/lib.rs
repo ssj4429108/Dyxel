@@ -512,12 +512,20 @@ impl RenderBackend for VelloBackend {
         &self,
         context: &mut ApiRenderContext,
         target: Option<wgpu::SurfaceTarget<'static>>,
+        surface: Option<wgpu::Surface<'static>>,
         _surface_ptr: u64,
         width: u32,
         height: u32,
     ) -> anyhow::Result<Box<dyn SurfaceState>> {
-        let surface = pollster::block_on(context.create_surface(target.expect("Vello requires a surface target"), width, height, wgpu::PresentMode::AutoVsync))
-            .map_err(|e| anyhow::anyhow!("Failed to create surface: {:?}", e))?;
+        let surface = if let Some(s) = surface {
+            log::info!("VelloBackend: Using pre-created surface");
+            pollster::block_on(context.create_render_surface(s, width, height, wgpu::PresentMode::AutoVsync))
+                .map_err(|e| anyhow::anyhow!("Failed to create render surface: {:?}", e))?
+        } else {
+            log::info!("VelloBackend: Creating surface from target");
+            pollster::block_on(context.create_surface(target.expect("Vello requires a surface target"), width, height, wgpu::PresentMode::AutoVsync))
+                .map_err(|e| anyhow::anyhow!("Failed to create surface: {:?}", e))?
+        };
         
         let blit_layout_lock = self.blit_bind_group_layout.lock().unwrap();
         let blit_shader_lock = self.blit_shader.lock().unwrap();
@@ -619,5 +627,16 @@ impl RenderBackend for VelloBackend {
             }
             _ => {}
         }
+    }
+
+    fn sync_gpu(&self, _device: &wgpu::Device, queue: &wgpu::Queue) {
+        // Use a synchronous channel to block until the callback is executed.
+        let (tx, rx) = std::sync::mpsc::sync_channel(0);
+        queue.on_submitted_work_done(move || {
+            let _ = tx.send(());
+        });
+        
+        // Block the current thread until the GPU work is actually done.
+        let _ = rx.recv();
     }
 }

@@ -1,25 +1,25 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#[cfg(not(target_arch = "wasm32"))]
+use kurbo::Vec2;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
-#[cfg(not(target_arch = "wasm32"))]
-use kurbo::Vec2;
-use tokio::sync::{Mutex as AsyncMutex, Notify};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex as StdMutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
-use crate::platform::{SurfaceId, SafeWindowHandle};
-use crate::engine::{EngineState, setup_engine};
-use crate::renderer::render_frame;
+use crate::engine::{setup_engine, LogicState, RenderState};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::input::hit_test_recursive;
+use crate::platform::{SafeWindowHandle, SurfaceId};
+use crate::renderer::render_frame;
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
 
@@ -33,7 +33,7 @@ pub enum InputEvent {
 pub enum EngineStatus {
     Uninitialized,
     Loading,
-    Ready(EngineState),
+    Running,
     Error(String),
 }
 
@@ -44,31 +44,61 @@ pub enum Lifecycle {
     Stopped,
 }
 
-#[allow(dead_code)]
-enum EngineMessage {
-    SetReady(EngineState),
-    SetSurfaceActive(SurfaceId),
-    Resize { width: u32, height: u32 },
+#[cfg(not(target_arch = "wasm32"))]
+pub enum LogicMessage {
+    SetReady(LogicState),
     Input(InputEvent),
-    Suspend,
+    LoadWasm(String),
+    Pause,
+    Resume,
     Shutdown,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn process_input_internal(e: &mut EngineState, event: InputEvent) {
+pub enum RenderMessage {
+    SetReady(RenderState),
+    CreateSurface {
+        target: Option<vello::wgpu::SurfaceTarget<'static>>,
+        surface: Option<vello::wgpu::Surface<'static>>,
+        width: u32,
+        height: u32,
+        nid: u64,
+    },
+    SetSurfaceActive(SurfaceId),
+    Resize {
+        width: u32,
+        height: u32,
+    },
+    RequestDraw,
+    Suspend(mpsc::Sender<()>), // Sync barrier with ACK
+    Shutdown,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
     match event {
         InputEvent::TouchDown { x, y } => {
             let mp = Vec2::new(x as f64, y as f64);
-            let hit = { 
-                let sg = e.shared_state.lock().unwrap(); 
-                sg.root_id.and_then(|rid| hit_test_recursive(rid, mp, &sg.nodes, &sg.taffy, Vec2::ZERO, &sg.click_listeners)) 
+            let hit = {
+                let sg = logic.shared_state.lock().unwrap();
+                sg.root_id.and_then(|rid| {
+                    hit_test_recursive(
+                        rid,
+                        mp,
+                        &sg.nodes,
+                        &sg.taffy,
+                        Vec2::ZERO,
+                        &sg.click_listeners,
+                    )
+                })
             };
-            if let Some(_target_id) = hit { 
-                #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] { 
-                    if let Some(on_click) = e.on_click_fn.lock().unwrap().as_ref() {
+            if let Some(_target_id) = hit {
+                #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+                {
+                    if let Some(on_click) = logic.on_click_fn.lock().unwrap().as_ref() {
                         let _ = on_click.call(_target_id);
                     }
-                } 
+                }
             }
         }
         _ => {}
@@ -77,32 +107,23 @@ fn process_input_internal(e: &mut EngineState, event: InputEvent) {
 
 // =============== Platform-specific synchronization primitives ===============
 
-// Import SharedPtr and SharedMutex from engine
 #[cfg(not(target_arch = "wasm32"))]
-use crate::engine::{SharedPtr, SharedMutex};
+use crate::engine::{SharedMutex, SharedPtr};
 #[cfg(target_arch = "wasm32")]
-use crate::engine::{SharedPtr, SharedMutex};
+use crate::engine::{SharedMutex, SharedPtr};
 
-// Async mutex for engine_status
-type EngineStatusMutex = AsyncMutex<EngineStatus>;
-
-// Notify for synchronization
+type EngineStatusMutex = StdMutex<EngineStatus>;
 type EngineReadyNotify = Notify;
 
-// Guard types
 #[cfg(not(target_arch = "wasm32"))]
 type SharedMutexGuard<'a, T> = std::sync::MutexGuard<'a, T>;
 #[cfg(target_arch = "wasm32")]
 type SharedMutexGuard<'a, T> = std::cell::RefMut<'a, T>;
 
-// Async guard
-type AsyncGuard<'a, T> = tokio::sync::MutexGuard<'a, T>;
+type AsyncGuard<'a, T> = std::sync::MutexGuard<'a, T>;
 
-// Trait extensions for cross-platform mutex operations
 trait SharedMutexExt<T> {
-    #[allow(dead_code)]
     fn lock_guard(&self) -> Result<SharedMutexGuard<'_, T>, ()>;
-    #[allow(dead_code)]
     fn try_lock_guard(&self) -> Option<SharedMutexGuard<'_, T>>;
 }
 
@@ -126,28 +147,21 @@ impl<T> SharedMutexExt<T> for SharedMutex<T> {
     }
 }
 
-// Async mutex extensions
 trait AsyncMutexExt<T: ?Sized> {
-    async fn async_lock<'a>(&'a self) -> AsyncGuard<'a, T> where T: 'a;
-    #[allow(dead_code)]
-    fn try_async_lock(&self) -> Option<AsyncGuard<'_, T>>;
-    #[allow(dead_code)]
-    fn blocking_lock_guard(&self) -> AsyncGuard<'_, T>;
+    fn lock_sync<'a>(&'a self) -> AsyncGuard<'a, T>
+    where
+        T: 'a;
 }
 
-impl<T: ?Sized> AsyncMutexExt<T> for AsyncMutex<T> {
-    async fn async_lock<'a>(&'a self) -> AsyncGuard<'a, T> where T: 'a {
-        self.lock().await
-    }
-    fn try_async_lock(&self) -> Option<AsyncGuard<'_, T>> {
-        self.try_lock().ok()
-    }
-    fn blocking_lock_guard(&self) -> AsyncGuard<'_, T> {
-        self.blocking_lock()
+impl<T: ?Sized> AsyncMutexExt<T> for StdMutex<T> {
+    fn lock_sync<'a>(&'a self) -> AsyncGuard<'a, T>
+    where
+        T: 'a,
+    {
+        self.lock().unwrap()
     }
 }
 
-// Notify extensions
 trait NotifyExt {
     async fn wait(&self);
     fn notify(&self);
@@ -165,404 +179,491 @@ impl NotifyExt for Notify {
 // =============== DyxelHost ===============
 
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Object))]
-pub struct DyxelHost { 
+pub struct DyxelHost {
     #[cfg(not(target_arch = "wasm32"))]
-    command_tx: StdMutex<Option<mpsc::Sender<EngineMessage>>>,
+    logic_tx: StdMutex<Option<mpsc::Sender<LogicMessage>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    render_tx: StdMutex<Option<mpsc::Sender<RenderMessage>>>,
+
     engine_status: SharedPtr<EngineStatusMutex>,
     engine_ready_notify: SharedPtr<EngineReadyNotify>,
-    pub active_surface_id: SharedPtr<SharedMutex<Option<SurfaceId>>>, 
+    pub active_surface_id: SharedPtr<SharedMutex<Option<SurfaceId>>>,
     pub next_surface_id: SharedPtr<AtomicU64>,
     pub surfaces: SharedPtr<SharedMutex<HashMap<u64, Box<dyn dyxel_render_api::SurfaceState>>>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub first_frame_rendered: std::sync::atomic::AtomicBool,
+    #[cfg(not(target_arch = "wasm32"))]
+    instance: StdMutex<Option<vello::wgpu::Instance>>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
 impl DyxelHost {
-    #[cfg_attr(not(target_arch = "wasm32"), uniffi::constructor)] 
-    pub fn new() -> SharedPtr<Self> { 
-        let engine_status = SharedPtr::new(EngineStatusMutex::new(EngineStatus::Uninitialized));
+    #[cfg_attr(not(target_arch = "wasm32"), uniffi::constructor)]
+    pub fn new() -> SharedPtr<Self> {
+        let engine_status = SharedPtr::new(StdMutex::new(EngineStatus::Uninitialized));
         let engine_ready_notify = SharedPtr::new(EngineReadyNotify::new());
         let surfaces = SharedPtr::new(SharedMutex::new(HashMap::new()));
         let active_surface_id = SharedPtr::new(SharedMutex::new(None));
         let next_surface_id = SharedPtr::new(AtomicU64::new(1));
 
         #[cfg(not(target_arch = "wasm32"))]
-        let (tx, rx) = mpsc::channel();
+        let (logic_tx, logic_rx) = mpsc::channel();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (render_tx, render_rx) = mpsc::channel();
 
-        let host = SharedPtr::new(Self { 
+        let host = SharedPtr::new(Self {
             #[cfg(not(target_arch = "wasm32"))]
-            command_tx: StdMutex::new(Some(tx)),
-            engine_status: engine_status.clone(), 
+            logic_tx: StdMutex::new(Some(logic_tx)),
+            #[cfg(not(target_arch = "wasm32"))]
+            render_tx: StdMutex::new(Some(render_tx.clone())),
+            engine_status: engine_status.clone(),
             engine_ready_notify: engine_ready_notify.clone(),
-            active_surface_id: active_surface_id.clone(), 
+            active_surface_id: active_surface_id.clone(),
             next_surface_id: next_surface_id.clone(),
             surfaces: surfaces.clone(),
             #[cfg(not(target_arch = "wasm32"))]
             first_frame_rendered: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(not(target_arch = "wasm32"))]
+            instance: StdMutex::new(None),
         });
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let status_ptr = engine_status.clone();
+            let render_tx_for_logic = render_tx.clone();
+
+            // 1. Logic Thread (Thinker)
+            thread::Builder::new()
+                .name("DyxelLogic".into())
+                .spawn(move || {
+                    log::info!("LogicThread: Thread spawned");
+                    let mut logic_opt: Option<LogicState> = None;
+                    let mut lifecycle = Lifecycle::Stopped;
+
+                    loop {
+                        // Receive message
+                        let msg_res = if lifecycle == Lifecycle::Running {
+                            logic_rx.try_recv().map_err(|e| anyhow::anyhow!(e))
+                        } else {
+                            logic_rx.recv().map_err(|e| anyhow::anyhow!(e))
+                        };
+
+                        if let Ok(msg) = msg_res {
+                            match msg {
+                                LogicMessage::SetReady(l) => {
+                                    log::info!("LogicThread: Received SetReady, setting lifecycle to Running");
+                                    logic_opt = Some(l);
+                                    lifecycle = Lifecycle::Running;
+                                }
+                                LogicMessage::Input(event) => {
+                                    log::debug!("LogicThread: Received Input {:?}", event);
+                                    if let Some(ref mut l) = logic_opt { process_input_internal(l, event); }
+                                }
+                                LogicMessage::LoadWasm(path) => {
+                                    log::info!("LogicThread: Received LoadWasm from {}", path);
+                                    if let Some(ref mut l) = logic_opt { let _ = l.load_wasm(path); }
+                                }
+                                LogicMessage::Pause => {
+                                    log::info!("LogicThread: Received Pause, setting lifecycle to Paused");
+                                    lifecycle = Lifecycle::Paused;
+                                }
+                                LogicMessage::Resume => {
+                                    log::info!("LogicThread: Received Resume, setting lifecycle to Running");
+                                    lifecycle = Lifecycle::Running;
+                                }
+                                LogicMessage::Shutdown => {
+                                    log::info!("LogicThread: Shutting down");
+                                    return;
+                                }
+                            }
+                        }
+
+                        if lifecycle == Lifecycle::Running {
+                            if let Some(ref mut l) = logic_opt {
+                                #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+                                {
+                                    use crate::runtime::{process_commands, sync_layout_to_wasm};
+                                    if let Some(tick) = l.tick_fn.lock().unwrap().as_ref() {
+                                        if let Err(e) = tick.call() {
+                                            log::error!("LogicThread: WASM tick failed: {}", e);
+                                        }
+                                    }
+                                    let bptr = *l.shared_buffer_ptr.lock().unwrap();
+                                    if let Some(bptr) = bptr {
+                                        let mem = unsafe { &mut *l._rt.memory_mut() };
+                                        let _ = process_commands(mem, bptr, &l.shared_state);
+                                        let _ = sync_layout_to_wasm(
+                                            mem,
+                                            bptr,
+                                            &l.shared_state.lock().unwrap(),
+                                        );
+                                    }
+                                }
+                                let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
+                            }
+                            // thread::sleep(Duration::from_millis(16)); // ~60fps logic tick
+                        }
+                    }
+                })
+                .expect("Failed to spawn LogicThread");
+
+            // 2. Render Thread (Rasterizer)
             let surfaces_ptr = surfaces.clone();
             let active_surface_ptr = active_surface_id.clone();
-            let _host_ptr = SharedPtr::downgrade(&host);
             let notify_ptr = engine_ready_notify.clone();
 
             thread::Builder::new()
-                .name("UIMainThread".to_string())
-                .stack_size(8 * 1024 * 1024) 
+                .name("DyxelRender".into())
                 .spawn(move || {
-                let mut input_queue = Vec::new();
-                let mut lifecycle = Lifecycle::Stopped;
+                    log::info!("RenderThread: Thread spawned");
+                    let mut render_opt: Option<RenderState> = None;
+                    let mut lifecycle = Lifecycle::Stopped;
 
-                let handle_msg = |msg: EngineMessage, lc: &mut Lifecycle, inputs: &mut Vec<InputEvent>| -> bool {
-                    match msg {
-                        EngineMessage::SetReady(engine) => {
-                            let mut status = pollster::block_on(status_ptr.async_lock());
-                            *status = EngineStatus::Ready(engine);
-                            *lc = Lifecycle::Running;
-                            notify_ptr.notify();
+                    loop {
+                        // Block on first message
+                        let msg = render_rx.recv().unwrap();
+
+                        // Coalesce messages
+                        let mut latest_resize = None;
+                        let mut draw_requested = false;
+                        let mut control_msgs = Vec::new();
+
+                        // Process the first message
+                        match msg {
+                            RenderMessage::Resize { width, height } => {
+                                latest_resize = Some((width, height));
+                            }
+                            RenderMessage::RequestDraw => {
+                                draw_requested = true;
+                            }
+                            _ => {
+                                control_msgs.push(msg);
+                            }
                         }
-                        EngineMessage::SetSurfaceActive(sid) => {
-                            *active_surface_ptr.lock_guard().unwrap() = Some(sid);
-                            *lc = Lifecycle::Running;
+
+                        // Drain the rest of the queue
+                        while let Ok(next) = render_rx.try_recv() {
+                            match next {
+                                RenderMessage::Resize { width, height } => {
+                                    latest_resize = Some((width, height));
+                                }
+                                RenderMessage::RequestDraw => {
+                                    draw_requested = true;
+                                }
+                                _ => {
+                                    control_msgs.push(next);
+                                }
+                            }
                         }
-                        EngineMessage::Resize { width, height } => {
+
+                        // 1. Process all control messages in order (CreateSurface, Suspend, etc.)
+                        for m in control_msgs {
+                            match m {
+                                RenderMessage::SetReady(r) => {
+                                    log::info!("RenderThread: Received SetReady, setting lifecycle to Running");
+                                    render_opt = Some(r);
+                                    lifecycle = Lifecycle::Running;
+                                    notify_ptr.notify();
+                                }
+                                RenderMessage::CreateSurface {
+                                    target,
+                                    surface,
+                                    width,
+                                    height,
+                                    nid,
+                                } => {
+                                    log::info!(
+                                        "RenderThread: Creating surface id: {}, size: {}x{}",
+                                        nid,
+                                        width,
+                                        height
+                                    );
+                                    if let Some(ref mut r) = render_opt {
+                                        match r.backend.create_surface_state(
+                                            &mut r.context,
+                                            target,
+                                            surface,
+                                            0,
+                                            width,
+                                            height,
+                                        ) {
+                                            Ok(ss) => {
+                                                log::info!(
+                                                    "RenderThread: Surface created successfully"
+                                                );
+                                                surfaces_ptr.lock_guard().unwrap().insert(nid, ss);
+                                                *active_surface_ptr.lock_guard().unwrap() =
+                                                    Some(SurfaceId(nid));
+                                                lifecycle = Lifecycle::Running;
+                                            }
+                                            Err(e) => log::error!(
+                                                "RenderThread: Failed to create surface: {}",
+                                                e
+                                            ),
+                                        }
+                                    }
+                                }
+                                RenderMessage::SetSurfaceActive(sid) => {
+                                    log::info!("RenderThread: Setting active surface: {:?}", sid);
+                                    *active_surface_ptr.lock_guard().unwrap() = Some(sid);
+                                    lifecycle = Lifecycle::Running;
+                                }
+                                RenderMessage::Suspend(ack) => {
+                                    log::info!("RenderThread: Suspending GPU, setting lifecycle to Stopped");
+                                    lifecycle = Lifecycle::Stopped;
+                                    if let Some(ref r) = render_opt {
+                                        let dev = &r.context.devices[0].device;
+                                        let queue = &r.context.devices[0].queue;
+                                        r.backend.sync_gpu(dev, queue);
+                                    }
+                                    let _ = ack.send(());
+                                }
+                                RenderMessage::Shutdown => {
+                                    log::info!("RenderThread: Shutting down");
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // 2. Handle coalesced Resize/RequestDraw
+                        if let Some((width, height)) = latest_resize {
                             let active_id = *active_surface_ptr.lock_guard().unwrap();
-                            if let Some(id) = active_id {
-                                let mut status = pollster::block_on(status_ptr.async_lock());
+                            log::debug!(
+                                "RenderThread: Coalesced Resize to {}x{}, active_id: {:?}",
+                                width,
+                                height,
+                                active_id
+                            );
+                            if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
                                 let mut surfs = surfaces_ptr.lock_guard().unwrap();
-                                if let (EngineStatus::Ready(ref mut e), Some(s)) = (&mut *status, surfs.get_mut(&id.0)) {
-                                    s.resize(&mut e.context, width, height);
-                                    render_frame(e, s.as_mut());
+                                if let Some(s) = surfs.get_mut(&id.0) {
+                                    s.resize(&mut r.context, width, height);
+                                    render_frame(r, s.as_mut());
                                 }
                             }
-                        }
-                        EngineMessage::Input(event) => { inputs.push(event); }
-                        EngineMessage::Suspend => { *lc = Lifecycle::Stopped; }
-                        EngineMessage::Shutdown => { 
-                            let status = pollster::block_on(status_ptr.async_lock());
-                            if let EngineStatus::Ready(ref e) = *status {
-                                e.on_lifecycle_event(dyxel_render_api::LifecycleEvent::Shutdown);
-                            }
-                            return true; 
-                        }
-                    }
-                    false
-                };
+                        } else if draw_requested {
+                            let active_id = *active_surface_ptr.lock_guard().unwrap();
+                            if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
+                                if lifecycle == Lifecycle::Stopped {
+                                    log::info!("RenderThread: Auto-resuming from RequestDraw");
+                                    lifecycle = Lifecycle::Running;
+                                }
 
-                loop {
-                    while let Ok(msg) = rx.try_recv() {
-                        if handle_msg(msg, &mut lifecycle, &mut input_queue) { return; }
-                    }
-
-                    if lifecycle == Lifecycle::Running {
-                        let active_id = *active_surface_ptr.lock_guard().unwrap();
-                        if let Some(id) = active_id {
-                            let mut status = pollster::block_on(status_ptr.async_lock());
-                            let mut surfs = surfaces_ptr.lock_guard().unwrap();
-                            if let (EngineStatus::Ready(ref mut e), Some(s)) = (&mut *status, surfs.get_mut(&id.0)) {
-                                for event in input_queue.drain(..) { process_input_internal(e, event); }
-                                
-                                #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] {
-                                    use crate::runtime::{process_commands, sync_layout_to_wasm};
-                                    if let Some(tick) = e.tick_fn.lock().unwrap().as_ref() {
-                                        let _ = tick.call();
-                                    }
-                                    let bptr = *e.shared_buffer_ptr.lock().unwrap();
-                                    if let Some(bptr) = bptr {
-                                        let mem = unsafe { &mut *e._rt.memory_mut() };
-                                        let _ = process_commands(mem, bptr, &e.shared_state);
-                                        render_frame(e, s.as_mut());
-                                        let _ = sync_layout_to_wasm(mem, bptr, &e.shared_state.lock().unwrap());
+                                if lifecycle == Lifecycle::Running {
+                                    let mut surfs = surfaces_ptr.lock_guard().unwrap();
+                                    if let Some(s) = surfs.get_mut(&id.0) {
+                                        log::trace!("RenderThread: Rendering frame for surface {:?}", id);
+                                        render_frame(r, s.as_mut());
                                     } else {
-                                        render_frame(e, s.as_mut());
+                                        log::warn!("RenderThread: Active surface {:?} not found in map", id);
                                     }
                                 }
-
-                                #[cfg(any(not(feature = "wasm3-support"), target_arch = "wasm32"))]
-                                {
-                                    render_frame(e, s.as_mut());
-                                }
+                            } else {
+                                log::trace!("RenderThread: RequestDraw ignored (no active surface or no render_opt)");
                             }
                         }
-                        thread::sleep(Duration::from_millis(1));
-                    } else {
-                        if let Ok(msg) = rx.recv() {
-                            if handle_msg(msg, &mut lifecycle, &mut input_queue) { return; }
-                        }
                     }
-                }
-            }).expect("Failed to spawn UIMainThread");
+                })
+                .expect("Failed to spawn RenderThread");
         }
         host
     }
 
     pub async fn prepare_engine(&self, ddir: String) {
-        self.prepare_engine_async(ddir, vec![]).await;
-    }
-
-    pub async fn prepare_engine_async(&self, ddir: String, _wasm_bytes: Vec<u8>) {
-        log::info!("prepare_engine_async: START - ddir={}", ddir);
+        log::info!("prepare_engine: START - ddir={}", ddir);
         {
-            let mut status = self.engine_status.async_lock().await;
-            if !matches!(*status, EngineStatus::Uninitialized) { 
-                log::warn!("prepare_engine_async: Engine already initialized (status not Uninitialized), skipping");
-                return; 
+            let mut status = self.engine_status.lock_sync();
+            if !matches!(*status, EngineStatus::Uninitialized) {
+                return;
             }
-            log::info!("prepare_engine_async: Setting status to Loading");
             *status = EngineStatus::Loading;
         }
-        
-        use crate::engine::SharedPtr as EngineSharedPtr;
-        use crate::engine::SharedMutex as EngineSharedMutex;
-        
-        let result = setup_engine(ddir, EngineSharedPtr::new(EngineSharedMutex::new(None))).await;
-        
-        match result {
-            Ok(engine) => {
+
+        match setup_engine(ddir).await {
+            Ok((logic, render)) => {
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some(tx) = &*self.command_tx.lock().unwrap() { 
-                    let _ = tx.send(EngineMessage::SetReady(engine)); 
+                {
+                    // Store instance for main-thread surface creation
+                    *self.instance.lock().unwrap() = Some(render.context.instance.clone());
+
+                    if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+                        let _ = tx.send(LogicMessage::SetReady(logic));
+                    }
+                    if let Some(tx) = &*self.render_tx.lock().unwrap() {
+                        let _ = tx.send(RenderMessage::SetReady(render));
+                    }
                 }
-                #[cfg(target_arch = "wasm32")]
-                { 
-                    *self.engine_status.async_lock().await = EngineStatus::Ready(engine); 
+
+                {
+                    log::info!("prepare_engine: Setting status to Running");
+                    let mut status = self.engine_status.lock_sync();
+                    *status = EngineStatus::Running;
+                    self.engine_ready_notify.notify();
                 }
-                self.engine_ready_notify.notify();
             }
-            Err(e) => { 
+            Err(e) => {
                 log::error!("DyxelHost: Engine setup failed: {}", e);
-                let mut status = self.engine_status.async_lock().await;
-                *status = EngineStatus::Error(e.to_string()); 
+                let mut status = self.engine_status.lock_sync();
+                *status = EngineStatus::Error(e.to_string());
                 self.engine_ready_notify.notify();
             }
         }
     }
 
     pub async fn load_wasm(&self, wasm_path: String) {
-        loop {
-            let n = self.engine_ready_notify.wait();
-            {
-                let status = self.engine_status.async_lock().await;
-                match *status {
-                    EngineStatus::Ready(_) => break,
-                    EngineStatus::Error(ref e) => {
-                        log::error!("DyxelHost: Cannot load WASM: Engine is in error state: {}", e);
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-            n.await;
-        }
-
-        let status_lock = self.engine_status.async_lock().await;
-        if let EngineStatus::Ready(ref e) = *status_lock {
-            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] {
-                if let Err(err) = e.load_wasm(wasm_path) {
-                    log::error!("DyxelHost: Failed to load WASM: {}", err);
-                }
-            }
-            #[cfg(any(not(feature = "wasm3-support"), target_arch = "wasm32"))] {
-                let _ = wasm_path;
-                let _ = e;
-            }
-        }
-    }
-
-    pub fn tick(&self) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let (Some(mut status_lock), Some(mut surfs), Some(active_id)) = 
-                (self.engine_status.try_async_lock(), self.surfaces.try_lock_guard(), self.active_surface_id.try_lock_guard()) {
-                if let (EngineStatus::Ready(ref mut e), Some(id)) = (&mut *status_lock, *active_id) {
-                    if let Some(s) = surfs.get_mut(&id.0) {
-                        render_frame(e, s.as_mut());
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn on_touch(&self, x: f32, _y: f32) {
-        if let Some(tx) = &*self.command_tx.lock().unwrap() { let _ = tx.send(EngineMessage::Input(InputEvent::TouchDown { x, y: _y })); }
-    }
-
-    pub fn resize_native(&self, width: u32, height: u32) { 
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.command_tx.lock().unwrap() { 
-            let _ = tx.send(EngineMessage::Resize { width, height }); 
-        }
-        
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Directly handle resize on WASM platform
-            use std::ops::DerefMut;
-            if let Some(mut status) = self.engine_status.try_async_lock() {
-                if let EngineStatus::Ready(ref mut e) = *status {
-                    if let Some(active_id_guard) = self.active_surface_id.try_lock_guard() {
-                        if let Some(active_id) = active_id_guard.as_ref() {
-                            if let Some(mut surfs) = self.surfaces.try_lock_guard() {
-                                if let Some(surface) = surfs.get_mut(&active_id.0) {
-                                    surface.resize(&mut e.context, width, height);
-                                    // Trigger a re-render
-                                    render_frame(e, surface.deref_mut());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::LoadWasm(wasm_path));
         }
     }
 
-    pub fn is_initialized(&self) -> bool { 
+    pub fn on_touch(&self, x: f32, y: f32) {
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let status = self.engine_status.blocking_lock_guard();
-            matches!(*status, EngineStatus::Ready(_)) && self.active_surface_id.lock_guard().unwrap().is_some()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let (Some(status), Some(active)) = (self.engine_status.try_async_lock(), self.active_surface_id.try_lock_guard()) {
-                matches!(*status, EngineStatus::Ready(_)) && active.is_some()
-            } else {
-                false
-            }
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::Input(InputEvent::TouchDown { x, y }));
         }
     }
 
-    pub fn is_engine_ready(&self) -> bool {
+    pub fn resize_native(&self, width: u32, height: u32) {
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let status = self.engine_status.blocking_lock_guard();
-            matches!(*status, EngineStatus::Ready(_))
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(status) = self.engine_status.try_async_lock() {
-                matches!(*status, EngineStatus::Ready(_))
-            } else {
-                false
-            }
+        if let Some(tx) = &*self.render_tx.lock().unwrap() {
+            let _ = tx.send(RenderMessage::Resize { width, height });
         }
     }
 
     pub async fn init_native(&self, _surface_ptr: u64, ddir: String, _w: u32, _h: u32) {
-        // 检查引擎状态，如果未初始化则准备引擎
+        let needs_prepare = {
+            let status = self.engine_status.lock_sync();
+            matches!(*status, EngineStatus::Uninitialized)
+        };
+
+        if needs_prepare {
+            self.prepare_engine(ddir.clone()).await;
+        }
+
+        #[cfg(target_os = "android")]
         {
-            let status = self.engine_status.async_lock().await;
-            if matches!(*status, EngineStatus::Uninitialized) {
-                drop(status);
-                self.prepare_engine(ddir.clone()).await;
-            }
-        }
-        
-        #[cfg(target_os = "android")] {
             let sh = SharedPtr::new(SafeWindowHandle::new_android(_surface_ptr));
-            self.setup(vello::wgpu::SurfaceTarget::from(sh.clone()), _w, _h, Some(sh)).await;
-        }
-        #[cfg(target_os = "ios")] {
-            let sh = SharedPtr::new(SafeWindowHandle::new_ios(_surface_ptr));
-            self.setup(vello::wgpu::SurfaceTarget::from(sh.clone()), _w, _h, Some(sh)).await;
+            self.setup(
+                vello::wgpu::SurfaceTarget::from(sh.clone()),
+                _w,
+                _h,
+                Some(sh),
+            )
+            .await;
         }
     }
 
-    pub fn stop_native(&self) { 
+    pub fn stop_native(&self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(tx) = &*self.command_tx.lock().unwrap() { let _ = tx.send(EngineMessage::Suspend); }
-            // Remove surface from active_surface_id and surfaces, will re-initialize on next return
-            if let Some(id) = self.active_surface_id.lock_guard().unwrap().take() { 
-                self.surfaces.lock_guard().unwrap().remove(&id.0); 
+            let (ack_tx, ack_rx) = mpsc::channel();
+            if let Some(tx) = &*self.render_tx.lock().unwrap() {
+                let _ = tx.send(RenderMessage::Suspend(ack_tx));
+                let _ = ack_rx.recv_timeout(Duration::from_millis(500)); // Barrier
             }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let (Some(mut id), Some(mut surfs)) = (self.active_surface_id.try_lock_guard(), self.surfaces.try_lock_guard()) {
-                if let Some(sid) = id.take() {
-                    surfs.remove(&sid.0);
-                }
+            if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+                let _ = tx.send(LogicMessage::Pause);
+            }
+            if let Some(id) = self.active_surface_id.lock_guard().unwrap().take() {
+                self.surfaces.lock_guard().unwrap().remove(&id.0);
             }
         }
     }
 
     pub fn shutdown(&self) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.command_tx.lock().unwrap() { let _ = tx.send(EngineMessage::Shutdown); }
+        {
+            if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+                let _ = tx.send(LogicMessage::Shutdown);
+            }
+            if let Some(tx) = &*self.render_tx.lock().unwrap() {
+                let _ = tx.send(RenderMessage::Shutdown);
+            }
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        matches!(*self.engine_status.lock_sync(), EngineStatus::Running)
+    }
+
+    pub fn is_engine_ready(&self) -> bool {
+        self.is_ready()
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.active_surface_id.lock_guard().unwrap().is_some()
+    }
+
+    pub fn tick(&self) {
+        // No-op for now, logic runs in its own thread
     }
 }
 
 impl DyxelHost {
-    pub async fn setup(&self, target: vello::wgpu::SurfaceTarget<'static>, width: u32, height: u32, _handle: Option<SharedPtr<SafeWindowHandle>>) {
-        loop {
-            let n = self.engine_ready_notify.wait();
-            {
-                let status = self.engine_status.async_lock().await;
-                match *status {
-                    EngineStatus::Ready(_) => break,
-                    EngineStatus::Error(ref err) => {
-                        log::error!("DyxelHost: setup engine is in Error state: {}, aborting", err);
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-            n.await;
-        }
+    pub async fn setup(
+        &self,
+        target: vello::wgpu::SurfaceTarget<'static>,
+        width: u32,
+        height: u32,
+        _handle: Option<SharedPtr<SafeWindowHandle>>,
+    ) {
+        // Fix: Ensure lock is dropped before await to keep Future Send
+        let already_running = {
+            let status = self.engine_status.lock_sync();
+            matches!(*status, EngineStatus::Running)
+        };
 
-        let mut status_lock = self.engine_status.async_lock().await;
-        if let EngineStatus::Ready(ref mut e) = *status_lock {
-            let nid = self.next_surface_id.fetch_add(1, Ordering::SeqCst);
-            
-            match e.backend.create_surface_state(&mut e.context, Some(target), 0, width, height) {
-                Ok(mut ss) => {
-                    render_frame(e, ss.as_mut());
-                    e.on_lifecycle_event(dyxel_render_api::LifecycleEvent::FirstFrameDone);
-
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        self.surfaces.lock_guard().unwrap().insert(nid, ss);                
-                        if let Some(tx) = &*self.command_tx.lock().unwrap() {
-                            let _ = tx.send(EngineMessage::SetSurfaceActive(SurfaceId(nid)));
-                        }
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        if let Some(mut surfs) = self.surfaces.try_lock_guard() {
-                            surfs.insert(nid, ss);
-                        }
-                        if let Some(mut id) = self.active_surface_id.try_lock_guard() {
-                            *id = Some(SurfaceId(nid));
-                        }
-                    }
-                }
-                Err(err) => {
-                    log::error!("DyxelHost: Failed to create surface state: {:?}", err);
-                }
-            }
+        if !already_running {
+            log::info!("setup: Waiting for engine ready notify...");
+            self.engine_ready_notify.wait().await;
         } else {
-            log::error!("setup: Engine not in Ready state when creating surface");
+            log::info!("setup: Engine already running, proceeding");
         }
-    }
 
-    pub fn get_shared_state(&self) -> Option<SharedPtr<SharedMutex<crate::state::SharedState>>> {
+        let nid = self.next_surface_id.fetch_add(1, Ordering::SeqCst);
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let status = self.engine_status.blocking_lock_guard();
-            if let EngineStatus::Ready(ref e) = *status { Some(e.shared_state.clone()) } else { None }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(status) = self.engine_status.try_async_lock() {
-                if let EngineStatus::Ready(ref e) = *status { Some(e.shared_state.clone()) } else { None }
+        if let Some(tx) = &*self.render_tx.lock().unwrap() {
+            log::info!("setup: Creating surface on main thread if necessary");
+
+            // On macOS/Desktop, create surface on main thread to avoid Metal panic
+            let (target, surface) = if cfg!(any(
+                target_os = "macos",
+                target_os = "windows",
+                target_os = "linux"
+            )) {
+                let inst_lock = self.instance.lock().unwrap();
+                if let Some(instance) = inst_lock.as_ref() {
+                    log::info!("setup: Creating wgpu::Surface on main thread");
+                    match instance.create_surface(target) {
+                        Ok(s) => (None, Some(s)),
+                        Err(e) => {
+                            log::error!("setup: Failed to create surface on main thread: {}", e);
+                            (None, None)
+                        }
+                    }
+                } else {
+                    (Some(target), None)
+                }
             } else {
-                None
-            }
+                (Some(target), None)
+            };
+
+            log::info!("setup: Sending CreateSurface message");
+            let _ = tx.send(RenderMessage::CreateSurface {
+                target,
+                surface,
+                width,
+                height,
+                nid,
+            });
+            let _ = tx.send(RenderMessage::RequestDraw);
+        }
+
+        // Resume LogicThread if it was paused (e.g., after Back button/activity restart)
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            log::info!("setup: Sending Resume to LogicThread");
+            let _ = tx.send(LogicMessage::Resume);
         }
     }
 }

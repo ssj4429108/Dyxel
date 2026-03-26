@@ -38,19 +38,21 @@ impl<T> LockExt<T> for std::sync::Mutex<T> {}
 #[cfg(not(target_arch = "wasm32"))]
 pub trait RenderBackend: Send + Sync {
     fn init(&self, device: &wgpu::Device, queue: &wgpu::Queue, config: BackendConfig) -> anyhow::Result<()>;
-    fn create_surface_state(&self, context: &mut RenderContext, target: Option<wgpu::SurfaceTarget<'static>>, surface_ptr: u64, width: u32, height: u32) -> anyhow::Result<Box<dyn SurfaceState>>;
+    fn create_surface_state(&self, context: &mut RenderContext, target: Option<wgpu::SurfaceTarget<'static>>, surface: Option<wgpu::Surface<'static>>, surface_ptr: u64, width: u32, height: u32) -> anyhow::Result<Box<dyn SurfaceState>>;
     fn prepare(&self, shared_state: &SharedPtr<SharedMutex<SharedState>>, width: u32, height: u32);
     fn render(&self, device: &wgpu::Device, queue: &wgpu::Queue, surface: &mut dyn SurfaceState, shared_state: &SharedPtr<SharedMutex<SharedState>>) -> RenderResult;
     fn on_lifecycle_event(&self, event: LifecycleEvent);
+    fn sync_gpu(&self, device: &wgpu::Device, queue: &wgpu::Queue);
 }
 
 #[cfg(target_arch = "wasm32")]
 pub trait RenderBackend {
     fn init(&self, device: &wgpu::Device, queue: &wgpu::Queue, config: BackendConfig) -> anyhow::Result<()>;
-    fn create_surface_state(&self, context: &mut RenderContext, target: Option<wgpu::SurfaceTarget<'static>>, surface_ptr: u64, width: u32, height: u32) -> anyhow::Result<Box<dyn SurfaceState>>;
+    fn create_surface_state(&self, context: &mut RenderContext, target: Option<wgpu::SurfaceTarget<'static>>, surface: Option<wgpu::Surface<'static>>, surface_ptr: u64, width: u32, height: u32) -> anyhow::Result<Box<dyn SurfaceState>>;
     fn prepare(&self, shared_state: &SharedPtr<SharedMutex<SharedState>>, width: u32, height: u32);
     fn render(&self, device: &wgpu::Device, queue: &wgpu::Queue, surface: &mut dyn SurfaceState, shared_state: &SharedPtr<SharedMutex<SharedState>>) -> RenderResult;
     fn on_lifecycle_event(&self, event: LifecycleEvent);
+    fn sync_gpu(&self, device: &wgpu::Device, queue: &wgpu::Queue);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

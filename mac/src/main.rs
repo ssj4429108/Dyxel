@@ -41,7 +41,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             Event::AboutToWait => {
-                if !surface_setup_done && host.is_engine_ready() {
+                if !surface_setup_done && host.is_ready() {
                     let h = host.clone();
                     let w = window.clone();
                     let size = w.inner_size();

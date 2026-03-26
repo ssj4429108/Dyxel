@@ -898,6 +898,7 @@ dependencies = [
  "anyhow",
  "dyxel-shared",
  "vello",
+ "wgpu",
 ]
 
 [[package]]

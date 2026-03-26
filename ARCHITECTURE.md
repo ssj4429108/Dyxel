@@ -7,18 +7,29 @@
 
 ---
 
-## 2. 核心分层架构：Thin Guest, Thick Host
-为了在解释执行环境下保持高性能，Dyxel 遵循“**瘦客户端，胖宿主**”原则。
+## 3. 核心分层架构：Three-Thread Resilience Model
+为了在移动端碎片化环境下保持极致稳定性与性能，Dyxel 采用三线程垂直解耦架构：
 
-### A. Host 宿主层 (Rust)
-- **职责**：持有渲染上下文（Vello）、布局引擎（Taffy）、原生系统事件监听、内存管理。
-- **性能要求**：禁止在渲染循环中进行非必要的堆分配，利用指令缓冲区进行批量操作。
-- **接口**：通过 `Wasm3` 暴露原生函数（Host Functions）供 Guest 调用。
+### A. UI Thread (Platform Native)
+- **职责**：持有 Surface 所有权，监听系统事件（Touch, Resize, Lifecycle）。
+- **定位**：**指挥官**。不参与计算，仅负责将 OS 信号转化为内部指令并分发。
 
-### B. Guest 逻辑层 (WASM)
-- **职责**：业务状态管理、UI 声明（类似声明式 UI）、交互逻辑处理。
-- **运行环境**：Wasm3 解释器（无 JIT 模式，以完美适配 iOS 和 Android 的合规性要求）。
-- **通信**：通过自定义的 **Binary Instruction Stream** 向 Host 发送 UI 变更意图。
+### B. Logic Thread (WASM Thinker)
+- **职责**：独占 Wasm3 运行时，驱动 WASM `tick`，处理业务逻辑，执行 Taffy 布局计算。
+- **定位**：**大脑**。常驻运行，确保业务状态连续性。
+
+### C. Render Thread (GPU Rasterizer)
+- **职责**：管理 `wgpu` 资源，调用渲染后端执行绘制。
+- **定位**：**画笔**。与 Surface 生命周期强绑定，执行高风险 GPU 操作。
+
+---
+
+## 4. 生命周期韧性：同步屏障 (Synchronous Barrier)
+针对 Android `onSurfaceDestroyed` 等紧急场景，Dyxel 实现了一套强同步握手机制：
+1. **指令下发**：UI 线程向渲染线程发送带 ACK 的 `Suspend` 消息并进入阻塞。
+2. **GPU 清理**：渲染线程执行 `device.poll(Maintain::Wait)` 强制清空工作队列并释放 Surface。
+3. **安全返回**：渲染线程回传 ACK，UI 线程解除阻塞并安全返回 OS。
+这彻底杜绝了“窗口已销毁但 GPU 仍在提交”导致的驱动崩溃。
 
 ---
 

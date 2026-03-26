@@ -10,7 +10,6 @@ import kotlinx.coroutines.*
 class MainActivity : AppCompatActivity() {
 
     private lateinit var engine: DyxelEngine
-    private var surfaceView: SurfaceView? = null
     private var isInitialized = false
     private var isInitializing = false
 
@@ -19,9 +18,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         engine = (application as MainApplication).dyxelEngine
+        // Ensure engine preparation starts (extracts assets and calls prepareEngine)
+        engine.setup(this)
 
         val sv = SurfaceView(this)
-        this.surfaceView = sv
         setContentView(sv, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
@@ -46,31 +46,29 @@ class MainActivity : AppCompatActivity() {
                         val dataDir = filesDir.absolutePath
                         val wasmPath = "$dataDir/guest.wasm"
                         
-                        // Wait for engine ready
+                        // 1. Wait for engine core to be ready (WGPU instance, etc.)
                         var waitCount = 0
                         while (!engine.host.isEngineReady() && waitCount < 200) {
                             delay(50)
                             waitCount++
                         }
+                        
                         if (!engine.host.isEngineReady()) {
-                            throw IllegalStateException("Engine failed to become ready")
+                            android.util.Log.e("DyxelMain", "Engine core failed to become ready")
+                            isInitializing = false
+                            return@launch
                         }
                         
+                        // 2. Initialize native surface (creates WGPU surface and starts render thread)
                         val ptr = engine.getNativeSurface(holder.surface)
                         engine.host.initNative(ptr.toULong(), dataDir, width.toUInt(), height.toUInt())
                         
-                        // Wait for surface initialized
-                        waitCount = 0
-                        while (!engine.host.isInitialized() && waitCount < 100) {
-                            delay(50)
-                            waitCount++
-                        }
-                        if (!engine.host.isInitialized()) {
-                            throw IllegalStateException("Surface failed to initialize")
-                        }
-                        
+                        // 3. Load business logic
                         engine.host.loadWasm(wasmPath)
+                        
                         isInitialized = true
+                        isInitializing = false
+                        android.util.Log.i("DyxelMain", "Dyxel initialized successfully")
                         
                     } catch (e: Exception) {
                         android.util.Log.e("DyxelMain", "Initialization failed", e)
@@ -82,9 +80,8 @@ class MainActivity : AppCompatActivity() {
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 isInitialized = false
                 isInitializing = false
-                lifecycleScope.launch(Dispatchers.Default) {
-                    engine.host.stopNative()
-                }
+                // Synchronous barrier: block the UI thread until the render thread signals it has finished all GPU work.
+                engine.host.stopNative()
             }
         })
 

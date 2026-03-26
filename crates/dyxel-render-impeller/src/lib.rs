@@ -128,6 +128,7 @@ impl RenderBackend for ImpellerBackend {
         &self,
         _ctx: &mut RenderContext,
         _target: Option<wgpu::SurfaceTarget<'static>>,
+        _surface: Option<wgpu::Surface<'static>>,
         _ptr: u64,
         width: u32,
         height: u32,

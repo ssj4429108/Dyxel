@@ -16,9 +16,9 @@ vello = []
 dyxel-shared.workspace = true
 dyxel-render-api = { path = "../dyxel-render-api" }
 dyxel-render-vello = { path = "../dyxel-render-vello" }
+wgpu = { workspace = true, features = ["spirv"] }
 vello = { workspace = true, features = ["wgpu"] }
 peniko = { version = "0.6" }
-wgpu = { workspace = true, features = ["spirv"] }
 taffy.workspace = true
 anyhow = "1.0"
 kurbo = "0.13"

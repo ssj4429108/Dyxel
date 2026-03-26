@@ -26,9 +26,7 @@ pub type SharedMutex<T> = RefCell<T>;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
-pub struct EngineState { 
-    pub context: RenderContext, 
-    pub backend: Box<dyn RenderBackend>,
+pub struct LogicState {
     pub shared_state: SharedPtr<SharedMutex<SharedState>>,
     #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] pub _env: wasm3::Environment,
     #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] pub _rt: wasm3::Runtime,
@@ -37,19 +35,28 @@ pub struct EngineState {
     #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] pub shared_buffer_ptr: Mutex<Option<u32>>,
 }
 
-unsafe impl Send for EngineState {}
-unsafe impl Sync for EngineState {}
+pub struct RenderState {
+    pub context: RenderContext,
+    pub backend: Box<dyn RenderBackend>,
+    pub shared_state: SharedPtr<SharedMutex<SharedState>>,
+}
 
-impl EngineState {
+// LogicState contains Wasm3 components which are NOT Sync. 
+// We only need it to be Send so it can be moved to the Logic Thread.
+unsafe impl Send for LogicState {}
+
+unsafe impl Send for RenderState {}
+unsafe impl Sync for RenderState {}
+
+impl RenderState {
     pub fn on_lifecycle_event(&self, event: dyxel_render_api::LifecycleEvent) {
         self.backend.on_lifecycle_event(event);
     }
 }
 
-pub async fn setup_engine(ddir: String, _es: SharedPtr<SharedMutex<Option<EngineState>>>) -> anyhow::Result<EngineState> {
+pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderState)> {
     let mut context = RenderContext::new(); 
     
-    // 使用 pollster 阻塞等待设备初始化，避免异步调度问题
     let dev_id = pollster::block_on(async {
         context.device(None).await
     }).ok_or_else(|| anyhow::anyhow!("No device found"))?;
@@ -63,14 +70,14 @@ pub async fn setup_engine(ddir: String, _es: SharedPtr<SharedMutex<Option<Engine
     let shared_state = SharedPtr::new(SharedMutex::new(SharedState::new()));
 
     #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-    let env = wasm3::Environment::new().map_err(|e| anyhow::anyhow!("Environment failed: {}", e))?; 
-    #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-    let rt = env.create_runtime(1024 * 2048).map_err(|e| anyhow::anyhow!("Runtime failed: {}", e))?;
+    let (env, rt) = {
+        let env = wasm3::Environment::new().map_err(|e| anyhow::anyhow!("Environment failed: {}", e))?; 
+        let rt = env.create_runtime(1024 * 2048).map_err(|e| anyhow::anyhow!("Runtime failed: {}", e))?;
+        (env, rt)
+    };
 
-    let engine = EngineState { 
-        context, 
-        backend: Box::new(backend),
-        shared_state, 
+    let logic = LogicState { 
+        shared_state: shared_state.clone(),
         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] _env: env, 
         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] _rt: rt, 
         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] tick_fn: Mutex::new(None), 
@@ -78,11 +85,17 @@ pub async fn setup_engine(ddir: String, _es: SharedPtr<SharedMutex<Option<Engine
         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))] shared_buffer_ptr: Mutex::new(None), 
     };
 
-    Ok(engine)
+    let render = RenderState {
+        context,
+        backend: Box::new(backend),
+        shared_state,
+    };
+
+    Ok((logic, render))
 }
 
 #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-impl EngineState {
+impl LogicState {
     pub fn load_wasm(&self, wasm_path: String) -> anyhow::Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         let wasm_init_start = Instant::now();

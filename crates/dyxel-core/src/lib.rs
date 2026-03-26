@@ -11,7 +11,7 @@ pub mod bridge;
 
 pub use platform::{SurfaceId, SafeWindowHandle, SurfaceState};
 pub use state::{SharedState, ViewNode};
-pub use engine::{EngineState, setup_engine};
+pub use engine::{LogicState, RenderState, setup_engine};
 pub use bridge::DyxelHost;
 
 // Re-exports for other crates (like host-web)

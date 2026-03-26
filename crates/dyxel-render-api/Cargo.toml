@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 dyxel-shared = { path = "../dyxel-shared" }
 vello = { workspace = true, features = ["wgpu"] }
+wgpu = { workspace = true }
 anyhow = "1.0"
