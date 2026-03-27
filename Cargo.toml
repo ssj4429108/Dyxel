@@ -10,7 +10,8 @@ members = [
     "crates/dyxel-render-api",
     "crates/dyxel-render-impeller",
     "crates/dyxel-render-vello",
-    "crates/dyxel-editor"
+    "crates/dyxel-editor",
+    "crates/dyxel-perf"
 ]
 resolver = "2"
 
@@ -20,6 +21,7 @@ serde = { version = "1.0", features = ["derive"] }
 dyxel-shared = { path = "crates/dyxel-shared" }
 dyxel-view = { path = "crates/dyxel-view" }
 dyxel-core = { path = "crates/dyxel-core" }
+dyxel-perf = { path = "crates/dyxel-perf" }
 futures-signals = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 taffy = "0.9"

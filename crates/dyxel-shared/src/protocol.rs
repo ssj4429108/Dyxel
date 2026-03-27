@@ -88,6 +88,7 @@ macro_rules! define_protocol {
 // Single source of truth: define opcodes and their parameter types
 define_protocol! {
     $,
+    // === Core Node Operations (1-31) ===
     [1] CreateNode(id: u32),
     [2] SetViewType(id: u32, vt: u32),
     [3] SetColor(id: u32, r: u8, g: u8, b: u8),
@@ -96,13 +97,15 @@ define_protocol! {
     [6] SetFlexDirection(id: u32, dir: u32),
     [7] SetJustifyContent(id: u32, j: u32),
     [8] SetAlignItems(id: u32, a: u32),
-    [14] SetFlexWrap(id: u32, wrap: u32),
-    [15] SetAlignContent(id: u32, ac: u32),
     [9] SetFlexGrow(id: u32, grow: f32),
     [10] SetZIndex(id: u32, z: i32),
     [11] SetFontSize(id: u32, size: f32),
     [12] SetBorderRadius(id: u32, r: f32),
     [13] SetPadding(id: u32, t: f32, r: f32, b: f32, l: f32),
+    [14] SetFlexWrap(id: u32, wrap: u32),
+    [15] SetAlignContent(id: u32, ac: u32),
+    
+    // === Interaction & Events (16-31) ===
     [16] AttachClick(id: u32),
     [17] SetText(id: u32, len: u32), 
     [18] AddChild(pid: u32, cid: u32),
@@ -110,16 +113,26 @@ define_protocol! {
     [20] SetLabel(id: u32, len: u32),
     [21] UpdateLayout(),
     [22] SelectNode(id: u32),
+    
+    // === Compact Operations (23-31) ===
     [23] SetColorCompact(r: u8, g: u8, b: u8, a: u8),
     [24] SetWidthCompact(dt: u8, v: f32),
     [25] SetHeightCompact(dt: u8, v: f32),
-    [64] CreateTextNode(id: u32),
-    [65] CreateSpanNode(id: u32),
-    [66] CreateRichTextNode(id: u32),
-    [67] SetTextContent(id: u32, len: u32),
-    [68] SetTextColor(id: u32, r: u8, g: u8, b: u8, a: u8),
-    [69] SetTextWeight(id: u32, weight: u16),
-    [70] SetTextFontFamily(id: u32, len: u32),
+    
+    // === Rich Text Operations (32-47) ===
+    [32] CreateTextNode(id: u32),
+    [33] CreateSpanNode(id: u32),
+    [34] CreateRichTextNode(id: u32),
+    [35] SetTextContent(id: u32, len: u32),
+    [36] SetTextColor(id: u32, r: u8, g: u8, b: u8, a: u8),
+    [37] SetTextWeight(id: u32, weight: u16),
+    [38] SetTextFontFamily(id: u32, len: u32),
+    
+    // === Transaction Operations (48-63) - NEW! ===
+    [48] BeginTransaction(seq_id: u32, flags: u16),
+    [49] EndTransaction(seq_id: u32),
+    [50] AbortTransaction(seq_id: u32),
+    [51] SetNodeDirty(id: u32, fields: u8),
 }
 
 #[repr(C)]
@@ -130,6 +143,71 @@ pub struct LayoutResult {
 
 pub const MAX_COMMAND_BYTES: usize = 1024 * 64;
 pub const MAX_NODES: usize = 1024;
+
+/// Transaction flags for controlling behavior
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionFlags {
+    None = 0,
+    /// Skip rendering if only layout properties changed
+    SkipIfLayoutOnly = 1 << 0,
+    /// Force immediate application (no batching)
+    Immediate = 1 << 1,
+    /// Allow merging with previous transaction
+    Mergeable = 1 << 2,
+}
+
+impl TransactionFlags {
+    pub fn from_bits(bits: u16) -> Self {
+        match bits {
+            0 => Self::None,
+            1 => Self::SkipIfLayoutOnly,
+            2 => Self::Immediate,
+            4 => Self::Mergeable,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Node dirty field bitflags for tracking what changed
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirtyField {
+    None = 0,
+    Position = 1 << 0,  // x, y changed
+    Size = 1 << 1,      // width, height changed
+    Style = 1 << 2,     // color, border, etc.
+    Text = 1 << 3,      // text content changed
+    Children = 1 << 4,  // child add/remove
+    Layout = 1 << 5,    // flex properties changed
+}
+
+impl DirtyField {
+    pub fn from_bits(bits: u8) -> Self {
+        Self::from_bits_truncate(bits)
+    }
+    
+    pub fn from_bits_truncate(bits: u8) -> Self {
+        match bits {
+            0 => Self::None,
+            1 => Self::Position,
+            2 => Self::Size,
+            4 => Self::Style,
+            8 => Self::Text,
+            16 => Self::Children,
+            32 => Self::Layout,
+            _ => Self::None,
+        }
+    }
+    
+    pub fn bits(&self) -> u8 {
+        *self as u8
+    }
+    
+    pub fn contains(&self, other: Self) -> bool {
+        self.bits() & other.bits() != 0
+    }
+}
 
 #[repr(C, align(16))]
 pub struct SharedBuffer {

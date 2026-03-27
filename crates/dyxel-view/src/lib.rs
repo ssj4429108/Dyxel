@@ -5,7 +5,7 @@ use futures_signals::signal::{Signal, SignalExt};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::cell::RefCell;
 use std::collections::HashMap;
-pub use dyxel_shared::{FlexDirection, JustifyContent, AlignItems, FlexWrap, AlignContent, Dimension, Role, ViewType, OpCode, LayoutResult, MAX_COMMAND_BYTES, SharedBuffer};
+pub use dyxel_shared::{FlexDirection, JustifyContent, AlignItems, FlexWrap, AlignContent, Dimension, Role, ViewType, OpCode, LayoutResult, MAX_COMMAND_BYTES, SharedBuffer, DirtyField, TransactionFlags};
 use dyxel_shared::push_command;
 
 // --- Command Stream ---
@@ -16,7 +16,7 @@ pub static mut SHARED_BUFFER: SharedBuffer = SharedBuffer {
     _padding: [0; 2],
     command_data: [0; MAX_COMMAND_BYTES],
     layout_results: [LayoutResult { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }; dyxel_shared::MAX_NODES],
-    dirty_mask: [0; 32],
+    dirty_mask: [0; 32], 
 };
 
 #[no_mangle]
@@ -42,6 +42,107 @@ fn select_node(id: u32) {
 fn track_node(id: u32) { unsafe { if id > SHARED_BUFFER.max_node_id { SHARED_BUFFER.max_node_id = id; } } }
 pub fn get_layout(id: u32) -> LayoutResult { unsafe { SHARED_BUFFER.layout_results[id as usize] } }
 
+// === Transaction API (NEW!) ===
+
+/// Transaction handle for batching commands
+pub struct Transaction {
+    seq_id: u32,
+    start_offset: u32,
+    committed: bool,
+}
+
+impl Transaction {
+    /// Start a new transaction
+    pub fn new(flags: u16) -> Self {
+        unsafe {
+            static mut NEXT_SEQ_ID: u32 = 1;
+            let seq_id: u32 = NEXT_SEQ_ID;
+            NEXT_SEQ_ID += 1;
+            
+            let start_offset: u32 = SHARED_BUFFER.command_len;
+            
+            // Emit BeginTransaction command
+            push_command!(SHARED_BUFFER, BeginTransaction, seq_id, flags);
+            
+            Self {
+                seq_id,
+                start_offset,
+                committed: false,
+            }
+        }
+    }
+    
+    /// Commit the transaction
+    pub fn commit(mut self) {
+        self.committed = true;
+        push_command!(SHARED_BUFFER, EndTransaction, self.seq_id);
+    }
+    
+    /// Abort the transaction (commands are discarded)
+    pub fn abort(mut self) {
+        self.committed = true;
+        unsafe {
+            // Rollback command_len to before transaction started
+            SHARED_BUFFER.command_len = self.start_offset;
+        }
+        push_command!(SHARED_BUFFER, AbortTransaction, self.seq_id);
+    }
+    
+    /// Get the sequence ID of this transaction
+    pub fn seq_id(&self) -> u32 {
+        self.seq_id
+    }
+    
+    /// Get the number of bytes written in this transaction so far
+    pub fn size(&self) -> u32 {
+        unsafe { SHARED_BUFFER.command_len - self.start_offset }
+    }
+}
+
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Auto-abort if not explicitly committed
+            unsafe {
+                SHARED_BUFFER.command_len = self.start_offset;
+            }
+            push_command!(SHARED_BUFFER, AbortTransaction, self.seq_id);
+        }
+    }
+}
+
+/// Convenience function: begin a transaction with default flags
+pub fn begin_transaction() -> Transaction {
+    Transaction::new(0)
+}
+
+/// Convenience function: begin a transaction with specific flags
+pub fn begin_transaction_with_flags(flags: u16) -> Transaction {
+    Transaction::new(flags)
+}
+
+/// Execute a closure within a transaction, auto-commit on success
+pub fn with_transaction<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut Transaction) -> R,
+{
+    let mut tx = begin_transaction();
+    let result = f(&mut tx);
+    tx.commit();
+    result
+}
+
+/// Execute a closure within a transaction with flags, auto-commit on success
+pub fn with_transaction_flags<F, R>(flags: u16, f: F) -> R
+where
+    F: FnOnce(&mut Transaction) -> R,
+{
+    let mut tx = Transaction::new(flags);
+    let result = f(&mut tx);
+    tx.commit();
+    result
+}
+
 #[link(wasm_import_module = "env")]
 extern "C" { fn ui_force_layout(); }
 
@@ -54,6 +155,7 @@ thread_local! {
 pub extern "C" fn dyxel_view_tick() {
     unsafe { 
         LAST_SELECTED_NODE = None; 
+        
         // Reset dirty bitmap
         for i in 0..32 { SHARED_BUFFER.dirty_mask[i] = 0; }
     } 

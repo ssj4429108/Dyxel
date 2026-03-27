@@ -3,6 +3,8 @@
 
 pub mod types;
 pub mod state;
+pub mod double_buffer;
+
 #[macro_use]
 pub mod utils;
 #[macro_use]
@@ -11,5 +13,7 @@ pub mod protocol;
 // Re-export everything for convenience
 pub use types::*;
 pub use state::*;
+pub use double_buffer::*;
+
 pub use protocol::*;
 pub use utils::*;

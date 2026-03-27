@@ -42,16 +42,20 @@ class MainActivity : AppCompatActivity() {
                 isInitializing = true
                 
                 lifecycleScope.launch(Dispatchers.Default) {
+                    val totalStartTime = System.currentTimeMillis()
                     try {
                         val dataDir = filesDir.absolutePath
                         val wasmPath = "$dataDir/guest.wasm"
                         
                         // 1. Wait for engine core to be ready (WGPU instance, etc.)
+                        val waitStartTime = System.currentTimeMillis()
                         var waitCount = 0
                         while (!engine.host.isEngineReady() && waitCount < 200) {
                             delay(50)
                             waitCount++
                         }
+                        val waitElapsed = System.currentTimeMillis() - waitStartTime
+                        android.util.Log.i("DyxelPerf", "[ColdStart] Wait for engine ready: ${waitElapsed}ms (waitCount=$waitCount)")
                         
                         if (!engine.host.isEngineReady()) {
                             android.util.Log.e("DyxelMain", "Engine core failed to become ready")
@@ -60,14 +64,22 @@ class MainActivity : AppCompatActivity() {
                         }
                         
                         // 2. Initialize native surface (creates WGPU surface and starts render thread)
+                        val initStartTime = System.currentTimeMillis()
                         val ptr = engine.getNativeSurface(holder.surface)
                         engine.host.initNative(ptr.toULong(), dataDir, width.toUInt(), height.toUInt())
+                        val initElapsed = System.currentTimeMillis() - initStartTime
+                        android.util.Log.i("DyxelPerf", "[ColdStart] Init native surface: ${initElapsed}ms")
                         
                         // 3. Load business logic
+                        val wasmStartTime = System.currentTimeMillis()
                         engine.host.loadWasm(wasmPath)
+                        val wasmElapsed = System.currentTimeMillis() - wasmStartTime
+                        android.util.Log.i("DyxelPerf", "[ColdStart] Load WASM: ${wasmElapsed}ms")
                         
                         isInitialized = true
                         isInitializing = false
+                        val totalElapsed = System.currentTimeMillis() - totalStartTime
+                        android.util.Log.i("DyxelPerf", "[ColdStart] Total initialization: ${totalElapsed}ms")
                         android.util.Log.i("DyxelMain", "Dyxel initialized successfully")
                         
                     } catch (e: Exception) {

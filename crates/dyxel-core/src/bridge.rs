@@ -72,6 +72,8 @@ pub enum RenderMessage {
     RequestDraw,
     Suspend(mpsc::Sender<()>), // Sync barrier with ACK
     Shutdown,
+    TogglePerfOverlay, // ← 新增：切换性能覆盖层
+    SetContinuousRender(bool), // ← 新增：启用/禁用连续渲染模式（用于性能测试）
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -240,13 +242,67 @@ impl DyxelHost {
                     let mut lifecycle = Lifecycle::Stopped;
 
                     loop {
-                        // Receive message
+                        // Receive message (block when stopped/paused to save CPU)
                         let msg_res = if lifecycle == Lifecycle::Running {
-                            logic_rx.try_recv().map_err(|e| anyhow::anyhow!(e))
+                            // Running: non-blocking check then sleep if no message
+                            match logic_rx.try_recv() {
+                                Ok(msg) => Ok(msg),
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    // No message, execute tick and sleep
+                                    if let Some(ref mut l) = logic_opt {
+                                        #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+                                        {
+                                            use crate::runtime::{process_commands, sync_layout_to_wasm, is_render_needed, clear_dirty_tracker};
+                                            
+                                            // Execute WASM tick (produces commands)
+                                            if let Some(tick) = l.tick_fn.lock().unwrap().as_ref() {
+                                                if let Err(e) = tick.call() {
+                                                    log::error!("LogicThread: WASM tick failed: {}", e);
+                                                }
+                                            }
+                                            
+                                            // Process commands from WASM memory
+                                            let bptr = *l.shared_buffer_ptr.lock().unwrap();
+                                            if let Some(bptr) = bptr {
+                                                let mem = unsafe { &mut *l._rt.memory_mut() };
+                                                let _ = process_commands(mem, bptr, &l.shared_state);
+                                                
+                                                // Sync layout results back to WASM
+                                                let _ = sync_layout_to_wasm(
+                                                    mem,
+                                                    bptr,
+                                                    &l.shared_state.lock().unwrap(),
+                                                );
+                                            }
+                                            
+                                            // Only trigger render if transaction completed and dirty nodes exist
+                                            if is_render_needed() {
+                                                let dirty_count = crate::runtime::get_dirty_tracker()
+                                                    .map(|dt| dt.iter_dirty_nodes().count())
+                                                    .unwrap_or(0);
+                                                if dirty_count > 0 {
+                                                    log::debug!("LogicThread: Transaction completed with {} dirty nodes, requesting render", dirty_count);
+                                                }
+                                                let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
+                                                clear_dirty_tracker();
+                                            }
+                                        }
+                                    }
+                                    // ~60 FPS tick rate
+                                    std::thread::sleep(std::time::Duration::from_millis(16));
+                                    continue;
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    log::error!("LogicThread: Channel disconnected");
+                                    return;
+                                }
+                            }
                         } else {
-                            logic_rx.recv().map_err(|e| anyhow::anyhow!(e))
+                            // Stopped/Paused: block waiting for message
+                            logic_rx.recv()
                         };
 
+                        // Process received message
                         if let Ok(msg) = msg_res {
                             match msg {
                                 LogicMessage::SetReady(l) => {
@@ -260,7 +316,11 @@ impl DyxelHost {
                                 }
                                 LogicMessage::LoadWasm(path) => {
                                     log::info!("LogicThread: Received LoadWasm from {}", path);
-                                    if let Some(ref mut l) = logic_opt { let _ = l.load_wasm(path); }
+                                    if let Some(ref mut l) = logic_opt { 
+                                        if let Err(e) = l.load_wasm(path) {
+                                            log::error!("LogicThread: LoadWasm failed: {}", e);
+                                        }
+                                    }
                                 }
                                 LogicMessage::Pause => {
                                     log::info!("LogicThread: Received Pause, setting lifecycle to Paused");
@@ -275,32 +335,9 @@ impl DyxelHost {
                                     return;
                                 }
                             }
-                        }
-
-                        if lifecycle == Lifecycle::Running {
-                            if let Some(ref mut l) = logic_opt {
-                                #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-                                {
-                                    use crate::runtime::{process_commands, sync_layout_to_wasm};
-                                    if let Some(tick) = l.tick_fn.lock().unwrap().as_ref() {
-                                        if let Err(e) = tick.call() {
-                                            log::error!("LogicThread: WASM tick failed: {}", e);
-                                        }
-                                    }
-                                    let bptr = *l.shared_buffer_ptr.lock().unwrap();
-                                    if let Some(bptr) = bptr {
-                                        let mem = unsafe { &mut *l._rt.memory_mut() };
-                                        let _ = process_commands(mem, bptr, &l.shared_state);
-                                        let _ = sync_layout_to_wasm(
-                                            mem,
-                                            bptr,
-                                            &l.shared_state.lock().unwrap(),
-                                        );
-                                    }
-                                }
-                                let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
-                            }
-                            // thread::sleep(Duration::from_millis(16)); // ~60fps logic tick
+                        } else {
+                            log::error!("LogicThread: Channel disconnected");
+                            return;
                         }
                     }
                 })
@@ -317,40 +354,79 @@ impl DyxelHost {
                     log::info!("RenderThread: Thread spawned");
                     let mut render_opt: Option<RenderState> = None;
                     let mut lifecycle = Lifecycle::Stopped;
+                    let mut continuous_render = true; // 默认开启连续渲染模式（最大性能）
 
                     loop {
-                        // Block on first message
-                        let msg = render_rx.recv().unwrap();
-
-                        // Coalesce messages
+                        // Process messages - either block or poll depending on mode
                         let mut latest_resize = None;
-                        let mut draw_requested = false;
+                        let mut draw_requested = continuous_render; // Continuous mode: always draw
                         let mut control_msgs = Vec::new();
-
-                        // Process the first message
-                        match msg {
-                            RenderMessage::Resize { width, height } => {
-                                latest_resize = Some((width, height));
+                        
+                        if continuous_render {
+                            // Continuous mode: non-blocking poll for messages
+                            while let Ok(msg) = render_rx.try_recv() {
+                                match msg {
+                                    RenderMessage::Resize { width, height } => {
+                                        latest_resize = Some((width, height));
+                                    }
+                                    RenderMessage::RequestDraw => {
+                                        // In continuous mode, ignore RequestDraw (we draw every loop)
+                                    }
+                                    RenderMessage::SetContinuousRender(enabled) => {
+                                        continuous_render = enabled;
+                                        draw_requested = enabled;
+                                        log::info!("RenderThread: Continuous render mode {}", if enabled { "enabled" } else { "disabled" });
+                                    }
+                                    _ => {
+                                        control_msgs.push(msg);
+                                    }
+                                }
                             }
-                            RenderMessage::RequestDraw => {
-                                draw_requested = true;
-                            }
-                            _ => {
-                                control_msgs.push(msg);
-                            }
-                        }
-
-                        // Drain the rest of the queue
-                        while let Ok(next) = render_rx.try_recv() {
-                            match next {
+                        } else {
+                            // Event-driven mode: block on first message
+                            let msg = match render_rx.recv() {
+                                Ok(msg) => msg,
+                                Err(_) => {
+                                    log::error!("RenderThread: Channel disconnected, shutting down");
+                                    return;
+                                }
+                            };
+                            
+                            // Process the first message
+                            match msg {
                                 RenderMessage::Resize { width, height } => {
                                     latest_resize = Some((width, height));
                                 }
                                 RenderMessage::RequestDraw => {
                                     draw_requested = true;
                                 }
+                                RenderMessage::SetContinuousRender(enabled) => {
+                                    continuous_render = enabled;
+                                    draw_requested = enabled;
+                                    log::info!("RenderThread: Continuous render mode {}", if enabled { "enabled" } else { "disabled" });
+                                }
                                 _ => {
-                                    control_msgs.push(next);
+                                    control_msgs.push(msg);
+                                }
+                            }
+
+                            // Drain the rest of the queue
+                            while let Ok(next) = render_rx.try_recv() {
+                                match next {
+                                    RenderMessage::Resize { width, height } => {
+                                        latest_resize = Some((width, height));
+                                    }
+                                    RenderMessage::RequestDraw => {
+                                        draw_requested = true;
+                                    }
+                                    RenderMessage::SetContinuousRender(enabled) => {
+                                        continuous_render = enabled;
+                                        draw_requested = enabled;
+                                        log::info!("RenderThread: Continuous render mode {}", if enabled { "enabled" } else { "disabled" });
+                                    }
+                                    _ => {
+                                        control_msgs.push(next);
+                                    }
                                 }
                             }
                         }
@@ -422,6 +498,12 @@ impl DyxelHost {
                                     log::info!("RenderThread: Shutting down");
                                     return;
                                 }
+                                RenderMessage::TogglePerfOverlay => {
+                                    if let Some(ref r) = render_opt {
+                                        r.enable_perf_overlay();
+                                        log::info!("RenderThread: Performance overlay toggled");
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -442,25 +524,25 @@ impl DyxelHost {
                                     render_frame(r, s.as_mut());
                                 }
                             }
-                        } else if draw_requested {
+                        } else if draw_requested && lifecycle == Lifecycle::Running {
                             let active_id = *active_surface_ptr.lock_guard().unwrap();
                             if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
-                                if lifecycle == Lifecycle::Stopped {
-                                    log::info!("RenderThread: Auto-resuming from RequestDraw");
-                                    lifecycle = Lifecycle::Running;
-                                }
-
-                                if lifecycle == Lifecycle::Running {
-                                    let mut surfs = surfaces_ptr.lock_guard().unwrap();
-                                    if let Some(s) = surfs.get_mut(&id.0) {
+                                let mut surfs = surfaces_ptr.lock_guard().unwrap();
+                                if let Some(s) = surfs.get_mut(&id.0) {
+                                    if !continuous_render {
                                         log::trace!("RenderThread: Rendering frame for surface {:?}", id);
-                                        render_frame(r, s.as_mut());
-                                    } else {
-                                        log::warn!("RenderThread: Active surface {:?} not found in map", id);
                                     }
+                                    render_frame(r, s.as_mut());
+                                    
+                                    // Continuous mode: add small delay to prevent GPU overload
+                                    if continuous_render {
+                                        std::thread::sleep(std::time::Duration::from_millis(1));
+                                    }
+                                } else {
+                                    log::warn!("RenderThread: Active surface {:?} not found in map", id);
                                 }
                             } else {
-                                log::trace!("RenderThread: RequestDraw ignored (no active surface or no render_opt)");
+                                log::trace!("RenderThread: Draw ignored (no active surface or no render_opt)");
                             }
                         }
                     }
@@ -558,17 +640,26 @@ impl DyxelHost {
     pub fn stop_native(&self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            log::info!("stop_native: START");
             let (ack_tx, ack_rx) = mpsc::channel();
             if let Some(tx) = &*self.render_tx.lock().unwrap() {
+                log::info!("stop_native: Sending Suspend to RenderThread");
                 let _ = tx.send(RenderMessage::Suspend(ack_tx));
                 let _ = ack_rx.recv_timeout(Duration::from_millis(500)); // Barrier
             }
             if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+                log::info!("stop_native: Sending Pause to LogicThread");
                 let _ = tx.send(LogicMessage::Pause);
             }
-            if let Some(id) = self.active_surface_id.lock_guard().unwrap().take() {
-                self.surfaces.lock_guard().unwrap().remove(&id.0);
+            // Clear all surfaces, not just active one
+            let mut surfaces = self.surfaces.lock_guard().unwrap();
+            let count = surfaces.len();
+            if count > 0 {
+                log::info!("stop_native: Clearing {} surfaces", count);
+                surfaces.clear();
             }
+            self.active_surface_id.lock_guard().unwrap().take();
+            log::info!("stop_native: DONE");
         }
     }
 
@@ -599,9 +690,32 @@ impl DyxelHost {
     pub fn tick(&self) {
         // No-op for now, logic runs in its own thread
     }
+    
+    /// Toggle performance overlay display (FPS, Memory, CPU)
+    pub fn toggle_perf_overlay(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.render_tx.lock().unwrap() {
+            match tx.send(RenderMessage::TogglePerfOverlay) {
+                Ok(_) => log::info!("toggle_perf_overlay: Message sent"),
+                Err(e) => log::error!("toggle_perf_overlay: Failed to send: {:?}", e),
+            }
+        }
+    }
 }
 
 impl DyxelHost {
+    /// Set continuous render mode (for performance testing)
+    /// When enabled, render thread will render as fast as possible without waiting for RequestDraw
+    pub fn set_continuous_render(&self, enabled: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.render_tx.lock().unwrap() {
+            match tx.send(RenderMessage::SetContinuousRender(enabled)) {
+                Ok(_) => log::info!("set_continuous_render: {}", if enabled { "enabled" } else { "disabled" }),
+                Err(e) => log::error!("set_continuous_render: Failed to send: {:?}", e),
+            }
+        }
+    }
+    
     pub async fn setup(
         &self,
         target: vello::wgpu::SurfaceTarget<'static>,

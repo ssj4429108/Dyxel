@@ -211,6 +211,15 @@ impl RenderBackend for ImpellerBackend {
         }
         Ok(())
     }
+    
+    fn sync_gpu(&self, _device: &wgpu::Device, _queue: &wgpu::Queue) {
+        // Impeller handles its own synchronization
+    }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    
     fn on_lifecycle_event(&self, _event: LifecycleEvent) {}
 }
 

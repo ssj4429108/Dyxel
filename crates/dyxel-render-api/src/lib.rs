@@ -43,6 +43,7 @@ pub trait RenderBackend: Send + Sync {
     fn render(&self, device: &wgpu::Device, queue: &wgpu::Queue, surface: &mut dyn SurfaceState, shared_state: &SharedPtr<SharedMutex<SharedState>>) -> RenderResult;
     fn on_lifecycle_event(&self, event: LifecycleEvent);
     fn sync_gpu(&self, device: &wgpu::Device, queue: &wgpu::Queue);
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -53,6 +54,7 @@ pub trait RenderBackend {
     fn render(&self, device: &wgpu::Device, queue: &wgpu::Queue, surface: &mut dyn SurfaceState, shared_state: &SharedPtr<SharedMutex<SharedState>>) -> RenderResult;
     fn on_lifecycle_event(&self, event: LifecycleEvent);
     fn sync_gpu(&self, device: &wgpu::Device, queue: &wgpu::Queue);
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[cfg(not(target_arch = "wasm32"))]

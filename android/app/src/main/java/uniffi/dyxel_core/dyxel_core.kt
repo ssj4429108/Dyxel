@@ -745,6 +745,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -791,6 +793,8 @@ internal interface UniffiLib : Library {
     fun uniffi_dyxel_core_fn_method_dyxelhost_stop_native(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_dyxel_core_fn_method_dyxelhost_tick(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_dyxel_core_fn_method_dyxelhost_toggle_perf_overlay(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun ffi_dyxel_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -926,6 +930,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_dyxel_core_checksum_method_dyxelhost_tick(
     ): Short
+    fun uniffi_dyxel_core_checksum_method_dyxelhost_toggle_perf_overlay(
+    ): Short
     fun uniffi_dyxel_core_checksum_constructor_dyxelhost_new(
     ): Short
     fun ffi_dyxel_core_uniffi_contract_version(
@@ -976,6 +982,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_tick() != 23076.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_toggle_perf_overlay() != 8757.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dyxel_core_checksum_constructor_dyxelhost_new() != 21082.toShort()) {
@@ -1403,6 +1412,11 @@ public interface DyxelHostInterface {
     
     fun `tick`()
     
+    /**
+     * Toggle performance overlay display (FPS, Memory, CPU)
+     */
+    fun `togglePerfOverlay`()
+    
     companion object
 }
 
@@ -1642,6 +1656,20 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_tick(
+        it, _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Toggle performance overlay display (FPS, Memory, CPU)
+     */override fun `togglePerfOverlay`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_toggle_perf_overlay(
         it, _status)
 }
     }

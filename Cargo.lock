@@ -842,6 +842,7 @@ dependencies = [
  "backtrace",
  "bytemuck",
  "console_log",
+ "dyxel-perf",
  "dyxel-render-api",
  "dyxel-render-vello",
  "dyxel-shared",
@@ -892,6 +893,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyxel-perf"
+version = "0.1.0"
+dependencies = [
+ "jni",
+ "js-sys",
+ "libc",
+ "log",
+ "ndk-sys 0.6.0+11769913",
+ "tokio",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "dyxel-render-api"
 version = "0.1.0"
 dependencies = [
@@ -932,6 +947,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "dyxel-editor",
+ "dyxel-perf",
  "dyxel-render-api",
  "dyxel-shared",
  "kurbo",
@@ -952,6 +968,7 @@ name = "dyxel-shared"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "log",
  "peniko",
  "serde",
  "taffy",

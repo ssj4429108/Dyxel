@@ -11,6 +11,7 @@ use vello::wgpu;
 use kurbo::{Affine, Rect as KRect, RoundedRect, Vec2};
 use taffy::style::AvailableSpace;
 use dyxel_shared::{SharedState, ViewType};
+use dyxel_perf::{PerformanceMonitor, SharedPerfMonitor, PerfConfig, PerformanceDiagnostics};
 
 use dyxel_editor::Editor;
 
@@ -31,12 +32,31 @@ pub struct VelloBackend {
     pub cache_path: SharedMutex<Option<String>>,
     pub cache_saved: AtomicBool,
     pub editors: SharedMutex<std::collections::HashMap<u32, Editor>>,
+    // Deferred initialization - store device info for lazy init
+    init_device_info: SharedMutex<Option<(String, Option<wgpu::PipelineCache>)>>,
+    // Performance monitoring
+    perf_monitor: SharedPerfMonitor,
+    // Detailed diagnostics (optional, for profiling)
+    diagnostics: SharedMutex<Option<PerformanceDiagnostics>>,
+    // Cached overlay editor (avoid creating every frame)
+    overlay_editor: SharedMutex<Option<Editor>>,
+    last_overlay_text: SharedMutex<String>,
+    // Memory optimizer for tiered memory configuration
+    memory_optimizer: SharedMutex<dyxel_perf::MemoryOptimizer>,
 }
 
 const BLIT_SHADER_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.spv"));
 
 impl VelloBackend {
     pub fn new() -> Self {
+        Self::with_perf_config(PerfConfig::default())
+    }
+    
+    pub fn with_perf_config(perf_config: PerfConfig) -> Self {
+        // Initialize memory optimizer with tiered configuration
+        let memory_optimizer = dyxel_perf::MemoryOptimizer::new();
+        log::info!("[Memory] VelloBackend: Device tier detected: {:?}", memory_optimizer.tier());
+        
         Self {
             renderer: SharedMutex::new(None),
             blit_bind_group_layout: SharedMutex::new(None),
@@ -47,6 +67,96 @@ impl VelloBackend {
             cache_path: SharedMutex::new(None),
             cache_saved: AtomicBool::new(false),
             editors: SharedMutex::new(std::collections::HashMap::new()),
+            init_device_info: SharedMutex::new(None),
+            perf_monitor: std::sync::Arc::new(std::sync::Mutex::new(PerformanceMonitor::new(perf_config))),
+            diagnostics: SharedMutex::new(Some(PerformanceDiagnostics::new(120))),
+            overlay_editor: SharedMutex::new(None),
+            last_overlay_text: SharedMutex::new(String::new()),
+            memory_optimizer: SharedMutex::new(memory_optimizer),
+        }
+    }
+    
+    /// Enable performance overlay
+    pub fn enable_perf_overlay(&self) {
+        self.perf_monitor.lock().unwrap().toggle_overlay();
+    }
+    
+    /// Disable performance overlay
+    pub fn disable_perf_overlay(&self) {
+        let mut monitor = self.perf_monitor.lock().unwrap();
+        if monitor.should_show_overlay() {
+            monitor.toggle_overlay();
+        }
+    }
+    
+    /// Deferred renderer initialization - called on first render
+    fn ensure_renderer_initialized(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        // Fast path - check without lock
+        if self.init_device_info.lock().unwrap().is_none() {
+            return; // Already initialized
+        }
+        
+        let start = std::time::Instant::now();
+        let mut info_lock = self.init_device_info.lock().unwrap();
+        
+        // Double-check after acquiring lock
+        if info_lock.is_none() {
+            return; // Another thread already initialized
+        }
+        
+        let (cache_path, pipeline_cache) = info_lock.take().unwrap();
+        
+        // Android 上限制最大线程数避免 ANR，其他平台动态获取
+        #[cfg(not(target_arch = "wasm32"))]
+        let num_threads = std::thread::available_parallelism()
+            .ok()
+            .map(|n| {
+                #[cfg(target_os = "android")]
+                return n.get().min(4);
+                #[cfg(not(target_os = "android"))]
+                return n.get().max(4);
+            });
+        #[cfg(target_arch = "wasm32")]
+        let num_threads = None;
+        
+        match Renderer::new(device, RendererOptions {
+            antialiasing_support: vello::AaSupport::area_only(),
+            pipeline_cache,
+            num_init_threads: num_threads.and_then(|n| std::num::NonZeroUsize::new(n)),
+            use_cpu: false
+        }) {
+            Ok(renderer) => {
+                *self.renderer.lock().unwrap() = Some(renderer);
+                log::info!("[Perf] Deferred Renderer::new() took {:?}", start.elapsed());
+                
+                // Do a warmup draw to further reduce first-frame latency
+                let t = std::time::Instant::now();
+                if let Some(renderer) = self.renderer.lock().unwrap().as_mut() {
+                    let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Warmup Dummy Texture"),
+                        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING,
+                        view_formats: &[],
+                    });
+                    let dummy_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    let scene = Scene::new();
+                    let params = vello::RenderParams {
+                        base_color: Color::TRANSPARENT,
+                        width: 1,
+                        height: 1,
+                        antialiasing_method: vello::AaConfig::Area,
+                    };
+                    let _ = renderer.render_to_texture(device, queue, &scene, &dummy_view, &params);
+                    log::info!("[Perf] Deferred warmup draw took {:?}", t.elapsed());
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to create renderer: {}", e);
+            }
         }
     }
 
@@ -121,6 +231,22 @@ impl VelloBackend {
         offscreen_texture: &mut Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
         shared_state: &SharedMutex<SharedState>,
     ) -> RenderResult {
+        // Detailed frame timing for diagnostics
+        let frame_start = std::time::Instant::now();
+        let mut stage_timer = dyxel_perf::FrameTimer::new();
+        
+        // Deferred initialization: create renderer on first render if not already done
+        self.ensure_renderer_initialized(device, queue);
+        stage_timer.mark("init_done");
+        
+        // Begin frame timing for performance monitoring
+        let should_show_overlay = {
+            let monitor = self.perf_monitor.lock().unwrap();
+            monitor.begin_frame();
+            monitor.should_show_overlay()
+        };
+        stage_timer.mark("perf_start");
+        
         let mut renderer_lock = self.renderer.lock().unwrap();
         let renderer = renderer_lock.as_mut().ok_or_else(|| anyhow::anyhow!("Renderer not initialized"))?;
 
@@ -207,15 +333,75 @@ impl VelloBackend {
         if let Some(id) = rid {
             let g = shared_state.lock().unwrap();
             let mut editors = self.editors.lock().unwrap();
+            stage_timer.mark("state_lock");
+            
+            // Debug: Count total nodes and root children
+            let total_nodes = g.nodes.len();
+            let root_children = g.nodes.get(&id).map(|n| n.children.len()).unwrap_or(0);
+            log::info!("[Render] Total nodes: {}, Root children: {}", total_nodes, root_children);
             
             // Apply platform correction at the root level
-            // This ensures all rendering (rects, text, glyphs) uses consistent coordinates
             let root_transform = platform_correction(h as f64);
             
             render_node_recursive_with_transform(id, &g, &mut editors, &mut scene, Vec2::ZERO, root_transform);
+            stage_timer.mark("scene_build");
         }
 
-        // Offscreen logic alignment
+        // Get performance stats and draw overlay directly to scene if enabled
+        let stats = self.perf_monitor.lock().unwrap().get_stats();
+        if should_show_overlay {
+            let overlay_text = format!(
+                "FPS: {:.1}\nFrame: {:.2}ms\nMem: {:.1}MB\nCPU: {:.1}%",
+                stats.fps,
+                stats.frame_time_ms,
+                stats.memory_used_mb,
+                stats.cpu_usage
+            );
+            
+            // Calculate overlay position (top-left corner with padding)
+            let (overlay_x, overlay_y, _) = self.perf_monitor.lock().unwrap().get_overlay_config();
+            let padding = 10.0;
+            let pos_x = padding + overlay_x as f64;
+            let pos_y = padding + overlay_y as f64;
+            
+            // Draw semi-transparent background directly to main scene
+            let bg_rect = KRect::new(
+                pos_x - 5.0,
+                pos_y - 5.0,
+                pos_x + 140.0,
+                pos_y + 70.0,
+            );
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                Color::from_rgba8(0, 0, 0, 180),
+                None,
+                &bg_rect,
+            );
+            
+            // Use cached editor (avoid creating every frame)
+            let mut editor_lock = self.overlay_editor.lock().unwrap();
+            let mut last_text_lock = self.last_overlay_text.lock().unwrap();
+            
+            if editor_lock.is_none() {
+                *editor_lock = Some(Editor::new(14.0));
+            }
+            
+            if let Some(ref mut editor) = *editor_lock {
+                // Only update text if changed (avoid expensive re-layout)
+                if *last_text_lock != overlay_text {
+                    editor.set_text(&overlay_text);
+                    editor.set_text_color(Color::WHITE);
+                    *last_text_lock = overlay_text;
+                }
+                
+                // Draw text directly to main scene using cached editor
+                editor.draw(&mut scene, Affine::translate((pos_x, pos_y)));
+            }
+        }
+
+        // Offscreen logic alignment - Vello requires Rgba8Unorm for storage textures
+        // Note: Texture format optimization applies to surface format, not internal storage
         if offscreen_texture.as_ref().map_or(true, |(t, _, _)| t.width() != w || t.height() != h) {
             let texture = device.create_texture(&wgpu::TextureDescriptor { 
                 label: Some("Vello Offscreen Texture"), 
@@ -247,6 +433,7 @@ impl VelloBackend {
         
         let (_, off_view, blit_bg) = offscreen_texture.as_ref().unwrap();
         
+        // Single render: main scene + overlay (if enabled) to offscreen texture
         renderer.render_to_texture(
             device,
             queue,
@@ -259,7 +446,9 @@ impl VelloBackend {
                 antialiasing_method: vello::AaConfig::Area
             }
         ).map_err(|e| anyhow::anyhow!("Vello render error: {:?}", e))?;
+        stage_timer.mark("gpu_render");
         
+        // Single present: blit the combined result (main scene + optional overlay) to screen
         match v_surface_surface.surface.get_current_texture() {
             Ok(st) => {
                 let mut enc = device.create_command_encoder(&Default::default());
@@ -276,7 +465,7 @@ impl VelloBackend {
                             depth_slice: None 
                         })], 
                         depth_stencil_attachment: None, 
-                    timestamp_writes: None, 
+                        timestamp_writes: None, 
                         occlusion_query_set: None 
                     }); 
                     rp.set_pipeline(blit_pipeline); 
@@ -284,11 +473,87 @@ impl VelloBackend {
                     rp.draw(0..3, 0..1); 
                 }
                 queue.submit(Some(enc.finish())); 
+                stage_timer.mark("blit_submit");
                 st.present();
+                stage_timer.mark("present_return");
             }
             Err(e) => {
                 log::error!("VelloBackend: get_current_texture failed: {:?}", e);
                 return Err(anyhow::anyhow!("Surface texture acquisition failed: {:?}", e));
+            }
+        }
+        
+        // Log detailed frame timing every 60 frames for diagnostics
+        let stats = self.perf_monitor.lock().unwrap().get_stats();
+        if stats.total_frames % 60 == 0 {
+            let report = stage_timer.report();
+            
+            // Calculate stage durations (span names are "start_to_end" format)
+            let state_lock_time = report.get("init_done_to_perf_start") + report.get("perf_start_to_state_lock");
+            let scene_build_time = report.get("state_lock_to_scene_build");
+            let gpu_time = report.get("scene_build_to_gpu_render");
+            let blit_time = report.get("gpu_render_to_blit_submit");
+            let present_time = report.get("blit_submit_to_present_return");
+            let total = frame_start.elapsed().as_secs_f32() * 1000.0;
+            
+            #[cfg(target_os = "android")]
+            {
+                let perf_monitor = self.perf_monitor.lock().unwrap();
+                let mem_trend = perf_monitor.get_memory_trend();
+                let leak_warning = if perf_monitor.has_memory_leak() {
+                    " [LEAK]"
+                } else {
+                    ""
+                };
+                drop(perf_monitor);
+                
+                // Temperature and thermal status
+                let temp_str = if let Some(temp) = stats.temperature_c {
+                    let thermal_status = if temp > 75.0 {
+                        "🔥 THROTTLING"
+                    } else if temp > 60.0 {
+                        "⚠️  WARM"
+                    } else {
+                        "✓ OK"
+                    };
+                    format!(", Temp={:.1}°C {}", temp, thermal_status)
+                } else {
+                    String::new()
+                };
+                
+                log::info!(
+                    "[DIAG-Android] Frame {}: {:.2}ms (State={:.2} Scene={:.2} GPU={:.2} Blit={:.2} Present={:.2}) FPS={:.1} Mem={:.1}MB ({:.1}/min){}{}",
+                    stats.total_frames,
+                    total,
+                    state_lock_time,
+                    scene_build_time,
+                    gpu_time,
+                    blit_time,
+                    present_time,
+                    stats.fps,
+                    stats.memory_used_mb,
+                    mem_trend,
+                    leak_warning,
+                    temp_str
+                );
+            }
+            
+            #[cfg(not(target_os = "android"))]
+            log::info!(
+                "[DIAG] Frame {}: Total={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FPS={:.1}",
+                stats.total_frames,
+                total,
+                state_lock_time,
+                scene_build_time,
+                gpu_time,
+                blit_time,
+                present_time,
+                stats.fps
+            );
+            
+            // Print full breakdown every 300 frames (5 seconds at 60 FPS)
+            if stats.total_frames % 300 == 0 {
+                report.print();
             }
         }
 
@@ -391,7 +656,16 @@ fn render_node_recursive_with_transform(
 }
 
 impl RenderBackend for VelloBackend {
-    fn init(&self, device: &wgpu::Device, queue: &wgpu::Queue, config: BackendConfig) -> anyhow::Result<()> {
+    fn init(&self, device: &wgpu::Device, _queue: &wgpu::Queue, config: BackendConfig) -> anyhow::Result<()> {
+        let init_start = std::time::Instant::now();
+        
+        #[cfg(target_os = "android")]
+        log::info!("[Android-Perf] VelloBackend::init started - Performance monitoring enabled");
+        
+        // OPTIMIZATION: Renderer initialization is deferred to first render
+        // This reduces cold start time by ~1.1s (Renderer::new() time)
+        // Only create lightweight resources here, store info for deferred renderer init
+        
         // Try using pre-compiled SPIR-V, fall back to WGSL if it fails
         let blit_shader = if cfg!(target_os = "android") {
             let spv_words: Vec<u32> = BLIT_SHADER_SPV
@@ -457,60 +731,26 @@ impl RenderBackend for VelloBackend {
             None
         };
 
-        // Android 上限制最大线程数避免 ANR，其他平台动态获取
-        #[cfg(not(target_arch = "wasm32"))]
-        let num_threads = std::thread::available_parallelism()
-            .ok()
-            .map(|n| {
-                #[cfg(target_os = "android")]
-                return n.get().min(4);  // Android 最多 4 线程
-                #[cfg(not(target_os = "android"))]
-                return n.get().max(4);
-            });
-        #[cfg(target_arch = "wasm32")]
-        let num_threads = None;
-        
-        let renderer = Renderer::new(device, RendererOptions {
-            antialiasing_support: vello::AaSupport::area_only(),
-            pipeline_cache: pipeline_cache.clone(),
-            num_init_threads: num_threads.and_then(|n| std::num::NonZeroUsize::new(n)),
-            use_cpu: false
-        }).map_err(|e| anyhow::anyhow!("Failed to create renderer: {}", e))?;
-
-        *self.renderer.lock().unwrap() = Some(renderer);
         *self.blit_bind_group_layout.lock().unwrap() = Some(blit_bl);
         *self.sampler.lock().unwrap() = Some(sampler);
         *self.blit_shader.lock().unwrap() = Some(blit_shader);
-        *self.pipeline_cache.lock().unwrap() = pipeline_cache;
-        *self.cache_path.lock().unwrap() = Some(cache_path);
+        *self.pipeline_cache.lock().unwrap() = pipeline_cache.clone();
+        *self.cache_path.lock().unwrap() = Some(cache_path.clone());
 
+        // Prewarm blit pipeline (lightweight)
         self.prewarm_pipelines(device, wgpu::TextureFormat::Rgba8Unorm);
 
-        // Warmup draw
+        // Store info for deferred renderer initialization
+        *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache));
+        
+        // Initialize memory optimizer for tiered configuration
         {
-            let mut renderer_lock = self.renderer.lock().unwrap();
-            let renderer = renderer_lock.as_mut().unwrap();
-            let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Warmup Dummy Texture"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING,
-                view_formats: &[],
-            });
-            let dummy_view = dummy_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let scene = Scene::new();
-            let params = vello::RenderParams {
-                base_color: Color::TRANSPARENT,
-                width: 1,
-                height: 1,
-                antialiasing_method: vello::AaConfig::Area,
-            };
-            let _ = renderer.render_to_texture(device, queue, &scene, &dummy_view, &params);
+            let memory_optimizer = self.memory_optimizer.lock().unwrap();
+            memory_optimizer.initialize();
+            log::info!("[Memory] Initialized memory optimizer for tier: {:?}", memory_optimizer.tier());
         }
         
+        log::info!("[Perf] VelloBackend::init: Total time {:?} (Renderer deferred)", init_start.elapsed());
         Ok(())
     }
 
@@ -526,13 +766,30 @@ impl RenderBackend for VelloBackend {
         log::info!("VelloBackend: create_surface_state START - size: {}x{}, has_precreated_surface: {}", 
             width, height, surface.is_some());
         
+        // Select best available present mode for the platform
+        // Android typically supports Mailbox (low latency) or Fifo (VSync)
+        #[cfg(target_os = "android")]
+        let present_mode = {
+            // Android: Use Mailbox for best performance (low latency, allows tearing)
+            // Note: Android devices typically don't support Immediate mode
+            // Mailbox is the best alternative - it provides low latency without blocking
+            log::info!("VelloBackend: Using Mailbox mode (low latency, VSync-like but faster)");
+            wgpu::PresentMode::Mailbox
+        };
+        
+        #[cfg(not(target_os = "android"))]
+        let present_mode = {
+            log::info!("VelloBackend: VSync disabled by default (Immediate present mode)");
+            wgpu::PresentMode::Immediate
+        };
+        
         let surface = if let Some(s) = surface {
-            log::info!("VelloBackend: Using pre-created surface");
-            pollster::block_on(context.create_render_surface(s, width, height, wgpu::PresentMode::AutoVsync))
+            log::info!("VelloBackend: Using pre-created surface (present_mode: {:?})", present_mode);
+            pollster::block_on(context.create_render_surface(s, width, height, present_mode))
                 .map_err(|e| anyhow::anyhow!("Failed to create render surface: {:?}", e))?
         } else {
-            log::info!("VelloBackend: Creating surface from target");
-            pollster::block_on(context.create_surface(target.expect("Vello requires a surface target"), width, height, wgpu::PresentMode::AutoVsync))
+            log::info!("VelloBackend: Creating surface from target (present_mode: {:?})", present_mode);
+            pollster::block_on(context.create_surface(target.expect("Vello requires a surface target"), width, height, present_mode))
                 .map_err(|e| anyhow::anyhow!("Failed to create surface: {:?}", e))?
         };
         
@@ -666,5 +923,9 @@ impl RenderBackend for VelloBackend {
             }
             Err(e) => log::error!("VelloBackend: sync_gpu error: {:?}", e),
         }
+    }
+    
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

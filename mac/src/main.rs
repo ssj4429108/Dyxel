@@ -64,6 +64,26 @@ fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
                 host.on_touch(mouse_pos.x as f32, mouse_pos.y as f32);
             }
+            Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ElementState::Pressed,
+                logical_key: winit::keyboard::Key::Character(c),
+                ..
+            }, .. }, .. } if c == "p" || c == "P" => {
+                host.toggle_perf_overlay();
+            }
+            Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ElementState::Pressed,
+                logical_key: winit::keyboard::Key::Character(c),
+                ..
+            }, .. }, .. } if c == "c" || c == "C" => {
+                // Toggle continuous render mode (for FPS testing)
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static CONTINUOUS: AtomicBool = AtomicBool::new(false);
+                let new_state = !CONTINUOUS.load(Ordering::Relaxed);
+                CONTINUOUS.store(new_state, Ordering::Relaxed);
+                host.set_continuous_render(new_state);
+                println!("Continuous render mode: {}", if new_state { "ON" } else { "OFF" });
+            }
             _ => {}
         }
     })?;
