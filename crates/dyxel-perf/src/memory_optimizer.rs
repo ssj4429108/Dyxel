@@ -5,6 +5,11 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(target_os = "android")]
+extern "C" {
+    fn __system_property_get(name: *const libc::c_char, value: *mut libc::c_char) -> i32;
+}
+
 /// Device memory tier classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMemoryTier {
@@ -18,9 +23,58 @@ pub enum DeviceMemoryTier {
 
 impl DeviceMemoryTier {
     /// Auto-detect based on available memory
+    /// Can be overridden by DYXEL_FORCE_TIER env var for testing
     pub fn auto_detect() -> Self {
+        // Check for environment variable override (for testing)
+        if let Ok(tier_str) = std::env::var("DYXEL_FORCE_TIER") {
+            let tier = match tier_str.to_lowercase().as_str() {
+                "low" | "lowend" | "0" => {
+                    log::info!("[MemoryOptimizer] Tier forced to LowEnd via DYXEL_FORCE_TIER");
+                    DeviceMemoryTier::LowEnd
+                }
+                "mid" | "midrange" | "1" => {
+                    log::info!("[MemoryOptimizer] Tier forced to MidRange via DYXEL_FORCE_TIER");
+                    DeviceMemoryTier::MidRange
+                }
+                "high" | "highend" | "2" => {
+                    log::info!("[MemoryOptimizer] Tier forced to HighEnd via DYXEL_FORCE_TIER");
+                    DeviceMemoryTier::HighEnd
+                }
+                _ => {
+                    log::warn!("[MemoryOptimizer] Unknown DYXEL_FORCE_TIER value: {}, using auto-detect", tier_str);
+                    Self::auto_detect_internal()
+                }
+            };
+            return tier;
+        }
+        Self::auto_detect_internal()
+    }
+    
+    fn auto_detect_internal() -> Self {
         #[cfg(target_os = "android")]
         {
+            // Check Android system property for tier override (for testing)
+            if let Some(tier_str) = Self::get_android_property("debug.dyxel.force_tier") {
+                let tier_str_lower = tier_str.to_lowercase();
+                match tier_str_lower.as_str() {
+                    "low" | "lowend" | "0" => {
+                        log::info!("[MemoryOptimizer] Tier forced to LowEnd via debug.dyxel.force_tier");
+                        return DeviceMemoryTier::LowEnd;
+                    }
+                    "mid" | "midrange" | "1" => {
+                        log::info!("[MemoryOptimizer] Tier forced to MidRange via debug.dyxel.force_tier");
+                        return DeviceMemoryTier::MidRange;
+                    }
+                    "high" | "highend" | "2" => {
+                        log::info!("[MemoryOptimizer] Tier forced to HighEnd via debug.dyxel.force_tier");
+                        return DeviceMemoryTier::HighEnd;
+                    }
+                    _ => {
+                        log::warn!("[MemoryOptimizer] Unknown debug.dyxel.force_tier value: '{}', using auto-detect", tier_str);
+                    }
+                };
+            }
+            
             // Read total RAM from /proc/meminfo
             if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
                 for line in content.lines() {
@@ -52,6 +106,33 @@ impl DeviceMemoryTier {
             // Default to mid-range for unknown platforms (Web, etc.)
             return DeviceMemoryTier::MidRange;
         }
+    }
+    
+    /// Read Android system property (internal helper)
+    #[cfg(target_os = "android")]
+    fn get_android_property(name: &str) -> Option<String> {
+        const PROP_VALUE_MAX: usize = 92;
+        let c_name = std::ffi::CString::new(name).ok()?;
+        let mut buf = vec![0u8; PROP_VALUE_MAX];
+        
+        unsafe {
+            let len = __system_property_get(
+                c_name.as_ptr() as *const libc::c_char,
+                buf.as_mut_ptr() as *mut libc::c_char
+            );
+            if len > 0 {
+                buf.truncate(len as usize);
+                String::from_utf8(buf).ok()
+            } else {
+                None
+            }
+        }
+    }
+    
+    #[cfg(not(target_os = "android"))]
+    #[allow(dead_code)]
+    fn get_android_property(_name: &str) -> Option<String> {
+        None
     }
     
     /// Get Vello renderer buffer size multiplier

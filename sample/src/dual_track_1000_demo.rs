@@ -14,26 +14,31 @@ use dyxel_view::{
 
 // println for WASM
 #[cfg(target_arch = "wasm32")]
-fn println(s: &str) {
+fn println(_s: &str) {
     // WASM: no-op or host call
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn println(s: &str) {
     std::println!("{}", s);
 }
 use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 
 /// Animation frame counter
+#[allow(dead_code)]
 static FRAME: AtomicU32 = AtomicU32::new(0);
 
 /// Node start ID (first animated node)
+#[allow(dead_code)]
 static NODES_START: AtomicU32 = AtomicU32::new(0);
 
 /// Root container ID
+#[allow(dead_code)]
 static ROOT_ID: AtomicU32 = AtomicU32::new(0);
 
 /// Initialization complete flag
+#[allow(dead_code)]
 static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 /// Current page during init
@@ -45,6 +50,7 @@ const TOTAL_NODES: usize = 1000;
 /// Nodes per page
 const PAGE_SIZE: usize = 200;
 
+#[allow(dead_code)]
 pub fn init() {
     println("=== Dual-Track 1000 Nodes Test ===");
     println("Memory: Registry(32KB) + CommandStream(96KB)");
@@ -175,6 +181,7 @@ fn report_stats(frame: u32) {
     ));
 }
 
+#[allow(dead_code)]
 pub fn tick() {
     let frame = FRAME.fetch_add(1, Ordering::SeqCst);
     let root_id = ROOT_ID.load(Ordering::SeqCst);

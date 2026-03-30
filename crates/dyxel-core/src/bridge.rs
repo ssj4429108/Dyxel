@@ -519,8 +519,8 @@ impl DyxelHost {
                                         if let Some(v_ctx) = r.context.downcast_ref::<vello::util::RenderContext>() {
                                             let dev = &v_ctx.devices[0].device;
                                             let queue = &v_ctx.devices[0].queue;
-                                            let dev_handle = unsafe { DeviceHandle::new(dev) };
-                                            let queue_handle = unsafe { QueueHandle::new(queue) };
+                                            let dev_handle = DeviceHandle::new(dev);
+                                            let queue_handle = QueueHandle::new(queue);
                                             r.backend.sync_gpu(dev_handle, queue_handle);
                                         }
                                     }

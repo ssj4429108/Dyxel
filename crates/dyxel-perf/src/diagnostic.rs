@@ -239,7 +239,7 @@ mod tests {
         let mut diag = PerformanceDiagnostics::new(60);
         
         // Simulate VSync-limited frames (~16.67ms with idle time)
-        for i in 0..30 {
+        for _i in 0..30 {
             diag.begin_frame();
             
             // Simulate GPU work (2ms)

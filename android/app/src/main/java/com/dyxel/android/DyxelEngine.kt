@@ -10,11 +10,11 @@ class DyxelEngine {
     private var enginePrepared = false
 
     fun setup(context: android.content.Context) {
-        initLogger()
-        
+
         val dataDir = context.filesDir.absolutePath
         
         scope.launch {
+            initLogger()
             launch { extractAssets(context) }
             launch {
                 if (!enginePrepared) {

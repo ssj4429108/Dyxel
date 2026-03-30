@@ -52,13 +52,10 @@ pub struct DeviceHandle {
 }
 
 impl DeviceHandle {
-    /// Create a new device handle from a raw pointer
-    /// 
-    /// # Safety
-    /// The pointer must be valid for the lifetime of the handle
-    pub unsafe fn new<T>(device: *const T) -> Self {
+    /// Create a new device handle from a reference
+    pub fn new<T>(device: &T) -> Self {
         Self {
-            ptr: device as *const (),
+            ptr: device as *const T as *const (),
             _marker: std::marker::PhantomData,
         }
     }
@@ -85,9 +82,10 @@ pub struct QueueHandle {
 }
 
 impl QueueHandle {
-    pub unsafe fn new<T>(queue: *const T) -> Self {
+    /// Create a new queue handle from a reference
+    pub fn new<T>(queue: &T) -> Self {
         Self {
-            ptr: queue as *const (),
+            ptr: queue as *const T as *const (),
             _marker: std::marker::PhantomData,
         }
     }

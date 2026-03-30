@@ -14,8 +14,8 @@ pub fn render_frame(e: &mut RenderState, s: &mut dyn SurfaceState) {
         let queue = &v_ctx.devices[0].queue;
         
         // Create handles for the abstract API
-        let device_handle = unsafe { DeviceHandle::new(device) };
-        let queue_handle = unsafe { QueueHandle::new(queue) };
+        let device_handle = DeviceHandle::new(device);
+        let queue_handle = QueueHandle::new(queue);
         
         log::trace!("renderer: Starting frame render, surface size: {}x{}", s.width(), s.height());
         if let Err(err) = e.backend.render(device_handle, queue_handle, s, &e.shared_state) {

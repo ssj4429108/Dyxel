@@ -18,6 +18,7 @@ use dyxel_shared::{SharedState, ViewType};
 use dyxel_perf::{PerformanceMonitor, SharedPerfMonitor, PerfConfig, PerformanceDiagnostics};
 
 use dyxel_editor::Editor;
+// Two-stage init is implemented inline with cache header markers
 
 #[cfg(target_os = "macos")]
 pub mod mac;
@@ -26,21 +27,35 @@ pub mod android;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
+pub mod staged_init;
+pub mod shader_cache;
+pub mod minimal_shaders;
+pub mod staged_loader;
+pub mod two_stage_init;
+
+/// Vello render backend implementation
+/// 
+/// This is the concrete implementation of RenderBackend using Vello + wgpu
+// Type aliases for shared data used in async context
+type AsyncShared<T> = std::sync::Arc<std::sync::Mutex<T>>;
+
 /// Vello render backend implementation
 /// 
 /// This is the concrete implementation of RenderBackend using Vello + wgpu
 pub struct VelloBackend {
-    pub renderer: SharedMutex<Option<Renderer>>,
+    pub renderer: AsyncShared<Option<Renderer>>,
     pub blit_bind_group_layout: SharedMutex<Option<wgpu::BindGroupLayout>>,
     pub sampler: SharedMutex<Option<wgpu::Sampler>>,
     pub blit_shader: SharedMutex<Option<wgpu::ShaderModule>>,
     pub blit_pipeline: SharedMutex<Option<wgpu::RenderPipeline>>,
-    pub pipeline_cache: SharedMutex<Option<wgpu::PipelineCache>>,
-    pub cache_path: SharedMutex<Option<String>>,
+    pub pipeline_cache: AsyncShared<Option<wgpu::PipelineCache>>,
+    pub cache_path: AsyncShared<Option<String>>,
     pub cache_saved: AtomicBool,
+    // Current cache stage: None = no cache, Some(1) = Stage 1, Some(2) = Stage 2
+    cache_stage: AsyncShared<Option<u8>>,
     pub editors: SharedMutex<std::collections::HashMap<u32, Editor>>,
     // Deferred initialization - store device info for lazy init
-    init_device_info: SharedMutex<Option<(String, Option<wgpu::PipelineCache>)>>,
+    init_device_info: SharedMutex<Option<(String, Option<wgpu::PipelineCache>, Option<u8>)>>,
     // Performance monitoring
     perf_monitor: SharedPerfMonitor,
     // Detailed diagnostics (optional, for profiling)
@@ -51,6 +66,11 @@ pub struct VelloBackend {
     last_overlay_text: SharedMutex<String>,
     // Memory optimizer for tiered memory configuration
     memory_optimizer: SharedMutex<dyxel_perf::MemoryOptimizer>,
+    // Async initialization state tracking
+    is_loading: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // Async loading thread handle (optional - for monitoring)
+    #[allow(dead_code)]
+    loading_handle: SharedMutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 const BLIT_SHADER_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.spv"));
@@ -66,14 +86,15 @@ impl VelloBackend {
         log::info!("[Memory] VelloBackend: Device tier detected: {:?}", memory_optimizer.tier());
         
         Self {
-            renderer: SharedMutex::new(None),
+            renderer: AsyncShared::new(std::sync::Mutex::new(None)),
             blit_bind_group_layout: SharedMutex::new(None),
             sampler: SharedMutex::new(None),
             blit_shader: SharedMutex::new(None),
             blit_pipeline: SharedMutex::new(None),
-            pipeline_cache: SharedMutex::new(None),
-            cache_path: SharedMutex::new(None),
+            pipeline_cache: AsyncShared::new(std::sync::Mutex::new(None)),
+            cache_path: AsyncShared::new(std::sync::Mutex::new(None)),
             cache_saved: AtomicBool::new(false),
+            cache_stage: AsyncShared::new(std::sync::Mutex::new(None)),
             editors: SharedMutex::new(std::collections::HashMap::new()),
             init_device_info: SharedMutex::new(None),
             perf_monitor: std::sync::Arc::new(std::sync::Mutex::new(PerformanceMonitor::new(perf_config))),
@@ -81,6 +102,8 @@ impl VelloBackend {
             overlay_editor: SharedMutex::new(None),
             last_overlay_text: SharedMutex::new(String::new()),
             memory_optimizer: SharedMutex::new(memory_optimizer),
+            is_loading: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            loading_handle: SharedMutex::new(None),
         }
     }
     
@@ -97,53 +120,99 @@ impl VelloBackend {
         }
     }
     
-    /// Deferred renderer initialization - called on first render
-    fn ensure_renderer_initialized(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        // Fast path - check without lock
-        if self.init_device_info.lock().unwrap().is_none() {
-            return; // Already initialized
+    /// Async renderer initialization - non-blocking, runs in background thread
+    /// Two-stage loading: Stage 1 (fast), save cache, Stage 2 (complete), update cache
+    fn ensure_renderer_initialized_async(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        // Fast path - already initialized
+        if self.renderer.lock().unwrap().is_some() {
+            return;
         }
         
-        let total_start = std::time::Instant::now();
-        let mut info_lock = self.init_device_info.lock().unwrap();
-        
-        // Double-check after acquiring lock
-        if info_lock.is_none() {
-            return; // Another thread already initialized
+        // Check if already loading
+        if self.is_loading.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
         }
         
-        let (_cache_path, pipeline_cache) = info_lock.take().unwrap();
-        log::info!("[ColdStart] Renderer initialization starting, cache present: {}", pipeline_cache.is_some());
+        // Try to acquire init info
+        let init_info = self.init_device_info.lock().unwrap().take();
+        if init_info.is_none() {
+            return; // No init info available (should not happen)
+        }
         
-        // Android 上限制最大线程数避免 ANR，其他平台动态获取
-        #[cfg(not(target_arch = "wasm32"))]
-        let num_threads = std::thread::available_parallelism()
-            .ok()
-            .map(|n| {
-                #[cfg(target_os = "android")]
-                return n.get().min(4);
-                #[cfg(not(target_os = "android"))]
-                return n.get().max(4);
-            });
-        #[cfg(target_arch = "wasm32")]
-        let num_threads = None;
+        let (_cache_path, pipeline_cache, cache_stage) = init_info.unwrap();
+        let memory_tier = self.memory_optimizer.lock().unwrap().tier();
         
-        let renderer_start = std::time::Instant::now();
-        match Renderer::new(device, RendererOptions {
-            antialiasing_support: vello::AaSupport::area_only(),
-            pipeline_cache,
-            num_init_threads: num_threads.and_then(|n| std::num::NonZeroUsize::new(n)),
-            use_cpu: false
-        }) {
-            Ok(renderer) => {
-                *self.renderer.lock().unwrap() = Some(renderer);
-                log::info!("[ColdStart] Renderer::new() took {:?}", renderer_start.elapsed());
-                
-                // Do a warmup draw to further reduce first-frame latency
-                let warmup_start = std::time::Instant::now();
-                if let Some(renderer) = self.renderer.lock().unwrap().as_mut() {
-                    let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("Warmup Dummy Texture"),
+        // Determine if we need full load based on cache stage
+        // cache_stage: None = no cache, Some(1) = Stage 1 (area_only), Some(2) = Stage 2 (full)
+        let needs_full_load = cache_stage != Some(2);
+        let is_first_launch = cache_stage.is_none();
+        
+        log::info!("[ColdStart] Cache stage: {:?}, needs_full_load: {}, is_first_launch: {}", 
+            cache_stage, needs_full_load, is_first_launch);
+        
+        // Set loading flag
+        self.is_loading.store(true, std::sync::atomic::Ordering::SeqCst);
+        
+        // Clone necessary data for the background thread
+        let renderer_clone = self.renderer.clone();
+        let is_loading_clone = self.is_loading.clone();
+        let device_clone = device.clone();
+        let queue_clone = queue.clone();
+        let perf_monitor_clone = self.perf_monitor.clone();
+        let cache_saved_clone = std::sync::Arc::new(AtomicBool::new(false));
+        let cache_saved_for_thread = cache_saved_clone.clone();
+        let pipeline_cache_clone = self.pipeline_cache.clone();
+        let cache_path_clone: AsyncShared<Option<String>> = self.cache_path.clone();
+        let cache_stage_clone = self.cache_stage.clone();
+        
+        // Spawn background thread for heavy shader compilation
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            
+            // Determine AA support based on stage and tier
+            let (aa_support, _stage_label) = if needs_full_load {
+                if is_first_launch {
+                    // First launch: Use area_only for fast startup
+                    log::info!("[Vello] First launch: Using area_only AA for fast startup");
+                    (vello::AaSupport::area_only(), "Stage 1 (first launch)")
+                } else {
+                    // Have Stage 1 cache, upgrading to full
+                    log::info!("[Vello] Upgrading: Loading full AA support");
+                    (vello::AaSupport::all(), "Stage 2 (upgrade)")
+                }
+            } else {
+                // Have full cache
+                log::info!("[Vello] Full cache hit: Using full AA support");
+                (vello::AaSupport::all(), "Full cache")
+            };
+            
+            // Determine thread count based on tier
+            let num_threads = match memory_tier {
+                dyxel_perf::DeviceMemoryTier::LowEnd => Some(2),
+                dyxel_perf::DeviceMemoryTier::MidRange => Some(4),
+                dyxel_perf::DeviceMemoryTier::HighEnd => std::thread::available_parallelism()
+                    .ok()
+                    .map(|n| n.get()),
+            };
+            
+            let options = RendererOptions {
+                antialiasing_support: aa_support,
+                pipeline_cache,
+                num_init_threads: num_threads.and_then(|n| std::num::NonZeroUsize::new(n)),
+                use_cpu: false,
+            };
+            
+            // Stage 1: Create renderer with appropriate AA mode
+            let renderer_result = Renderer::new(&device_clone, options);
+            
+            match renderer_result {
+                Ok(mut renderer) => {
+                    log::info!("[ColdStart] Renderer::new() completed in {:?}", start.elapsed());
+                    
+                    // Perform minimal warmup
+                    let warmup_start = std::time::Instant::now();
+                    let dummy_texture = device_clone.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Async Warmup Texture"),
                         size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
                         mip_level_count: 1,
                         sample_count: 1,
@@ -160,19 +229,103 @@ impl VelloBackend {
                         height: 1,
                         antialiasing_method: vello::AaConfig::Area,
                     };
-                    let _ = renderer.render_to_texture(device, queue, &scene, &dummy_view, &params);
-                    log::info!("[ColdStart] Warmup draw took {:?}", warmup_start.elapsed());
+                    let _ = renderer.render_to_texture(&device_clone, &queue_clone, &scene, &dummy_view, &params);
+                    log::info!("[ColdStart] Warmup completed in {:?}", warmup_start.elapsed());
+                    
+                    // Store renderer
+                    *renderer_clone.lock().unwrap() = Some(renderer);
+                    
+                    // Save Stage 1 cache only if we needed full load (first launch or Stage 1 upgrade)
+                    // If we already had Stage 2 cache (needs_full_load=false), no need to save
+                    if needs_full_load {
+                        log::info!("[ColdStart] Saving Stage 1 cache");
+                        
+                        let cache_lock = pipeline_cache_clone.lock().unwrap();
+                        let path_lock = cache_path_clone.lock().unwrap();
+                        if let (Some(cache), Some(path)) = (&*cache_lock, &*path_lock) {
+                            if let Some(data) = cache.get_data() {
+                                // Add header to mark as Stage 1
+                                let mut cache_with_header = Vec::with_capacity(data.len() + 1);
+                                cache_with_header.push(1u8); // Stage 1 marker
+                                cache_with_header.extend_from_slice(&data);
+                                
+                                if std::fs::write(path, &cache_with_header).is_ok() {
+                                    cache_saved_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    *cache_stage_clone.lock().unwrap() = Some(1);
+                                    log::info!("[ColdStart] Stage 1 cache saved ({} bytes)", cache_with_header.len());
+                                }
+                            }
+                        }
+                        drop(cache_lock);
+                        drop(path_lock);
+                    }
+                    
+                    // Stage 2: If this is Stage 1 (first launch with area_only), upgrade to full in background
+                    if is_first_launch && memory_tier != dyxel_perf::DeviceMemoryTier::LowEnd {
+                        log::info!("[ColdStart] Starting Stage 2: Upgrading to full AA support in background");
+                        
+                        let stage2_start = std::time::Instant::now();
+                        let full_options = RendererOptions {
+                            antialiasing_support: vello::AaSupport::all(),
+                            pipeline_cache: pipeline_cache_clone.lock().unwrap().clone(),
+                            num_init_threads: num_threads.and_then(|n| std::num::NonZeroUsize::new(n)),
+                            use_cpu: false,
+                        };
+                        
+                        // Try to create full renderer (will reuse Stage 1 cache + compile remaining)
+                        match Renderer::new(&device_clone, full_options) {
+                            Ok(full_renderer) => {
+                                log::info!("[ColdStart] Stage 2 complete in {:?}", stage2_start.elapsed());
+                                
+                                // Replace the Stage 1 renderer with full renderer
+                                *renderer_clone.lock().unwrap() = Some(full_renderer);
+                                
+                                // Save Stage 2 cache
+                                
+                                let cache_lock = pipeline_cache_clone.lock().unwrap();
+                                let path_lock = cache_path_clone.lock().unwrap();
+                                if let (Some(cache), Some(path)) = (&*cache_lock, &*path_lock) {
+                                    if let Some(data) = cache.get_data() {
+                                        let mut cache_with_header = Vec::with_capacity(data.len() + 1);
+                                        cache_with_header.push(2u8); // Stage 2 marker (full)
+                                        cache_with_header.extend_from_slice(&data);
+                                        
+                                        if std::fs::write(path, &cache_with_header).is_ok() {
+                                            log::info!("[ColdStart] Stage 2 cache saved ({} bytes)", cache_with_header.len());
+                                            // Update cache_stage to Stage 2
+                                            *cache_stage_clone.lock().unwrap() = Some(2);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("[ColdStart] Stage 2 failed: {}, keeping Stage 1 renderer", e);
+                            }
+                        }
+                    }
+                    
+                    // Record startup performance (Stage 1 time)
+                    perf_monitor_clone.lock().unwrap().record_startup_time(start.elapsed());
                 }
-                log::info!("[ColdStart] Total deferred initialization took {:?}", total_start.elapsed());
-                
-                // Save pipeline cache immediately after renderer initialization
-                // This ensures cache is persisted even if app crashes later
-                self.save_cache();
+                Err(e) => {
+                    log::error!("[ColdStart] Failed to create renderer: {}", e);
+                }
             }
-            Err(e) => {
-                log::error!("[ColdStart] Failed to create renderer: {}", e);
-            }
-        }
+            
+            is_loading_clone.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+        
+        *self.loading_handle.lock().unwrap() = Some(handle);
+    }
+    
+    /// Check if renderer is ready for rendering
+    pub fn is_renderer_ready(&self) -> bool {
+        self.renderer.lock().unwrap().is_some()
+    }
+    
+    /// Check if renderer is currently loading
+    pub fn is_renderer_loading(&self) -> bool {
+        self.is_loading.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn save_cache(&self) {
@@ -182,13 +335,30 @@ impl VelloBackend {
         }
         let cache_lock = self.pipeline_cache.lock().unwrap();
         let path_lock = self.cache_path.lock().unwrap();
+        let stage_lock = self.cache_stage.lock().unwrap();
         if let (Some(cache), Some(path)) = (&*cache_lock, &*path_lock) {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 log::info!("[ColdStart] Saving pipeline cache to: {}", path);
                 if let Some(data) = cache.get_data() {
                     log::info!("[ColdStart] Cache data size: {} bytes", data.len());
-                    if let Err(e) = std::fs::write(path, &data) {
+                    
+                    // Add stage header if we have a valid stage
+                    let result = if let Some(stage) = *stage_lock {
+                        if stage == 1 || stage == 2 {
+                            let mut cache_with_header = Vec::with_capacity(data.len() + 1);
+                            cache_with_header.push(stage);
+                            cache_with_header.extend_from_slice(&data);
+                            log::info!("[ColdStart] Saving with Stage {} header", stage);
+                            std::fs::write(path, &cache_with_header)
+                        } else {
+                            std::fs::write(path, &data)
+                        }
+                    } else {
+                        std::fs::write(path, &data)
+                    };
+                    
+                    if let Err(e) = result {
                         log::error!("[ColdStart] Failed to save pipeline cache: {}", e);
                     } else {
                         log::info!("[ColdStart] Pipeline cache saved successfully ({} bytes)", data.len());
@@ -249,6 +419,52 @@ impl VelloBackend {
         log::info!("VelloBackend: Pipeline prewarming complete.");
     }
 
+    /// Clear surface with a simple color (fallback when renderer is loading)
+    fn clear_surface(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        v_surface_surface: &mut vello::util::RenderSurface<'static>,
+    ) -> RenderResult {
+        // Get current texture
+        let surface_texture = match v_surface_surface.surface.get_current_texture() {
+            Ok(st) => st,
+            Err(e) => {
+                log::warn!("[ClearSurface] Failed to get current texture: {:?}", e);
+                return Ok(());
+            }
+        };
+        
+        let view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Clear Surface (Async Loading)"),
+        });
+        
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), // Clear to black
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        
+        queue.submit(Some(encoder.finish()));
+        surface_texture.present();
+        
+        Ok(())
+    }
+
     fn render_internal(
         &self,
         device: &wgpu::Device,
@@ -262,9 +478,21 @@ impl VelloBackend {
         let frame_start = std::time::Instant::now();
         let mut stage_timer = dyxel_perf::FrameTimer::new();
         
-        // Deferred initialization: create renderer on first render if not already done
-        self.ensure_renderer_initialized(device, queue);
-        stage_timer.mark("init_done");
+        // Async initialization: start background compilation without blocking
+        self.ensure_renderer_initialized_async(device, queue);
+        stage_timer.mark("init_check");
+        
+        // Check if renderer is ready
+        let mut renderer_lock = self.renderer.lock().unwrap();
+        let renderer = match renderer_lock.as_mut() {
+            Some(r) => r,
+            None => {
+                // Renderer not ready yet - clear surface and return
+                // This keeps the main loop at 60fps while shader compiles in background
+                drop(renderer_lock); // Release lock before calling clear_surface
+                return self.clear_surface(device, queue, v_surface_surface);
+            }
+        };
         
         // Begin frame timing for performance monitoring
         let should_show_overlay = {
@@ -273,9 +501,6 @@ impl VelloBackend {
             monitor.should_show_overlay()
         };
         stage_timer.mark("perf_start");
-        
-        let mut renderer_lock = self.renderer.lock().unwrap();
-        let renderer = renderer_lock.as_mut().ok_or_else(|| anyhow::anyhow!("Renderer not initialized"))?;
 
         let w = v_surface_surface.config.width;
         let h = v_surface_surface.config.height;
@@ -455,6 +680,14 @@ impl VelloBackend {
         
         let (_, off_view, blit_bg) = offscreen_texture.as_ref().unwrap();
         
+        // Tier-based AA configuration: reduce quality for LowEnd to save memory
+        let multiplier = self.memory_optimizer.lock().unwrap().vello_buffer_multiplier();
+        let aa_config = if multiplier < 0.5 {
+            vello::AaConfig::Area // LowEnd: use simpler AA
+        } else {
+            vello::AaConfig::Area // Default to Area for consistent performance
+        };
+        
         // Single render: main scene + overlay (if enabled) to offscreen texture
         renderer.render_to_texture(
             device,
@@ -465,7 +698,7 @@ impl VelloBackend {
                 base_color: Color::TRANSPARENT,
                 width: w,
                 height: h,
-                antialiasing_method: vello::AaConfig::Area
+                antialiasing_method: aa_config
             }
         ).map_err(|e| anyhow::anyhow!("Vello render error: {:?}", e))?;
         stage_timer.mark("gpu_render");
@@ -498,6 +731,14 @@ impl VelloBackend {
                 stage_timer.mark("blit_submit");
                 st.present();
                 stage_timer.mark("present_return");
+                
+                // After first successful render, save the pipeline cache
+                // This ensures cache is complete with all compiled shaders
+                static FIRST_RENDER_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !FIRST_RENDER_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    log::info!("[ColdStart] First render completed, saving pipeline cache");
+                    self.save_cache();
+                }
             }
             Err(e) => {
                 log::error!("VelloBackend: get_current_texture failed: {:?}", e);
@@ -704,16 +945,34 @@ impl RenderBackend for VelloBackend {
         let cache_path = format!("{}/vello_v1.cache", config.data_dir);
         log::info!("[ColdStart] Pipeline cache path: {}", cache_path);
         
-        // Detailed cache loading diagnostics
+        // Detailed cache loading diagnostics with Stage detection
         #[cfg(not(target_arch = "wasm32"))]
-        let cache_data = match std::fs::read(&cache_path) {
-            Ok(data) => {
-                log::info!("[ColdStart] Cache file loaded: {} bytes", data.len());
-                Some(data)
+        let (cache_stage, cache_data) = match std::fs::read(&cache_path) {
+            Ok(data) if data.len() > 1 => {
+                // Check for stage marker (first byte)
+                let stage = data[0];
+                let actual_data = &data[1..];
+                
+                match stage {
+                    1 => log::info!("[ColdStart] Stage 1 cache loaded: {} bytes (area_only)", actual_data.len()),
+                    2 => log::info!("[ColdStart] Stage 2 cache loaded: {} bytes (full)", actual_data.len()),
+                    _ => log::info!("[ColdStart] Legacy cache loaded: {} bytes", data.len()),
+                }
+                
+                if stage == 1 || stage == 2 {
+                    (Some(stage), Some(actual_data.to_vec()))
+                } else {
+                    // Legacy cache without marker
+                    (None, Some(data))
+                }
+            }
+            Ok(_) => {
+                log::info!("[ColdStart] Cache file too small, treating as empty");
+                (None, None)
             }
             Err(e) => {
                 log::warn!("[ColdStart] Cache file not loaded: {} (path: {})", e, cache_path);
-                None
+                (None, None)
             }
         };
         #[cfg(target_arch = "wasm32")]
@@ -743,12 +1002,13 @@ impl RenderBackend for VelloBackend {
         *self.blit_shader.lock().unwrap() = Some(blit_shader);
         *self.pipeline_cache.lock().unwrap() = pipeline_cache.clone();
         *self.cache_path.lock().unwrap() = Some(cache_path.clone());
+        *self.cache_stage.lock().unwrap() = cache_stage;
 
         // Prewarm blit pipeline
         self.prewarm_pipelines(device, wgpu::TextureFormat::Rgba8Unorm);
 
-        // Store info for deferred renderer initialization
-        *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache));
+        // Store info for deferred renderer initialization (includes cache stage)
+        *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache, cache_stage));
         
         // Initialize memory optimizer
         {

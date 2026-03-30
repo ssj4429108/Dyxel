@@ -1,7 +1,7 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use dyxel_shared::{OpCode, MAX_COMMAND_BYTES, MAX_NODES, DirtyField};
 use crate::state::SharedState;
 use crate::transaction::{
@@ -11,43 +11,30 @@ use crate::transaction::{
 
 /// Global transaction processor for non-WASM targets
 #[cfg(not(target_arch = "wasm32"))]
-static mut TX_PROCESSOR: Option<TransactionProcessor> = None;
+static TX_PROCESSOR: OnceLock<Mutex<TransactionProcessor>> = OnceLock::new();
 
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(static_mut_refs)]
-fn get_tx_processor() -> &'static mut TransactionProcessor {
-    unsafe {
-        TX_PROCESSOR.get_or_insert_with(TransactionProcessor::new)
-    }
+fn get_tx_processor() -> &'static Mutex<TransactionProcessor> {
+    TX_PROCESSOR.get_or_init(|| Mutex::new(TransactionProcessor::new()))
 }
 
 /// Check if render is needed based on dirty tracker
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(static_mut_refs)]
 pub fn is_render_needed() -> bool {
-    unsafe {
-        TX_PROCESSOR.as_mut().map_or(false, |tx| tx.take_render_pending())
-    }
+    get_tx_processor().lock().unwrap().take_render_pending()
 }
 
 /// Get the dirty tracker for render optimization
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(static_mut_refs)]
-pub fn get_dirty_tracker() -> Option<&'static DirtyTracker> {
-    unsafe {
-        TX_PROCESSOR.as_ref().map(|tx| &tx.dirty_tracker)
-    }
+pub fn get_dirty_tracker() -> Option<DirtyTracker> {
+    // Return a clone since we can't hold the lock across the return
+    Some(get_tx_processor().lock().unwrap().dirty_tracker.clone())
 }
 
 /// Clear dirty tracker after render
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(static_mut_refs)]
 pub fn clear_dirty_tracker() {
-    unsafe {
-        if let Some(tx) = TX_PROCESSOR.as_mut() {
-            tx.dirty_tracker.clear();
-        }
-    }
+    get_tx_processor().lock().unwrap().dirty_tracker.clear();
 }
 
 /// Command context for processing
@@ -718,8 +705,8 @@ fn _process_command_stream_inner(state: &mut SharedState, command_data: &[u8]) -
 #[cfg(not(target_arch = "wasm32"))]
 pub fn process_command_stream(state: &Arc<Mutex<SharedState>>, command_data: &[u8]) -> anyhow::Result<()> {
     let mut s = state.lock().unwrap();
-    let tx_processor = get_tx_processor();
-    process_command_stream_with_tx(&mut *s, command_data, tx_processor)
+    let mut tx_processor = get_tx_processor().lock().unwrap();
+    process_command_stream_with_tx(&mut *s, command_data, &mut *tx_processor)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -746,8 +733,8 @@ pub fn process_commands(memory: &mut [u8], buffer_ptr: u32, state: &Arc<Mutex<Sh
     }
     
     let mut s = state.lock().unwrap();
-    let tx_processor = get_tx_processor();
-    let result = process_command_stream_with_tx(&mut *s, &memory[data_start..data_end], tx_processor);
+    let mut tx_processor = get_tx_processor().lock().unwrap();
+    let result = process_command_stream_with_tx(&mut *s, &memory[data_start..data_end], &mut *tx_processor);
     
     // Clear command buffer
     memory[bs..bs+4].copy_from_slice(&0u32.to_le_bytes());
@@ -788,13 +775,13 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
     #[cfg(not(target_arch = "wasm32"))]
     let dirty_tracker_opt = get_dirty_tracker();
     #[cfg(target_arch = "wasm32")]
-    let dirty_tracker_opt: Option<&DirtyTracker> = None;
+    let dirty_tracker_opt: Option<DirtyTracker> = None;
     
     for (&id, node) in &state.nodes {
         if id as usize >= MAX_NODES { continue; }
         
         // Check dirty bit if tracker available
-        if let Some(tracker) = dirty_tracker_opt {
+        if let Some(ref tracker) = dirty_tracker_opt {
             if !tracker.is_node_dirty(id) {
                 continue;  // Skip clean nodes (fast path)
             }

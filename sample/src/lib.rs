@@ -4,6 +4,7 @@
 //! Week 4 Dual-Track Demo: 1000 Nodes with Paging
 
 mod dual_track_1000_demo;
+#[allow(unused_imports)]
 use dual_track_1000_demo as demo;
 
 #[cfg(not(test))]

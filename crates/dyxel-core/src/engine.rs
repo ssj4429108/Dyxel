@@ -59,8 +59,8 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
 
     let backend = VelloBackend::new();
     // Wrap device and queue in handles for the abstract API
-    let device_handle = unsafe { DeviceHandle::new(device) };
-    let queue_handle = unsafe { QueueHandle::new(queue) };
+    let device_handle = DeviceHandle::new(device);
+    let queue_handle = QueueHandle::new(queue);
     backend.init(device_handle, queue_handle, BackendConfig { data_dir: ddir })?;
     
     // Wrap the Vello context in the abstract RenderContext

@@ -80,7 +80,7 @@ impl FieldType {
 }
 
 /// Dirty region tracker using bitset
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DirtyTracker {
     /// Bitset: 1 bit per node, 1024 nodes = 32 u32 words
     pub node_bitset: [u32; 32],

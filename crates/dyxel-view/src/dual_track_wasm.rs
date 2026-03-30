@@ -47,7 +47,7 @@ pub unsafe fn init_dual_track(registry: *mut Registry, stream: *mut CommandStrea
 /// node creation into smaller chunks to avoid buffer overflow.
 /// 
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// // Create 1000 nodes in 5 pages of 200
 /// for page in 0..5 {
 ///     let start_id = page * 200;
@@ -135,7 +135,7 @@ pub fn reserve_space(
 /// Write a set color command
 /// 
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// let pos = reserve_space(stream, 5)?;
 /// write_set_color(stream, node_id, 255, 0, 0, pos);
 /// ```

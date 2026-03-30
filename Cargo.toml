@@ -11,7 +11,8 @@ members = [
     "crates/dyxel-render-impeller",
     "crates/dyxel-render-vello",
     "crates/dyxel-editor",
-    "crates/dyxel-perf"
+    "crates/dyxel-perf",
+    "crates/vendor/vello_shaders"
 ]
 resolver = "2"
 
@@ -45,5 +46,8 @@ codegen-units = 1
 [profile.dev]
 panic = "abort"
 
-[profile.test]
-panic = "unwind"
+# Note: test profile uses panic = "unwind" by default, cannot be overridden
+
+# Patch vello_shaders to use local modified version
+[patch.crates-io]
+vello_shaders = { path = "crates/vendor/vello_shaders" }

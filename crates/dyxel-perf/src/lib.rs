@@ -177,6 +177,8 @@ pub struct PerformanceMonitor {
     // Memory leak detection
     memory_history: Mutex<Vec<MemoryHistoryEntry>>,
     max_memory_history: usize,
+    // Async renderer startup time
+    startup_time_ms: Mutex<f32>,
 }
 
 impl PerformanceMonitor {
@@ -194,6 +196,7 @@ impl PerformanceMonitor {
             total_frames: Mutex::new(0),
             memory_history: Mutex::new(Vec::with_capacity(300)), // 5 minutes at 1 sample/sec
             max_memory_history: 300,
+            startup_time_ms: Mutex::new(0.0),
         }
     }
 
@@ -225,6 +228,18 @@ impl PerformanceMonitor {
         *last_time = now;
 
         *self.total_frames.lock().unwrap() += 1;
+    }
+    
+    /// Record async renderer startup time
+    pub fn record_startup_time(&self, duration: Duration) {
+        let ms = duration.as_secs_f32() * 1000.0;
+        *self.startup_time_ms.lock().unwrap() = ms;
+        log::info!("[PerfMonitor] Async renderer startup time: {:.2}ms", ms);
+    }
+    
+    /// Get the recorded startup time in milliseconds
+    pub fn get_startup_time_ms(&self) -> f32 {
+        *self.startup_time_ms.lock().unwrap()
     }
 
     /// Get current frame statistics
