@@ -4,6 +4,7 @@
 pub mod types;
 pub mod state;
 pub mod double_buffer;
+pub mod dual_track;
 
 #[macro_use]
 pub mod utils;
@@ -14,6 +15,7 @@ pub mod protocol;
 pub use types::*;
 pub use state::*;
 pub use double_buffer::*;
+pub use dual_track::*;
 
 pub use protocol::*;
 pub use utils::*;

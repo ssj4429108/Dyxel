@@ -7,9 +7,8 @@ use parley::{FontContext, LayoutContext, PlainEditor, StyleProperty, GenericFami
 
 pub mod input;
 use parley::layout::PositionedLayoutItem;
-use peniko::{Brush, Color, Fill};
-use vello::kurbo::Affine;
-use vello::Scene;
+use peniko::{Brush, Color};
+use kurbo::{Affine, Rect};
 
 pub use parley::editing::Generation;
 
@@ -20,7 +19,6 @@ pub struct Editor {
     editor: PlainEditor<Brush>,
     cursor_visible: bool,
     /// Track the current layout width to avoid unnecessary re-layouts.
-    /// This is the width that was last passed to PlainEditor.
     current_width: Option<f32>,
 }
 
@@ -40,7 +38,7 @@ impl Editor {
             font_cx: FontContext::default(),
             layout_cx: LayoutContext::default(),
             editor,
-            cursor_visible: true,
+            cursor_visible: false,
             current_width: None,
         }
     }
@@ -63,8 +61,6 @@ impl Editor {
     
     /// Set font size (rebuilds editor)
     pub fn set_font_size(&mut self, size: f32) {
-        // PlainEditor doesn't support changing font size after creation
-        // We need to update the style
         self.editor.edit_styles().insert(StyleProperty::FontSize(size));
     }
     
@@ -74,15 +70,11 @@ impl Editor {
     }
     
     /// Set layout width (for line wrapping).
-    /// This method is idempotent - it only updates the underlying PlainEditor
-    /// if the width has actually changed. This prevents unnecessary re-layouts
-    /// that can cause text wrapping issues.
     pub fn set_width(&mut self, width: Option<f32>) {
-        // Only update if width has changed (with small epsilon for float comparison)
         let changed = match (self.current_width, width) {
             (Some(old), Some(new)) => (old - new).abs() > 0.001,
             (None, None) => false,
-            _ => true, // One is Some and other is None
+            _ => true,
         };
         
         if changed {
@@ -91,9 +83,7 @@ impl Editor {
         }
     }
     
-    /// Get the current layout width that was set.
-    /// This may differ from layout_size().0 if the width was just set
-    /// but layout hasn't been computed yet.
+    /// Get the current layout width
     pub fn width(&self) -> Option<f32> {
         self.current_width
     }
@@ -225,17 +215,103 @@ impl Editor {
     
     // === Rendering ===
     
-    /// Draw the editor content into the scene
+    /// Draw the editor content using a callback-based approach
     /// 
-    /// `transform` is the base transform (translation to editor position)
-    /// Returns the current generation for dirty checking
-    pub fn draw(&mut self, scene: &mut Scene, transform: Affine) -> Generation {
+    /// The callback receives drawing commands that can be processed by any renderer.
+    /// This allows the editor to be renderer-agnostic.
+    pub fn draw_with_callback<F>(&mut self, mut callback: F) -> Generation
+    where
+        F: FnMut(DrawCommand),
+    {
+        // 1. Draw selection background
+        self.editor.selection_geometry_with(|rect, _| {
+            callback(DrawCommand::FillRect {
+                x: rect.x0 as f32,
+                y: rect.y0 as f32,
+                width: (rect.x1 - rect.x0) as f32,
+                height: (rect.y1 - rect.y0) as f32,
+                color: [100, 150, 255, 255], // Selection color
+            });
+        });
+        
+        // 2. Draw cursor
+        if self.cursor_visible {
+            if let Some(cursor) = self.editor.cursor_geometry(1.5) {
+                callback(DrawCommand::FillRect {
+                    x: cursor.x0 as f32,
+                    y: cursor.y0 as f32,
+                    width: (cursor.x1 - cursor.x0) as f32,
+                    height: (cursor.y1 - cursor.y0) as f32,
+                    color: [255, 255, 255, 255], // White cursor
+                });
+            }
+        }
+        
+        // 3. Draw text glyphs
+        let layout = self.editor.layout(&mut self.font_cx, &mut self.layout_cx);
+        
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
+                
+                let style = glyph_run.style();
+                let run = glyph_run.run();
+                let font = run.font();
+                let font_size = run.font_size();
+                
+                let mut x = glyph_run.offset();
+                let y = glyph_run.baseline();
+                
+                let glyphs: Vec<GlyphInfo> = glyph_run.glyphs().map(|glyph| {
+                    let gx = x + glyph.x;
+                    let gy = y + glyph.y;
+                    x += glyph.advance;
+                    GlyphInfo {
+                        id: glyph.id,
+                        x: gx,
+                        y: gy,
+                    }
+                }).collect();
+                
+                // Extract color from brush
+                let color = match &style.brush {
+                    Brush::Solid(c) => {
+                        let comps = c.components;
+                        [
+                            (comps[0] * 255.0) as u8,
+                            (comps[1] * 255.0) as u8,
+                            (comps[2] * 255.0) as u8,
+                            (comps[3] * 255.0) as u8,
+                        ]
+                    },
+                    _ => [0, 0, 0, 255], // Default to black for non-solid brushes
+                };
+                
+                // Use font data hash as a unique ID
+                let font_id = font.data.id();
+                
+                callback(DrawCommand::DrawGlyphs {
+                    font_id,
+                    font_size,
+                    color,
+                    glyphs,
+                });
+            }
+        }
+        
+        self.editor.generation()
+    }
+    
+    /// Draw the editor content into the scene (Vello backend)
+    /// 
+    /// This method is for Vello backend use.
+    #[cfg(feature = "vello-backend")]
+    pub fn draw(&mut self, scene: &mut vello::Scene, transform: Affine) -> Generation {
+        use peniko::Fill;
         
         // 1. Draw selection background
         self.editor.selection_geometry_with(|rect, _| {
-            let rect = vello::kurbo::Rect::new(
-                rect.x0, rect.y0, rect.x1, rect.y1
-            );
+            let rect = Rect::new(rect.x0, rect.y0, rect.x1, rect.y1);
             scene.fill(
                 Fill::NonZero,
                 transform,
@@ -248,9 +324,7 @@ impl Editor {
         // 2. Draw cursor
         if self.cursor_visible {
             if let Some(cursor) = self.editor.cursor_geometry(1.5) {
-                let cursor_rect = vello::kurbo::Rect::new(
-                    cursor.x0, cursor.y0, cursor.x1, cursor.y1
-                );
+                let cursor_rect = Rect::new(cursor.x0, cursor.y0, cursor.x1, cursor.y1);
                 scene.fill(
                     Fill::NonZero,
                     transform,
@@ -261,7 +335,7 @@ impl Editor {
             }
         }
         
-        // 3. Draw text using draw_glyphs
+        // 3. Draw text using scene.draw_glyphs
         let layout = self.editor.layout(&mut self.font_cx, &mut self.layout_cx);
         
         for line in layout.lines() {
@@ -273,7 +347,6 @@ impl Editor {
                 let font = run.font();
                 let font_size = run.font_size();
                 
-                // Build glyph iterator
                 let mut x = glyph_run.offset();
                 let y = glyph_run.baseline();
                 let synthesis = run.synthesis();
@@ -282,8 +355,6 @@ impl Editor {
                     .map(|angle| Affine::skew(angle.to_radians().tan() as f64, 0.0));
                 
                 // Build glyph iterator
-                // Note: glyph positions are in UI coordinates (origin top-left, Y-down)
-                // The renderer applies platform_correction transform to convert to Vello's coordinate system
                 let glyphs = glyph_run.glyphs().map(|glyph| {
                     let gx = x + glyph.x;
                     let gy = y + glyph.y;
@@ -295,7 +366,7 @@ impl Editor {
                     }
                 });
                 
-                // Use vello's draw_glyphs (chain all methods since they consume self)
+                // Draw glyphs with Vello
                 scene
                     .draw_glyphs(font)
                     .brush(&style.brush)
@@ -316,6 +387,34 @@ impl Editor {
         let layout = self.editor.layout(&mut self.font_cx, &mut self.layout_cx);
         (layout.width(), layout.height())
     }
+}
+
+/// Drawing command for renderer-agnostic text rendering
+#[derive(Clone, Debug)]
+pub enum DrawCommand {
+    /// Fill a rectangle (used for selection and cursor)
+    FillRect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: [u8; 4],
+    },
+    /// Draw a run of glyphs
+    DrawGlyphs {
+        font_id: u64,
+        font_size: f32,
+        color: [u8; 4],
+        glyphs: Vec<GlyphInfo>,
+    },
+}
+
+/// Information about a single glyph
+#[derive(Clone, Debug)]
+pub struct GlyphInfo {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
 }
 
 /// Helper struct for managing multiple editors or editor state
@@ -349,18 +448,6 @@ impl EditorState {
     /// Mark as drawn (update generation)
     pub fn mark_drawn(&mut self) {
         self.last_generation = self.editor.generation();
-    }
-    
-    /// Draw if needed, returns true if drew
-    pub fn draw_if_needed(&mut self, scene: &mut Scene) -> bool {
-        if self.needs_redraw() || self.editor.cursor_visible {
-            let transform = Affine::translate((self.x as f64, self.y as f64));
-            self.editor.draw(scene, transform);
-            self.mark_drawn();
-            true
-        } else {
-            false
-        }
     }
     
     /// Convert global point to local editor coordinates

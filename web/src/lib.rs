@@ -1,16 +1,56 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+// Allow deprecated warnings from wasm-bindgen async constructors
+#![allow(deprecated)]
+
 use wasm_bindgen::prelude::*;
 use std::collections::HashMap;
 use dyxel_core::DyxelHost;
-use dyxel_core::engine::SharedPtr;
-use dyxel_shared::{Role, ViewType};
+use dyxel_render_api::{SharedPtr, SharedMutex};
+use dyxel_shared::{Role, ViewType, SharedState};
 use dyxel_core::input::hit_test_recursive;
 use web_sys::{HtmlCanvasElement, HtmlElement, Response};
 use kurbo::Vec2;
-use dyxel_render_api::LockExt;
 use wasm_bindgen_futures::JsFuture;
+
+// Web-specific window handle wrapper for wgpu SurfaceTarget
+use raw_window_handle::{HasWindowHandle, HasDisplayHandle, WindowHandle, DisplayHandle, HandleError};
+use raw_window_handle::{WebWindowHandle, WebDisplayHandle, RawWindowHandle, RawDisplayHandle};
+
+/// Wrapper for HtmlCanvasElement to implement raw_window_handle traits
+pub struct WebCanvasHandle {
+    canvas: HtmlCanvasElement,
+    id: u32,
+}
+
+impl WebCanvasHandle {
+    pub fn new(canvas: HtmlCanvasElement) -> Self {
+        // Generate a unique ID for this canvas
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static ID_COUNTER: AtomicU32 = AtomicU32::new(1);
+        let id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+        Self { canvas, id }
+    }
+    
+    pub fn canvas(&self) -> &HtmlCanvasElement {
+        &self.canvas
+    }
+}
+
+impl HasWindowHandle for WebCanvasHandle {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let handle = WebWindowHandle::new(self.id);
+        unsafe { Ok(WindowHandle::borrow_raw(RawWindowHandle::Web(handle))) }
+    }
+}
+
+impl HasDisplayHandle for WebCanvasHandle {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        let handle = WebDisplayHandle::new();
+        unsafe { Ok(DisplayHandle::borrow_raw(RawDisplayHandle::Web(handle))) }
+    }
+}
 
 #[wasm_bindgen(start)]
 pub fn start() { 
@@ -48,9 +88,12 @@ impl WebHost {
         log::info!("Dyxel WebHost: Engine prepared.");
 
         // 2. Initialize rendering, pass Canvas as SurfaceTarget
-        // Note: On Web, HtmlCanvasElement directly implements Into<SurfaceTarget>
+        // Wrap HtmlCanvasElement in WebCanvasHandle to implement raw_window_handle traits
+        let canvas_handle = WebCanvasHandle::new(canvas.clone());
+        let wgpu_target: vello::wgpu::SurfaceTarget<'static> = canvas_handle.into();
+        let target_handle = dyxel_render_api::SurfaceTargetHandle::new(wgpu_target);
         host.setup(
-            vello::wgpu::SurfaceTarget::Canvas(canvas.clone()),
+            target_handle,
             canvas.width(),
             canvas.height(),
             None
@@ -120,7 +163,7 @@ impl WebHost {
     }
 
     fn sync_node_dom_recursive(&mut self, id: u32, parent_pos: Vec2) {
-        let ss = match self.host.get_shared_state() {
+        let ss: SharedPtr<SharedMutex<SharedState>> = match self.host.get_shared_state() {
             Some(s) => s,
             None => return,
         };

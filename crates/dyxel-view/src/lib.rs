@@ -8,6 +8,9 @@ use std::collections::HashMap;
 pub use dyxel_shared::{FlexDirection, JustifyContent, AlignItems, FlexWrap, AlignContent, Dimension, Role, ViewType, OpCode, LayoutResult, MAX_COMMAND_BYTES, SharedBuffer, DirtyField, TransactionFlags};
 use dyxel_shared::push_command;
 
+// Dual-Track WASM API (Week 4)
+pub mod dual_track_wasm;
+
 // --- Command Stream ---
 #[no_mangle]
 pub static mut SHARED_BUFFER: SharedBuffer = SharedBuffer {

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 dyxel-core = { path = "../crates/dyxel-core" }
+dyxel-render-api = { path = "../crates/dyxel-render-api" }
 winit = "0.29"
 env_logger = "0.10"
 kurbo = "0.13"

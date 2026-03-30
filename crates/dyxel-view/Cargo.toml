@@ -7,3 +7,6 @@ edition = "2021"
 dyxel-shared.workspace = true
 futures-signals.workspace = true
 futures-util.workspace = true
+
+# Shadow Layout: WASM-side layout estimation
+taffy = { version = "0.9", default-features = false, features = ["flexbox"] }

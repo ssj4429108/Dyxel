@@ -3,8 +3,8 @@ name = "dyxel-render-api"
 version = "0.1.0"
 edition = "2021"
 
+description = "Renderer-agnostic abstraction layer for Dyxel"
+
 [dependencies]
 dyxel-shared = { path = "../dyxel-shared" }
-vello = { workspace = true, features = ["wgpu"] }
-wgpu = { workspace = true }
 anyhow = "1.0"

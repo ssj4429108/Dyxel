@@ -884,6 +884,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dyxel-core",
+ "dyxel-render-api",
  "env_logger 0.10.2",
  "kurbo",
  "log",
@@ -912,8 +913,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dyxel-shared",
- "vello",
- "wgpu",
 ]
 
 [[package]]
@@ -981,6 +980,7 @@ dependencies = [
  "dyxel-shared",
  "futures-signals",
  "futures-util",
+ "taffy",
 ]
 
 [[package]]
@@ -995,6 +995,7 @@ dependencies = [
  "js-sys",
  "kurbo",
  "log",
+ "raw-window-handle",
  "vello",
  "wasm-bindgen",
  "wasm-bindgen-futures",

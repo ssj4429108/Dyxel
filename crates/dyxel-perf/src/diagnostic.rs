@@ -9,6 +9,7 @@
 //! 3. CPU/WASM processing bottleneck
 //! 4. Render loop scheduling issue
 
+#[allow(unused_imports)]
 use std::time::{Duration, Instant};
 
 /// Diagnostic data for a single frame
@@ -47,6 +48,7 @@ pub struct PerformanceDiagnostics {
     frame_counter: u64,
     last_frame_start: Option<Instant>,
     current_frame_gpu_start: Option<Instant>,
+    #[allow(dead_code)]
     current_frame_wasm_start: Option<Instant>,
 }
 

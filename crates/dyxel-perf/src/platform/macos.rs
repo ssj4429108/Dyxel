@@ -3,6 +3,8 @@
 
 //! macOS system info provider using libc
 
+#![allow(deprecated)]
+
 use crate::SystemInfoProvider;
 
 pub struct MacSystemInfo;

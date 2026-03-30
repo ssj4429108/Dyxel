@@ -82,7 +82,7 @@
 | **dyxel-render-vello** | Vello-based GPU renderer (wgpu) |
 | **dyxel-render-impeller** | Impeller-based renderer (experimental) |
 | **dyxel-shared** | Shared types, protocol definitions, and command structures |
-| **dyxel-view** | Guest-side UI framework with reactive signals |
+| **dyxel-view** | Guest-side UI framework with reactive signals and Shadow Layout |
 
 ---
 
@@ -132,7 +132,22 @@ pub struct SharedBuffer {
 }
 ```
 
-### 3. Cross-Platform Consistency
+### 3. Shadow Layout (Zero-Latency)
+
+WASM-side layout estimation eliminates frame delays:
+
+```rust
+// Instant layout query (0ms latency)
+let layout = get_layout_estimated(view.id);
+println!("Position: ({}, {})", layout.x, layout.y);
+
+// Batch queries for hit testing
+let hit_nodes = find_nodes_at_point(mouse_x, mouse_y, &candidates);
+```
+
+See [docs/shadow-layout.md](docs/shadow-layout.md) for details.
+
+### 4. Cross-Platform Consistency
 
 Same business logic runs on all platforms:
 
@@ -156,6 +171,7 @@ Same business logic runs on all platforms:
 ### Layout
 
 - **Flexbox Layout**: Powered by [Taffy](https://github.com/DioxusLabs/taffy)
+- **Shadow Layout**: WASM-side layout estimation for zero-latency queries (<16ms)
 - **Responsive Design**: Percentage-based and absolute positioning
 - **Border Radius**: Rounded rectangle support
 

@@ -1,10 +1,14 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use std::any::Any;
 use std::sync::atomic::AtomicBool;
 use vello::{Renderer, RendererOptions, Scene, peniko::{Color, Fill}};
-use dyxel_render_api::{RenderBackend, SurfaceState, LifecycleEvent, RenderContext as ApiRenderContext, SharedPtr, SharedMutex};
-use dyxel_render_api::types::{BackendConfig, RenderResult};
+use dyxel_render_api::{
+    RenderBackend, SurfaceState, LifecycleEvent, RenderContext, 
+    SharedPtr, SharedMutex, DeviceHandle, QueueHandle, SurfaceTargetHandle, SurfaceHandle,
+    RenderResult, BackendConfig, RenderBackendExt, VelloBackendExt
+};
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
 use vello::wgpu;
@@ -22,6 +26,9 @@ pub mod android;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
+/// Vello render backend implementation
+/// 
+/// This is the concrete implementation of RenderBackend using Vello + wgpu
 pub struct VelloBackend {
     pub renderer: SharedMutex<Option<Renderer>>,
     pub blit_bind_group_layout: SharedMutex<Option<wgpu::BindGroupLayout>>,
@@ -37,6 +44,7 @@ pub struct VelloBackend {
     // Performance monitoring
     perf_monitor: SharedPerfMonitor,
     // Detailed diagnostics (optional, for profiling)
+    #[allow(dead_code)]
     diagnostics: SharedMutex<Option<PerformanceDiagnostics>>,
     // Cached overlay editor (avoid creating every frame)
     overlay_editor: SharedMutex<Option<Editor>>,
@@ -104,7 +112,7 @@ impl VelloBackend {
             return; // Another thread already initialized
         }
         
-        let (cache_path, pipeline_cache) = info_lock.take().unwrap();
+        let (_cache_path, pipeline_cache) = info_lock.take().unwrap();
         
         // Android 上限制最大线程数避免 ANR，其他平台动态获取
         #[cfg(not(target_arch = "wasm32"))]
@@ -304,21 +312,22 @@ impl VelloBackend {
                     let _ = g.taffy.compute_layout_with_measure(rn, taffy::prelude::Size {
                         width: AvailableSpace::Definite(w as f32),
                         height: AvailableSpace::Definite(h as f32)
-                    }, |known_dimensions, _available_space, node_id, _node_context, _style| {
+                    }, |_known_dimensions, _available_space, node_id, _node_context, _style| {
                         // Look up editor by taffy_node
                         if let Some(&editor_id) = taffy_to_id.get(&node_id) {
                             if let Some(editor) = editors.get_mut(&editor_id) {
-                                // Use known width if definite, otherwise use natural width
-                                let use_width = known_dimensions.width;
-                                editor.set_width(use_width);
+                                // For text nodes: always use natural width (no wrapping)
+                                // This prevents unwanted wrapping from parent flex constraints
+                                // In the future, we could respect explicit width settings here
+                                editor.set_width(None);
                                 let (lw, lh) = editor.layout_size();
                                 return taffy::geometry::Size { width: lw, height: lh };
                             }
                         }
                         // Not a text node, return default
                         taffy::geometry::Size { 
-                            width: known_dimensions.width.unwrap_or(0.0), 
-                            height: known_dimensions.height.unwrap_or(0.0) 
+                            width: _known_dimensions.width.unwrap_or(0.0), 
+                            height: _known_dimensions.height.unwrap_or(0.0) 
                         }
                     });
                 }
@@ -334,11 +343,6 @@ impl VelloBackend {
             let g = shared_state.lock().unwrap();
             let mut editors = self.editors.lock().unwrap();
             stage_timer.mark("state_lock");
-            
-            // Debug: Count total nodes and root children
-            let total_nodes = g.nodes.len();
-            let root_children = g.nodes.get(&id).map(|n| n.children.len()).unwrap_or(0);
-            log::info!("[Render] Total nodes: {}, Root children: {}", total_nodes, root_children);
             
             // Apply platform correction at the root level
             let root_transform = platform_correction(h as f64);
@@ -401,7 +405,6 @@ impl VelloBackend {
         }
 
         // Offscreen logic alignment - Vello requires Rgba8Unorm for storage textures
-        // Note: Texture format optimization applies to surface format, not internal storage
         if offscreen_texture.as_ref().map_or(true, |(t, _, _)| t.width() != w || t.height() != h) {
             let texture = device.create_texture(&wgpu::TextureDescriptor { 
                 label: Some("Vello Offscreen Texture"), 
@@ -488,7 +491,7 @@ impl VelloBackend {
         if stats.total_frames % 60 == 0 {
             let report = stage_timer.report();
             
-            // Calculate stage durations (span names are "start_to_end" format)
+            // Calculate stage durations
             let state_lock_time = report.get("init_done_to_perf_start") + report.get("perf_start_to_state_lock");
             let scene_build_time = report.get("state_lock_to_scene_build");
             let gpu_time = report.get("scene_build_to_gpu_render");
@@ -564,31 +567,8 @@ impl VelloBackend {
 // =============================================================================
 // Platform Coordinate System Correction
 // =============================================================================
-// 
-// UI Layer (Taffy/User Code):
-//   - Origin: Top-left (0, 0)
-//   - Y-axis: Downward (screen coordinates)
-//
-// Vello Physical Layer (OBSERVED):
-//   - Android: Cartesian (Y-up, origin bottom-left) - NEEDS CORRECTION
-//   - macOS:   Screen coordinates (Y-down, origin top-left) - NO CORRECTION
-//   - Web:     Screen coordinates (Y-down, origin top-left) - NO CORRECTION
-//
-// Correction Strategy:
-//   - Android: Apply platform_correction transform to align rendering with touch
-//   - macOS/Web: Use identity transform (no correction needed)
-//
-// The correction matrix: translate((0, height)) * scale(1, -1)
-//   - Flips Y axis (scale_y = -1) to convert Y-down to Y-up
-//   - Translates by viewport height to move origin back to top-left
 
 /// Returns the platform-specific coordinate correction transform.
-/// 
-/// This transform should be applied at the top level of the render pipeline
-/// to convert UI coordinates (origin top-left, Y-down) to Vello's expected
-/// coordinates on Android (origin bottom-left, Y-up).
-/// 
-/// On macOS and Web, this returns identity since Vello uses screen coordinates.
 #[inline]
 pub fn platform_correction(viewport_height: f64) -> Affine {
     #[cfg(target_os = "android")]
@@ -597,7 +577,7 @@ pub fn platform_correction(viewport_height: f64) -> Affine {
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = viewport_height; // Silence unused warning on non-Android
+        let _ = viewport_height;
         Affine::IDENTITY
     }
 }
@@ -613,31 +593,22 @@ fn render_node_recursive_with_transform(
     if let Some(node) = state.nodes.get(&id) {
         let layout = state.taffy.layout(node.taffy_node).unwrap();
         let taffy_x = layout.location.x as f64;
-        let taffy_y = layout.location.y as f64;  // UI coordinate (Y-down)
+        let taffy_y = layout.location.y as f64;
         let node_width = layout.size.width as f64;
         let node_height = layout.size.height as f64;
         let global_pos = parent_pos + Vec2::new(taffy_x, taffy_y);
         
-        // Build local transform for this node (UI coordinates, origin top-left)
+        // Build local transform for this node
         let local_transform = transform * Affine::translate((global_pos.x, global_pos.y));
         
         if node.view_type == ViewType::Text {
             // Render text using Editor
             if let Some(editor) = editors.get_mut(&id) {
-                // Sync the editor's layout width with Taffy's computed layout.
-                // The Editor::set_width method is idempotent - it only triggers
-                // a re-layout if the width has actually changed.
-                let target_width = layout.size.width;
-                editor.set_width(Some(target_width));
-                
-                // Pass the local transform to editor
-                // The platform correction is already applied at the root level
+                editor.set_width(None);
                 editor.draw(scene, local_transform);
             }
         } else {
             // Render rectangle at local position
-            // Note: rect is defined at (0, 0) with node dimensions,
-            // the transform handles positioning
             let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
             
             if node.border_radius > 0.0 {
@@ -648,7 +619,7 @@ fn render_node_recursive_with_transform(
             }
         }
         
-        // Recursively render children with updated parent position
+        // Recursively render children
         for &child_id in &node.children {
             render_node_recursive_with_transform(child_id, state, editors, scene, global_pos, transform);
         }
@@ -656,15 +627,14 @@ fn render_node_recursive_with_transform(
 }
 
 impl RenderBackend for VelloBackend {
-    fn init(&self, device: &wgpu::Device, _queue: &wgpu::Queue, config: BackendConfig) -> anyhow::Result<()> {
+    fn init(&self, device: DeviceHandle, _queue: QueueHandle, config: BackendConfig) -> RenderResult {
         let init_start = std::time::Instant::now();
         
         #[cfg(target_os = "android")]
         log::info!("[Android-Perf] VelloBackend::init started - Performance monitoring enabled");
         
-        // OPTIMIZATION: Renderer initialization is deferred to first render
-        // This reduces cold start time by ~1.1s (Renderer::new() time)
-        // Only create lightweight resources here, store info for deferred renderer init
+        // Convert DeviceHandle to wgpu::Device reference
+        let device = unsafe { &*device.as_ptr::<wgpu::Device>() };
         
         // Try using pre-compiled SPIR-V, fall back to WGSL if it fails
         let blit_shader = if cfg!(target_os = "android") {
@@ -737,13 +707,13 @@ impl RenderBackend for VelloBackend {
         *self.pipeline_cache.lock().unwrap() = pipeline_cache.clone();
         *self.cache_path.lock().unwrap() = Some(cache_path.clone());
 
-        // Prewarm blit pipeline (lightweight)
+        // Prewarm blit pipeline
         self.prewarm_pipelines(device, wgpu::TextureFormat::Rgba8Unorm);
 
         // Store info for deferred renderer initialization
         *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache));
         
-        // Initialize memory optimizer for tiered configuration
+        // Initialize memory optimizer
         {
             let memory_optimizer = self.memory_optimizer.lock().unwrap();
             memory_optimizer.initialize();
@@ -756,9 +726,9 @@ impl RenderBackend for VelloBackend {
 
     fn create_surface_state(
         &self,
-        context: &mut ApiRenderContext,
-        target: Option<wgpu::SurfaceTarget<'static>>,
-        surface: Option<wgpu::Surface<'static>>,
+        context: &mut RenderContext,
+        target: Option<SurfaceTargetHandle>,
+        surface: Option<SurfaceHandle>,
         _surface_ptr: u64,
         width: u32,
         height: u32,
@@ -766,13 +736,13 @@ impl RenderBackend for VelloBackend {
         log::info!("VelloBackend: create_surface_state START - size: {}x{}, has_precreated_surface: {}", 
             width, height, surface.is_some());
         
-        // Select best available present mode for the platform
-        // Android typically supports Mailbox (low latency) or Fifo (VSync)
+        // Downcast RenderContext to vello::util::RenderContext
+        let v_ctx = context.downcast_mut::<vello::util::RenderContext>()
+            .ok_or_else(|| anyhow::anyhow!("RenderContext is not a Vello RenderContext"))?;
+        
+        // Select present mode
         #[cfg(target_os = "android")]
         let present_mode = {
-            // Android: Use Mailbox for best performance (low latency, allows tearing)
-            // Note: Android devices typically don't support Immediate mode
-            // Mailbox is the best alternative - it provides low latency without blocking
             log::info!("VelloBackend: Using Mailbox mode (low latency, VSync-like but faster)");
             wgpu::PresentMode::Mailbox
         };
@@ -783,22 +753,28 @@ impl RenderBackend for VelloBackend {
             wgpu::PresentMode::Immediate
         };
         
-        let surface = if let Some(s) = surface {
+        let v_surface = if let Some(s) = surface {
             log::info!("VelloBackend: Using pre-created surface (present_mode: {:?})", present_mode);
-            pollster::block_on(context.create_render_surface(s, width, height, present_mode))
+            let wgpu_surface = s.into_inner::<wgpu::Surface<'static>>()
+                .ok_or_else(|| anyhow::anyhow!("SurfaceHandle is not a wgpu::Surface"))?;
+            pollster::block_on(v_ctx.create_render_surface(wgpu_surface, width, height, present_mode))
                 .map_err(|e| anyhow::anyhow!("Failed to create render surface: {:?}", e))?
-        } else {
+        } else if let Some(t) = target {
             log::info!("VelloBackend: Creating surface from target (present_mode: {:?})", present_mode);
-            pollster::block_on(context.create_surface(target.expect("Vello requires a surface target"), width, height, present_mode))
+            let wgpu_target = t.into_inner::<wgpu::SurfaceTarget<'static>>()
+                .ok_or_else(|| anyhow::anyhow!("SurfaceTargetHandle is not a wgpu::SurfaceTarget"))?;
+            pollster::block_on(v_ctx.create_surface(wgpu_target, width, height, present_mode))
                 .map_err(|e| anyhow::anyhow!("Failed to create surface: {:?}", e))?
+        } else {
+            return Err(anyhow::anyhow!("Either target or surface must be provided"));
         };
         
-        log::info!("VelloBackend: Surface created, format: {:?}, dev_id: {}", surface.config.format, surface.dev_id);
+        log::info!("VelloBackend: Surface created, format: {:?}, dev_id: {}", v_surface.config.format, v_surface.dev_id);
         
         let blit_layout_lock = self.blit_bind_group_layout.lock().unwrap();
         let blit_shader_lock = self.blit_shader.lock().unwrap();
         
-        let device = &context.devices[surface.dev_id].device;
+        let device = &v_ctx.devices[v_surface.dev_id].device;
 
         let bl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -819,7 +795,7 @@ impl RenderBackend for VelloBackend {
                 module: blit_shader_lock.as_ref().unwrap(),
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: surface.config.format,
+                    format: v_surface.config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL
                 })],
@@ -838,7 +814,7 @@ impl RenderBackend for VelloBackend {
         {
             log::info!("VelloBackend: Creating MacVelloSurfaceState");
             return Ok(Box::new(mac::MacVelloSurfaceState {
-                surface,
+                surface: v_surface,
                 blit_pipeline: blit_p,
                 offscreen_texture: None,
             }));
@@ -848,7 +824,7 @@ impl RenderBackend for VelloBackend {
         {
             log::info!("VelloBackend: Creating AndroidVelloSurfaceState");
             return Ok(Box::new(android::AndroidVelloSurfaceState {
-                surface,
+                surface: v_surface,
                 blit_pipeline: blit_p,
                 offscreen_texture: None,
             }));
@@ -858,7 +834,7 @@ impl RenderBackend for VelloBackend {
         {
             log::info!("VelloBackend: Creating WebVelloSurfaceState");
             return Ok(Box::new(web::WebVelloSurfaceState {
-                surface,
+                surface: v_surface,
                 blit_pipeline: blit_p,
                 offscreen_texture: None,
             }));
@@ -872,26 +848,33 @@ impl RenderBackend for VelloBackend {
 
     fn render(
         &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: DeviceHandle,
+        queue: QueueHandle,
         surface: &mut dyn SurfaceState,
         shared_state: &SharedPtr<SharedMutex<SharedState>>,
     ) -> RenderResult {
+        // Convert handles to references
+        let device = unsafe { &*device.as_ptr::<wgpu::Device>() };
+        let queue = unsafe { &*queue.as_ptr::<wgpu::Queue>() };
+        
         #[cfg(target_os = "macos")]
         {
-            let v_surface = surface.as_any_mut().downcast_mut::<mac::MacVelloSurfaceState>().ok_or_else(|| anyhow::anyhow!("Invalid surface state (not MacVelloSurfaceState)"))?;
+            let v_surface = surface.as_any_mut().downcast_mut::<mac::MacVelloSurfaceState>()
+                .ok_or_else(|| anyhow::anyhow!("Invalid surface state (not MacVelloSurfaceState)"))?;
             return self.render_internal(device, queue, &mut v_surface.surface, &v_surface.blit_pipeline, &mut v_surface.offscreen_texture, shared_state);
         }
 
         #[cfg(target_os = "android")]
         {
-            let v_surface = surface.as_any_mut().downcast_mut::<android::AndroidVelloSurfaceState>().ok_or_else(|| anyhow::anyhow!("Invalid surface state (not AndroidVelloSurfaceState)"))?;
+            let v_surface = surface.as_any_mut().downcast_mut::<android::AndroidVelloSurfaceState>()
+                .ok_or_else(|| anyhow::anyhow!("Invalid surface state (not AndroidVelloSurfaceState)"))?;
             return self.render_internal(device, queue, &mut v_surface.surface, &v_surface.blit_pipeline, &mut v_surface.offscreen_texture, shared_state);
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            let v_surface = surface.as_any_mut().downcast_mut::<web::WebVelloSurfaceState>().ok_or_else(|| anyhow::anyhow!("Invalid surface state (not WebVelloSurfaceState)"))?;
+            let v_surface = surface.as_any_mut().downcast_mut::<web::WebVelloSurfaceState>()
+                .ok_or_else(|| anyhow::anyhow!("Invalid surface state (not WebVelloSurfaceState)"))?;
             return self.render_internal(device, queue, &mut v_surface.surface, &v_surface.blit_pipeline, &mut v_surface.offscreen_texture, shared_state);
         }
 
@@ -908,14 +891,14 @@ impl RenderBackend for VelloBackend {
         }
     }
 
-    fn sync_gpu(&self, _device: &wgpu::Device, queue: &wgpu::Queue) {
-        // Use a synchronous channel to block until the callback is executed.
+    fn sync_gpu(&self, _device: DeviceHandle, queue: QueueHandle) {
+        let queue = unsafe { &*queue.as_ptr::<wgpu::Queue>() };
+        
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         queue.on_submitted_work_done(move || {
             let _ = tx.send(());
         });
         
-        // Block the current thread until the GPU work is actually done, with timeout.
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(_) => log::debug!("VelloBackend: sync_gpu completed successfully"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -927,5 +910,54 @@ impl RenderBackend for VelloBackend {
     
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+impl RenderBackendExt for VelloBackend {
+    fn enable_perf_overlay(&self) {
+        self.enable_perf_overlay();
+    }
+    
+    fn disable_perf_overlay(&self) {
+        self.disable_perf_overlay();
+    }
+}
+
+impl VelloBackendExt for VelloBackend {
+    fn vello_renderer(&self) -> Option<&dyn Any> {
+        // Return the backend itself as Any, caller can downcast to VelloBackend
+        // and access renderer through the public renderer field
+        Some(self as &dyn Any)
+    }
+}
+
+/// Factory for creating VelloBackend instances
+pub struct VelloBackendFactory;
+
+impl VelloBackendFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl dyxel_render_api::RenderBackendFactory for VelloBackendFactory {
+    fn create(&self) -> Box<dyn RenderBackend> {
+        Box::new(VelloBackend::new())
+    }
+    
+    fn name(&self) -> &'static str {
+        "vello"
+    }
+}
+
+impl Default for VelloBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for VelloBackendFactory {
+    fn default() -> Self {
+        Self::new()
     }
 }

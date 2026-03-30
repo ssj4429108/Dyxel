@@ -1,13 +1,15 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use dyxel_render_api::types::{BackendConfig, RenderResult};
+// Allow unexpected_cfgs from objc crate macros
+#![allow(unexpected_cfgs)]
+
+use dyxel_render_api::{BackendConfig, RenderResult, DeviceHandle, QueueHandle, SurfaceTargetHandle, SurfaceHandle};
 use dyxel_render_api::{LifecycleEvent, RenderBackend, RenderContext, SurfaceState};
 use dyxel_shared::SharedState;
-use impellers::{Color, Context, DisplayListBuilder, Paint, Point, Rect, RoundingRadii, Size};
+use impellers::{Color, Context, DisplayListBuilder, Paint, Point, Rect, Size};
 use kurbo::Vec2;
 use std::sync::{Arc, Mutex};
-use vello::wgpu;
 
 #[cfg(target_os = "macos")]
 pub mod mac;
@@ -83,8 +85,8 @@ fn render_node_recursive(
 impl RenderBackend for ImpellerBackend {
     fn init(
         &self,
-        _device: &wgpu::Device,
-        _queue: &wgpu::Queue,
+        _device: DeviceHandle,
+        _queue: QueueHandle,
         _config: BackendConfig,
     ) -> anyhow::Result<()> {
         log::info!("IMPELLER_BACKEND: Initializing...");
@@ -127,8 +129,8 @@ impl RenderBackend for ImpellerBackend {
     fn create_surface_state(
         &self,
         _ctx: &mut RenderContext,
-        _target: Option<wgpu::SurfaceTarget<'static>>,
-        _surface: Option<wgpu::Surface<'static>>,
+        _target: Option<SurfaceTargetHandle>,
+        _surface: Option<SurfaceHandle>,
         _ptr: u64,
         width: u32,
         height: u32,
@@ -156,8 +158,8 @@ impl RenderBackend for ImpellerBackend {
 
     fn render(
         &self,
-        _device: &wgpu::Device,
-        _queue: &wgpu::Queue,
+        _device: DeviceHandle,
+        _queue: QueueHandle,
         surface: &mut dyn SurfaceState,
         shared_state: &Arc<Mutex<SharedState>>,
     ) -> RenderResult {
@@ -167,8 +169,8 @@ impl RenderBackend for ImpellerBackend {
             let context = context_lock
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("Impeller context not initialized"))?;
-            let w_phys = surface.width() as f32;
-            let h_phys = surface.height() as f32;
+            let _w_phys = surface.width() as f32;
+            let _h_phys = surface.height() as f32;
 
             // Probe config: no Bounds
             let mut builder = DisplayListBuilder::new(None);
@@ -212,7 +214,7 @@ impl RenderBackend for ImpellerBackend {
         Ok(())
     }
     
-    fn sync_gpu(&self, _device: &wgpu::Device, _queue: &wgpu::Queue) {
+    fn sync_gpu(&self, _device: DeviceHandle, _queue: QueueHandle) {
         // Impeller handles its own synchronization
     }
     

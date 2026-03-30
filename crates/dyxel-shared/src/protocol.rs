@@ -128,11 +128,17 @@ define_protocol! {
     [37] SetTextWeight(id: u32, weight: u16),
     [38] SetTextFontFamily(id: u32, len: u32),
     
-    // === Transaction Operations (48-63) - NEW! ===
+    // === Transaction Operations (48-51) ===
     [48] BeginTransaction(seq_id: u32, flags: u16),
     [49] EndTransaction(seq_id: u32),
     [50] AbortTransaction(seq_id: u32),
     [51] SetNodeDirty(id: u32, fields: u8),
+    
+    // === LayoutRegistry Operations (52-55) - NEW! ===
+    [52] GetLayout(id: u32),
+    [53] IsLayoutDirty(id: u32),
+    [54] ClearLayoutDirty(id: u32),
+    [55] GetLayoutBatch(start_id: u32, count: u32),
 }
 
 #[repr(C)]

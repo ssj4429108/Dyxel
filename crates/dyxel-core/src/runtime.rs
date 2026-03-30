@@ -14,6 +14,7 @@ use crate::transaction::{
 static mut TX_PROCESSOR: Option<TransactionProcessor> = None;
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(static_mut_refs)]
 fn get_tx_processor() -> &'static mut TransactionProcessor {
     unsafe {
         TX_PROCESSOR.get_or_insert_with(TransactionProcessor::new)
@@ -22,6 +23,7 @@ fn get_tx_processor() -> &'static mut TransactionProcessor {
 
 /// Check if render is needed based on dirty tracker
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(static_mut_refs)]
 pub fn is_render_needed() -> bool {
     unsafe {
         TX_PROCESSOR.as_mut().map_or(false, |tx| tx.take_render_pending())
@@ -30,6 +32,7 @@ pub fn is_render_needed() -> bool {
 
 /// Get the dirty tracker for render optimization
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(static_mut_refs)]
 pub fn get_dirty_tracker() -> Option<&'static DirtyTracker> {
     unsafe {
         TX_PROCESSOR.as_ref().map(|tx| &tx.dirty_tracker)
@@ -38,6 +41,7 @@ pub fn get_dirty_tracker() -> Option<&'static DirtyTracker> {
 
 /// Clear dirty tracker after render
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(static_mut_refs)]
 pub fn clear_dirty_tracker() {
     unsafe {
         if let Some(tx) = TX_PROCESSOR.as_mut() {
@@ -53,12 +57,9 @@ struct CommandContext {
 
 impl CommandContext {
     fn new() -> Self { Self { cur_id: None } }
-    
-    fn get_node_id(&self, explicit_id: Option<u32>) -> Option<u32> {
-        explicit_id.or(self.cur_id)
-    }
 }
 
+#[allow(unused_macros)]
 macro_rules! handle_op {
     // Extract node_id from various patterns and stage command
     (CreateNode, $ctx:ident, $offset:ident, $payload:ident, $id:expr) => {
@@ -200,19 +201,16 @@ macro_rules! handle_op {
     // === Transaction Operations ===
     (BeginTransaction, $ctx:ident, $offset:ident, $payload:ident, $seq_id:expr, $flags:expr) => {
         {
-            log::debug!("BeginTransaction seq_id={} flags={}", $seq_id, $flags);
             TransactionOp::Begin($seq_id, $flags)
         }
     };
     (EndTransaction, $ctx:ident, $offset:ident, $payload:ident, $seq_id:expr) => {
         {
-            log::debug!("EndTransaction seq_id={}", $seq_id);
             TransactionOp::End($seq_id)
         }
     };
     (AbortTransaction, $ctx:ident, $offset:ident, $payload:ident, $seq_id:expr) => {
         {
-            log::debug!("AbortTransaction seq_id={}", $seq_id);
             TransactionOp::Abort($seq_id)
         }
     };
@@ -221,8 +219,24 @@ macro_rules! handle_op {
             Some(($id, DirtyField::from_bits($fields)))
         }
     };
+    
+    // === LayoutRegistry Operations ===
+    // These are read operations - no dirty tracking needed
+    (GetLayout, $ctx:ident, $offset:ident, $payload:ident, $id:expr) => {
+        { None }
+    };
+    (IsLayoutDirty, $ctx:ident, $offset:ident, $payload:ident, $id:expr) => {
+        { None }
+    };
+    (ClearLayoutDirty, $ctx:ident, $offset:ident, $payload:ident, $id:expr) => {
+        { None }
+    };
+    (GetLayoutBatch, $ctx:ident, $offset:ident, $payload:ident, $start_id:expr, $count:expr) => {
+        { None }
+    };
 }
 
+#[allow(dead_code)]
 enum TransactionOp {
     Begin(u32, u16),
     End(u32),
@@ -231,7 +245,7 @@ enum TransactionOp {
 }
 
 impl From<Option<(u32, DirtyField)>> for TransactionOp {
-    fn from(opt: Option<(u32, DirtyField)>) -> Self {
+    fn from(_opt: Option<(u32, DirtyField)>) -> Self {
         TransactionOp::None
     }
 }
@@ -268,7 +282,7 @@ fn apply_staged_command(state: &mut SharedState, cmd: &StagedCommand, ctx: &mut 
                 let v = f32::from_le_bytes([cmd.payload[1], cmd.payload[2], cmd.payload[3], cmd.payload[4]]);
                 state.set_width(cmd.node_id, dt as u32, v);
             } else {
-                log::warn!("SetWidthCompact payload too short: len={}", cmd.payload.len());
+
             }
         }
         OpCode::SetHeightCompact => {
@@ -596,6 +610,17 @@ fn process_command_stream_with_tx(
                 }
                 continue;
             }
+            // === LayoutRegistry Operations - direct read, no transaction ===
+            OpCode::GetLayout | OpCode::IsLayoutDirty | OpCode::ClearLayoutDirty | OpCode::GetLayoutBatch => {
+                // LayoutRegistry ops are read-only queries, skip transaction staging
+                // The actual read happens via shared memory layout_results area
+                // No Host-side processing needed - WASM reads directly from memory
+                let base_len = op.data_len();
+                if offset + base_len <= command_data.len() {
+                    offset += base_len;
+                }
+                continue;
+            }
             _ => {}
         }
         
@@ -684,7 +709,8 @@ fn process_command_stream_with_tx(
 }
 
 /// Legacy process function for backward compatibility
-fn process_command_stream_inner(state: &mut SharedState, command_data: &[u8]) -> anyhow::Result<()> {
+#[cfg(test)]
+fn _process_command_stream_inner(state: &mut SharedState, command_data: &[u8]) -> anyhow::Result<()> {
     let mut tx_processor = TransactionProcessor::new();
     process_command_stream_with_tx(state, command_data, &mut tx_processor)
 }

@@ -45,8 +45,11 @@ fn main() -> anyhow::Result<()> {
                     let h = host.clone();
                     let w = window.clone();
                     let size = w.inner_size();
+                    // Create wgpu::SurfaceTarget and wrap it in SurfaceTargetHandle
+                    let wgpu_target: vello::wgpu::SurfaceTarget<'static> = w.clone().into();
+                    let target_handle = dyxel_render_api::SurfaceTargetHandle::new(wgpu_target);
                     pollster::block_on(h.setup(
-                        vello::wgpu::SurfaceTarget::from(w.clone()),
+                        target_handle,
                         size.width,
                         size.height,
                         None

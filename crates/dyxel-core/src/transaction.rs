@@ -1,9 +1,10 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+// Re-export for tests and other consumers
+pub use dyxel_shared::{OpCode, DirtyField};
+
 use std::collections::HashMap;
-use dyxel_shared::{OpCode, DirtyField};
-use crate::state::SharedState;
 
 /// Transaction processing state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,7 @@ struct DedupKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 enum FieldType {
     Color,
     Width,
@@ -83,7 +85,8 @@ pub struct DirtyTracker {
     /// Bitset: 1 bit per node, 1024 nodes = 32 u32 words
     pub node_bitset: [u32; 32],
     /// Track which fields changed per node (for selective re-render)
-    pub node_dirty_fields: HashMap<u32, DirtyField>,
+    /// Store as u8 to allow bit combinations (e.g., Style | Size)
+    pub node_dirty_fields: HashMap<u32, u8>,
     /// Global dirty flag - any change occurred
     pub any_dirty: bool,
 }
@@ -105,11 +108,12 @@ impl DirtyTracker {
         let bit_idx = node_id % 32;
         self.node_bitset[word_idx] |= 1 << bit_idx;
         
-        // Accumulate dirty fields
+        // Accumulate dirty fields as raw bits to preserve combinations
+        let field_bits = fields.bits();
         self.node_dirty_fields
             .entry(node_id)
-            .and_modify(|f| *f = DirtyField::from_bits(f.bits() | fields.bits()))
-            .or_insert(fields);
+            .and_modify(|f| *f |= field_bits)
+            .or_insert(field_bits);
         
         self.any_dirty = true;
     }
@@ -128,8 +132,9 @@ impl DirtyTracker {
     }
     
     /// Get dirty fields for a node
-    pub fn get_dirty_fields(&self, node_id: u32) -> DirtyField {
-        self.node_dirty_fields.get(&node_id).copied().unwrap_or(DirtyField::None)
+    /// Returns the combined dirty field bits
+    pub fn get_dirty_fields(&self, node_id: u32) -> u8 {
+        self.node_dirty_fields.get(&node_id).copied().unwrap_or(0)
     }
     
     /// Clear all dirty marks
@@ -344,7 +349,7 @@ impl TransactionProcessor {
 }
 
 /// Helper: Extract node_id from opcode payload for dirty tracking
-pub fn extract_node_id(opcode: &OpCode, payload: &[u8]) -> Option<u32> {
+pub fn extract_node_id(_opcode: &OpCode, payload: &[u8]) -> Option<u32> {
     if payload.len() >= 4 {
         Some(u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]))
     } else {
@@ -364,6 +369,10 @@ pub fn get_dirty_field_for_opcode(opcode: &OpCode) -> DirtyField {
         OpCode::SetFlexDirection | OpCode::SetJustifyContent | 
         OpCode::SetAlignItems | OpCode::SetFlexWrap | OpCode::SetAlignContent |
         OpCode::SetFlexGrow | OpCode::SetPadding => DirtyField::Layout,
+        // === LayoutRegistry Operations (read-only, no dirty) ===
+        OpCode::GetLayout | OpCode::IsLayoutDirty | OpCode::ClearLayoutDirty | OpCode::GetLayoutBatch => DirtyField::None,
+        // === Transaction Operations (no dirty) ===
+        OpCode::BeginTransaction | OpCode::EndTransaction | OpCode::AbortTransaction | OpCode::SetNodeDirty => DirtyField::None,
         _ => DirtyField::Style,
     }
 }

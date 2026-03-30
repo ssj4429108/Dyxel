@@ -61,7 +61,7 @@ impl SharedState {
     pub fn clear(&mut self) {
         let node_count = self.nodes.len();
         if node_count > 0 {
-            log::info!("SharedState: clearing {} nodes", node_count);
+
             self.nodes.clear();
             self.taffy = TaffyTree::new();
             self.root_id = None;
@@ -73,6 +73,7 @@ impl SharedState {
         }
     }
     
+    #[allow(dead_code)]
     /// Detect if WASM has restarted by checking if we're setting a new root
     /// after already having one with a significant ID gap
     fn detect_wasm_restart(&mut self, new_id: u32) {
@@ -121,10 +122,7 @@ impl SharedState {
         };
         
         if is_new_session {
-            if self.root_id.is_some() {
-                log::info!("WASM hot restart detected: WASM id={}, previous last_id={} (jump > 1000)", 
-                    wasm_id, self.last_seen_id.unwrap());
-            }
+
             // Reset for new session
             self.wasm_base_id = Some(wasm_id);
             self.id_map.clear();
@@ -141,10 +139,7 @@ impl SharedState {
             self.id_map.insert(wasm_id, host_id);
             self.next_host_id += 1;
             
-            // Log first few mappings
-            if host_id < 3 {
-                log::info!("ID mapping: WASM id={} -> Host id={}", wasm_id, host_id);
-            }
+
             
             host_id
         }
@@ -156,13 +151,13 @@ impl SharedState {
         // Set root if this is the first node
         if self.root_id.is_none() {
             self.root_id = Some(host_id);
-            log::info!("Root node set to Host id={} (WASM id={})", host_id, wasm_id);
+
         }
         
         let exists = self.nodes.contains_key(&host_id);
         let taffy_node = self.taffy.new_leaf(Style::default()).unwrap();
         if exists {
-            log::debug!("create_node: REPLACING existing node Host id={} (WASM id={})", host_id, wasm_id);
+
         }
         
         self.nodes.insert(host_id, ViewNode { 
@@ -232,29 +227,21 @@ impl SharedState {
     
     pub fn set_width(&mut self, wasm_id: u32, dt: u32, v: f32) { 
         let id = self.resolve_id(wasm_id);
-        log::warn!("[Layout] set_width: wasm_id={} -> host_id={}, dt={}, v={}", wasm_id, id, dt, v);
         if let Some(node) = self.nodes.get(&id) { 
             let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
             let width = match dt { 1 => taffy::style::Dimension::length(v), 2 => taffy::style::Dimension::percent(v / 100.0), _ => taffy::style::Dimension::auto() };
             s.size.width = width;
             self.taffy.set_style(node.taffy_node, s).unwrap(); 
-            log::warn!("[Layout] set_width applied: host_id={} width={:?}", id, width);
-        } else {
-            log::warn!("[Layout] set_width: node not found! host_id={}", id);
         }
     }
     
     pub fn set_height(&mut self, wasm_id: u32, dt: u32, v: f32) { 
         let id = self.resolve_id(wasm_id);
-        log::warn!("[Layout] set_height: wasm_id={} -> host_id={}, dt={}, v={}", wasm_id, id, dt, v);
         if let Some(node) = self.nodes.get(&id) { 
             let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
             let height = match dt { 1 => taffy::style::Dimension::length(v), 2 => taffy::style::Dimension::percent(v / 100.0), _ => taffy::style::Dimension::auto() };
             s.size.height = height;
             self.taffy.set_style(node.taffy_node, s).unwrap(); 
-            log::warn!("[Layout] set_height applied: host_id={} height={:?}", id, height);
-        } else {
-            log::warn!("[Layout] set_height: node not found! host_id={}", id);
         }
     }
     
@@ -304,28 +291,22 @@ impl SharedState {
     
     pub fn set_flex_wrap(&mut self, wasm_id: u32, w: u32) { 
         let id = self.resolve_id(wasm_id);
-        log::info!("[Layout] set_flex_wrap: wasm_id={} -> host_id={}", wasm_id, id);
         if let Some(node) = self.nodes.get(&id) { 
             let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
-            let wrap_value = match w { 
+            s.flex_wrap = match w { 
                 1 => taffy::prelude::FlexWrap::Wrap, 
                 2 => taffy::prelude::FlexWrap::WrapReverse, 
                 _ => taffy::prelude::FlexWrap::NoWrap 
             }; 
-            s.flex_wrap = wrap_value; 
             self.taffy.set_style(node.taffy_node, s).unwrap(); 
-            log::info!("[Layout] set_flex_wrap applied: host_id={} wrap={:?}", id, wrap_value);
-        } else {
-            log::warn!("[Layout] set_flex_wrap: node not found! host_id={}", id);
         }
     }
     
     pub fn set_align_content(&mut self, wasm_id: u32, ac: u32) { 
         let id = self.resolve_id(wasm_id);
-        log::info!("[Layout] set_align_content: wasm_id={} -> host_id={}", wasm_id, id);
         if let Some(node) = self.nodes.get(&id) { 
             let mut s = self.taffy.style(node.taffy_node).unwrap().clone(); 
-            let ac_value = Some(match ac { 
+            s.align_content = Some(match ac { 
                 1 => taffy::prelude::AlignContent::Center, 
                 2 => taffy::prelude::AlignContent::FlexEnd, 
                 3 => taffy::prelude::AlignContent::Stretch, 
@@ -334,11 +315,7 @@ impl SharedState {
                 6 => taffy::prelude::AlignContent::SpaceEvenly, 
                 _ => taffy::prelude::AlignContent::FlexStart 
             }); 
-            s.align_content = ac_value; 
             self.taffy.set_style(node.taffy_node, s).unwrap(); 
-            log::info!("[Layout] set_align_content applied: host_id={} align_content={:?}", id, ac_value);
-        } else {
-            log::warn!("[Layout] set_align_content: node not found! host_id={}", id);
         }
     }
     
@@ -381,46 +358,29 @@ impl SharedState {
     
     pub fn add_child(&mut self, wasm_pid: u32, wasm_cid: u32) { 
         // Map WASM IDs to Host IDs
-        let host_pid = self.get_host_id(wasm_pid)
-            .unwrap_or_else(|| {
-                log::warn!("add_child: parent WASM id={} not found in mapping, using 0", wasm_pid);
-                0
-            });
-        let host_cid = self.get_host_id(wasm_cid)
-            .unwrap_or_else(|| {
-                log::warn!("add_child: child WASM id={} not found in mapping, using 0", wasm_cid);
-                0
-            });
+        let host_pid = self.get_host_id(wasm_pid).unwrap_or(0);
+        let host_cid = self.get_host_id(wasm_cid).unwrap_or(0);
         
-        // Debug: Log first 40 add_child calls
-        static mut ADDCOUNT: i32 = 0;
-        unsafe {
-            ADDCOUNT += 1;
-            if ADDCOUNT <= 40 {
-                log::warn!("[ADDCHILD-TRACE] #{}: wasm({}->{}) -> host({}->{})", 
-                    ADDCOUNT, wasm_pid, wasm_cid, host_pid, host_cid);
-            }
-        }
-        
-        let c_tn = self.nodes.get(&host_cid).map(|n| n.taffy_node); 
-        let p_tn = self.nodes.get(&host_pid).map(|n| n.taffy_node); 
-        if let (Some(ptn), Some(ctn)) = (p_tn, c_tn) { 
+        let c_tn = self.nodes.get(&host_cid).map(|n| n.taffy_node);
+        let p_tn = self.nodes.get(&host_pid).map(|n| n.taffy_node);
+        if let (Some(ptn), Some(ctn)) = (p_tn, c_tn) {
             if let Some(parent) = self.nodes.get_mut(&host_pid) {
-                if parent.children.contains(&host_cid) {
-                    log::debug!("add_child: parent {} already has child {}, skipping", host_pid, host_cid);
-                    return;
+                if !parent.children.contains(&host_cid) {
+                    parent.children.push(host_cid);
+                    let _ = self.taffy.add_child(ptn, ctn);
                 }
-                log::debug!("add_child: parent {} adding child {} (WASM: {} -> {}, {} -> {})", 
-                    host_pid, host_cid, wasm_pid, host_pid, wasm_cid, host_cid);
-                parent.children.push(host_cid);
-                self.taffy.add_child(ptn, ctn).unwrap();
-            } else {
-                log::warn!("add_child: parent {} not found", host_pid);
             }
-        } else {
-            log::warn!("add_child: parent {} (WASM {}) or child {} (WASM {}) taffy node not found", 
-                host_pid, wasm_pid, host_cid, wasm_cid);
         }
+    }
+    
+    /// Get layout result for a node (for LayoutRegistry)
+    pub fn get_layout(&self, wasm_id: u32) -> Option<(f32, f32, f32, f32)> {
+        let id = self.resolve_id(wasm_id);
+        self.nodes.get(&id).and_then(|node| {
+            self.taffy.layout(node.taffy_node).ok().map(|l| {
+                (l.location.x, l.location.y, l.size.width, l.size.height)
+            })
+        })
     }
     
     pub fn set_font_data(&mut self, data: Vec<u8>) { self.font_data = Some(data); }
@@ -445,6 +405,28 @@ impl SharedState {
     pub fn clear_all_dirty(&mut self) {
         for node in self.nodes.values_mut() {
             node.dirty_fields = 0;
+        }
+    }
+    
+    /// Measure text nodes and update their Taffy styles before layout
+    /// This is a simplified text measurement - real implementation should use a font library
+    pub fn measure_text_nodes(&mut self) {
+        for (_id, node) in self.nodes.iter_mut() {
+            if node.view_type == ViewType::Text && !node.text.is_empty() {
+                // Simplified text measurement: estimate based on character count and font size
+                // Real implementation should use cosmic-text or similar
+                let avg_char_width = node.font_size * 0.6; // rough estimate
+                let estimated_width = node.text.len() as f32 * avg_char_width;
+                let estimated_height = node.font_size * 1.2; // line height
+                
+                // Update Taffy style with measured size
+                if let Ok(style) = self.taffy.style(node.taffy_node) {
+                    let mut new_style = style.clone();
+                    new_style.size.width = taffy::prelude::Dimension::length(estimated_width);
+                    new_style.size.height = taffy::prelude::Dimension::length(estimated_height);
+                    let _ = self.taffy.set_style(node.taffy_node, new_style);
+                }
+            }
         }
     }
 }

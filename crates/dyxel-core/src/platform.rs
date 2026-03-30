@@ -6,7 +6,6 @@ use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowH
 #[cfg(target_os = "ios")] use raw_window_handle::{UiKitDisplayHandle, UiKitWindowHandle};
 #[cfg(target_os = "macos")] use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle};
 #[cfg(target_arch = "wasm32")] use raw_window_handle::{WebDisplayHandle, WebWindowHandle};
-use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SurfaceId(pub u64);
@@ -145,12 +144,9 @@ impl HasDisplayHandle for SafeWindowHandle {
 unsafe impl Send for SafeWindowHandle {}
 unsafe impl Sync for SafeWindowHandle {}
 
-pub struct SurfaceState { 
-    pub surface: vello::util::RenderSurface<'static>, 
-    pub blit_pipeline: vello::wgpu::RenderPipeline, 
-    pub offscreen_texture: Option<(vello::wgpu::Texture, vello::wgpu::BindGroup)>, 
-    #[allow(dead_code)] pub window_handle: Option<Arc<SafeWindowHandle>> 
-}
+// SurfaceState is now defined in dyxel-render-api as a trait
+// Concrete implementations are in dyxel-render-vello (MacVelloSurfaceState, AndroidVelloSurfaceState, WebVelloSurfaceState)
+// This re-export is for backward compatibility
+pub use dyxel_render_api::SurfaceState;
 
-unsafe impl Send for SurfaceState {}
-unsafe impl Sync for SurfaceState {}
+// Note: SurfaceState is a trait now, Send/Sync bounds are on the trait itself

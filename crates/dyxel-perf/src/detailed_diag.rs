@@ -29,6 +29,7 @@
 //! ```
 
 use std::collections::HashMap;
+#[allow(unused_imports)]
 use std::time::{Duration, Instant};
 
 /// High-precision frame timer

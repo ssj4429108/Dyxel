@@ -3,11 +3,20 @@ name = "dyxel-editor"
 version = "0.1.0"
 edition = "2021"
 
+description = "Text editor integration based on Parley's PlainEditor"
+
+[features]
+default = ["vello-backend"]
+# Enable Vello-specific rendering (legacy)
+vello-backend = ["dep:vello"]
+
 [dependencies]
 parley.workspace = true
-vello = { workspace = true }
-peniko = { workspace = true }
 kurbo = { workspace = true }
+peniko = { workspace = true }
+
+# Optional Vello dependency for legacy draw() method
+vello = { workspace = true, optional = true }
 
 [dependencies.dyxel-shared]
 path = "../dyxel-shared"
