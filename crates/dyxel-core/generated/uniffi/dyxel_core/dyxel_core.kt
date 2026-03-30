@@ -747,6 +747,14 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -782,6 +790,14 @@ internal interface UniffiLib : Library {
     ): Byte
     fun uniffi_dyxel_core_fn_method_dyxelhost_load_wasm(`ptr`: Pointer,`wasmPath`: RustBuffer.ByValue,
     ): Long
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_cancel(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_down(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,`pressure`: Float,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_move(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_up(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_dyxel_core_fn_method_dyxelhost_on_touch(`ptr`: Pointer,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_dyxel_core_fn_method_dyxelhost_prepare_engine(`ptr`: Pointer,`ddir`: RustBuffer.ByValue,
@@ -918,6 +934,14 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_dyxel_core_checksum_method_dyxelhost_load_wasm(
     ): Short
+    fun uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_cancel(
+    ): Short
+    fun uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_down(
+    ): Short
+    fun uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_move(
+    ): Short
+    fun uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_up(
+    ): Short
     fun uniffi_dyxel_core_checksum_method_dyxelhost_on_touch(
     ): Short
     fun uniffi_dyxel_core_checksum_method_dyxelhost_prepare_engine(
@@ -964,6 +988,18 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_load_wasm() != 45810.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_cancel() != 34353.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_down() != 20189.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_move() != 54093.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_up() != 43119.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_touch() != 61680.toShort()) {
@@ -1400,6 +1436,26 @@ public interface DyxelHostInterface {
     
     suspend fun `loadWasm`(`wasmPath`: kotlin.String)
     
+    /**
+     * 指针取消（支持多指）
+     */
+    fun `onPointerCancel`()
+    
+    /**
+     * 指针按下（支持多指）
+     */
+    fun `onPointerDown`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float, `pressure`: kotlin.Float)
+    
+    /**
+     * 指针移动（支持多指）
+     */
+    fun `onPointerMove`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
+    
+    /**
+     * 指针抬起（支持多指）
+     */
+    fun `onPointerUp`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
+    
     fun `onTouch`(`x`: kotlin.Float, `y`: kotlin.Float)
     
     suspend fun `prepareEngine`(`ddir`: kotlin.String)
@@ -1585,6 +1641,62 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
         UniffiNullRustCallStatusErrorHandler,
     )
     }
+
+    
+    /**
+     * 指针取消（支持多指）
+     */override fun `onPointerCancel`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_cancel(
+        it, _status)
+}
+    }
+    
+    
+
+    
+    /**
+     * 指针按下（支持多指）
+     */override fun `onPointerDown`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float, `pressure`: kotlin.Float)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_down(
+        it, FfiConverterUInt.lower(`pointerId`),FfiConverterFloat.lower(`x`),FfiConverterFloat.lower(`y`),FfiConverterFloat.lower(`pressure`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * 指针移动（支持多指）
+     */override fun `onPointerMove`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_move(
+        it, FfiConverterUInt.lower(`pointerId`),FfiConverterFloat.lower(`x`),FfiConverterFloat.lower(`y`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * 指针抬起（支持多指）
+     */override fun `onPointerUp`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_up(
+        it, FfiConverterUInt.lower(`pointerId`),FfiConverterFloat.lower(`x`),FfiConverterFloat.lower(`y`),_status)
+}
+    }
+    
+    
 
     override fun `onTouch`(`x`: kotlin.Float, `y`: kotlin.Float)
         = 

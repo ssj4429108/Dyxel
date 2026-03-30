@@ -8,6 +8,7 @@ pub mod transaction;
 pub mod renderer;
 pub mod engine;
 pub mod input;
+pub mod input_proxy;
 pub mod bridge;
 // Perf module now in dyxel-perf crate
 

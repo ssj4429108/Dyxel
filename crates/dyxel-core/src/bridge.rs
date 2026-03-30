@@ -27,9 +27,16 @@ use dyxel_render_api::LockExt;
 
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
+    // Legacy single-touch events (deprecated)
     TouchDown { x: f32, y: f32 },
     TouchMove { x: f32, y: f32 },
     TouchUp { x: f32, y: f32 },
+    
+    // New multi-touch events with Input Proxy
+    PointerDown { pointer_id: u32, x: f32, y: f32, pressure: f32 },
+    PointerMove { pointer_id: u32, x: f32, y: f32 },
+    PointerUp { pointer_id: u32, x: f32, y: f32 },
+    PointerCancel,
 }
 
 pub enum EngineStatus {
@@ -81,6 +88,7 @@ pub enum RenderMessage {
 #[cfg(not(target_arch = "wasm32"))]
 fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
     match event {
+        // Legacy single-touch events
         InputEvent::TouchDown { x, y } => {
             let mp = Vec2::new(x as f64, y as f64);
             let hit = {
@@ -105,6 +113,52 @@ fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
                 }
             }
         }
+        
+        // New multi-touch events with Input Proxy
+        // Note: With Input Proxy, these events are processed by writing to SharedBuffer
+        // and letting WASM consume them. The Logic Thread just triggers a WASM tick.
+        InputEvent::PointerDown { pointer_id, x, y, pressure } => {
+            // When using Input Proxy, the event is written to SharedBuffer by InputProxy
+            // and then consumed by WASM during the next tick
+            // For now, we fall back to legacy behavior
+            let mp = Vec2::new(x as f64, y as f64);
+            let hit = {
+                let sg = logic.shared_state.lock().unwrap();
+                sg.root_id.and_then(|rid| {
+                    hit_test_recursive(
+                        rid,
+                        mp,
+                        &sg.nodes,
+                        &sg.taffy,
+                        Vec2::ZERO,
+                        &sg.click_listeners,
+                    )
+                })
+            };
+            if let Some(_target_id) = hit {
+                #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+                {
+                    if let Some(on_click) = logic.on_click_fn.lock().unwrap().as_ref() {
+                        let _ = on_click.call(_target_id);
+                    }
+                }
+            }
+        }
+        
+        InputEvent::PointerMove { pointer_id: _, x: _, y: _ } => {
+            // Pointer move events are batched and processed by WASM
+            // TODO: Implement gesture recognition in WASM
+        }
+        
+        InputEvent::PointerUp { pointer_id: _, x: _, y: _ } => {
+            // Pointer up events are processed by WASM
+        }
+        
+        InputEvent::PointerCancel => {
+            // Cancel all active pointers
+            // TODO: Reset InputProxy state
+        }
+        
         _ => {}
     }
 }
@@ -635,10 +689,55 @@ impl DyxelHost {
         }
     }
 
+    // === Legacy single-touch API (deprecated, kept for compatibility) ===
     pub fn on_touch(&self, x: f32, y: f32) {
+        self.on_pointer_down(0, x, y, 1.0);
+    }
+
+    // === New multi-touch Input Proxy API ===
+    
+    /// 指针按下（支持多指）
+    pub fn on_pointer_down(&self, pointer_id: u32, x: f32, y: f32, pressure: f32) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            let _ = tx.send(LogicMessage::Input(InputEvent::TouchDown { x, y }));
+            let _ = tx.send(LogicMessage::Input(InputEvent::PointerDown {
+                pointer_id,
+                x,
+                y,
+                pressure,
+            }));
+        }
+    }
+
+    /// 指针移动（支持多指）
+    pub fn on_pointer_move(&self, pointer_id: u32, x: f32, y: f32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::Input(InputEvent::PointerMove {
+                pointer_id,
+                x,
+                y,
+            }));
+        }
+    }
+
+    /// 指针抬起（支持多指）
+    pub fn on_pointer_up(&self, pointer_id: u32, x: f32, y: f32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::Input(InputEvent::PointerUp {
+                pointer_id,
+                x,
+                y,
+            }));
+        }
+    }
+
+    /// 指针取消（支持多指）
+    pub fn on_pointer_cancel(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::Input(InputEvent::PointerCancel));
         }
     }
 

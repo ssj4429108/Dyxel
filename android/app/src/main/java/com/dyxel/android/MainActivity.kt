@@ -97,13 +97,58 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        // Input Proxy: Multi-touch event handling
         sv.setOnTouchListener { v, event ->
-            if (event.action == MotionEvent.ACTION_DOWN) {
-                if (isInitialized) {
-                    engine.host.onTouch(event.x, event.y)
+            if (!isInitialized) return@setOnTouchListener false
+            
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    engine.host.onPointerDown(
+                        event.getPointerId(0).toUInt(),
+                        event.x, 
+                        event.y,
+                        event.getPressure(0)
+                    )
                 }
-                v.performClick()
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    val idx = event.actionIndex
+                    engine.host.onPointerDown(
+                        event.getPointerId(idx).toUInt(),
+                        event.getX(idx),
+                        event.getY(idx),
+                        event.getPressure(idx)
+                    )
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    // Batch process all pointer moves
+                    for (i in 0 until event.pointerCount) {
+                        engine.host.onPointerMove(
+                            event.getPointerId(i).toUInt(),
+                            event.getX(i),
+                            event.getY(i)
+                        )
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    engine.host.onPointerUp(
+                        event.getPointerId(0).toUInt(),
+                        event.x,
+                        event.y
+                    )
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    val idx = event.actionIndex
+                    engine.host.onPointerUp(
+                        event.getPointerId(idx).toUInt(),
+                        event.getX(idx),
+                        event.getY(idx)
+                    )
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    engine.host.onPointerCancel()
+                }
             }
+            v.performClick()
             true
         }
     }

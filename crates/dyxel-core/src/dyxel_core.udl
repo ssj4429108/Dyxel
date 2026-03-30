@@ -8,7 +8,16 @@ interface DyxelHost {
     void resize_native(u32 width, u32 height);
     void stop_native();
     void tick();
+    
+    // Legacy single-touch API (kept for compatibility)
     void on_touch(f32 x, f32 y);
+    
+    // New multi-touch Input Proxy API
+    void on_pointer_down(u32 pointer_id, f32 x, f32 y, f32 pressure);
+    void on_pointer_move(u32 pointer_id, f32 x, f32 y);
+    void on_pointer_up(u32 pointer_id, f32 x, f32 y);
+    void on_pointer_cancel();
+    
     boolean is_initialized();
     boolean is_engine_ready();
     boolean is_ready();

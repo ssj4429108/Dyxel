@@ -11,6 +11,9 @@ use dyxel_shared::push_command;
 // Dual-Track WASM API (Week 4)
 pub mod dual_track_wasm;
 
+// Input Proxy: Gesture recognizer
+pub mod gesture;
+
 // --- Command Stream ---
 #[no_mangle]
 pub static mut SHARED_BUFFER: SharedBuffer = SharedBuffer {
@@ -19,7 +22,8 @@ pub static mut SHARED_BUFFER: SharedBuffer = SharedBuffer {
     _padding: [0; 2],
     command_data: [0; MAX_COMMAND_BYTES],
     layout_results: [LayoutResult { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }; dyxel_shared::MAX_NODES],
-    dirty_mask: [0; 32], 
+    dirty_mask: [0; 32],
+    input_buffer: dyxel_shared::InputBuffer::new(),
 };
 
 #[no_mangle]
@@ -152,10 +156,123 @@ extern "C" { fn ui_force_layout(); }
 thread_local! {
     static EXECUTOR: RefCell<Vec<std::pin::Pin<Box<dyn futures_util::future::Future<Output = ()>>>>> = RefCell::new(Vec::new());
     static CLICK_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
+    
+    // Input Proxy: Gesture recognizer
+    static GESTURE_RECOGNIZER: RefCell<gesture::GestureRecognizer> = RefCell::new(gesture::GestureRecognizer::new());
+    
+    // Gesture handlers (separate from legacy click handlers)
+    static TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
+    static PAN_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
+    static PAN_UPDATE_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32, f32, f32)>>> = RefCell::new(HashMap::new());
+    static PAN_END_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
+}
+
+/// Input Proxy: Process input events from shared buffer
+/// 
+/// This function is called at the beginning of each frame to process
+/// all accumulated input events.
+fn process_input_events() {
+    use gesture::{Gesture, process_event_batch};
+    use dyxel_shared::{InputBuffer, RawInputEvent};
+    
+    // Drain events from shared buffer
+    let events: Vec<RawInputEvent> = unsafe {
+        SHARED_BUFFER.input_buffer.drain().collect()
+    };
+    
+    if events.is_empty() {
+        return;
+    }
+    
+    GESTURE_RECOGNIZER.with(|recognizer| {
+        let mut recog = recognizer.borrow_mut();
+        let gestures = process_event_batch(events, &mut recog);
+        
+        for gesture in gestures {
+            dispatch_gesture(gesture);
+        }
+    });
+}
+
+/// Dispatch gesture to appropriate handler
+fn dispatch_gesture(gesture: gesture::Gesture) {
+    use gesture::Gesture;
+    
+    match gesture {
+        Gesture::Tap { node_id, x, y } => {
+            dispatch_tap_with_bubble(node_id, x, y);
+        }
+        Gesture::PanStart { node_id, x, y } => {
+            PAN_START_HANDLERS.with(|handlers| {
+                if let Some(handler) = handlers.borrow_mut().get_mut(&node_id) {
+                    handler(x, y);
+                }
+            });
+        }
+        Gesture::PanUpdate { node_id, x, y, delta_x, delta_y } => {
+            PAN_UPDATE_HANDLERS.with(|handlers| {
+                if let Some(handler) = handlers.borrow_mut().get_mut(&node_id) {
+                    handler(x, y, delta_x, delta_y);
+                }
+            });
+        }
+        Gesture::PanEnd { node_id, x, y } => {
+            PAN_END_HANDLERS.with(|handlers| {
+                if let Some(handler) = handlers.borrow_mut().get_mut(&node_id) {
+                    handler(x, y);
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Dispatch tap with event bubbling
+/// 
+/// If the target node doesn't have a handler, bubble up to parent
+fn dispatch_tap_with_bubble(node_id: u32, x: f32, y: f32) {
+    let mut current_id = Some(node_id);
+    
+    while let Some(id) = current_id {
+        // Check for new-style tap handler
+        let handled = TAP_HANDLERS.with(|handlers| {
+            if let Some(handler) = handlers.borrow_mut().get_mut(&id) {
+                handler(x, y);
+                true
+            } else {
+                false
+            }
+        });
+        
+        if handled {
+            return;
+        }
+        
+        // Fall back to legacy click handler
+        let clicked = CLICK_HANDLERS.with(|handlers| {
+            if let Some(handler) = handlers.borrow_mut().get_mut(&id) {
+                handler();
+                true
+            } else {
+                false
+            }
+        });
+        
+        if clicked {
+            return;
+        }
+        
+        // Bubble to parent (simplified: parent is id - 1 for now)
+        // In real implementation, this should look up the actual parent
+        current_id = if id > 0 { Some(id - 1) } else { None };
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn dyxel_view_tick() {
+    // Input Proxy: Process input events first
+    process_input_events();
+    
     unsafe { 
         LAST_SELECTED_NODE = None; 
         
