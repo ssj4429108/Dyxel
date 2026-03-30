@@ -3,7 +3,7 @@
 
 //! Integration tests for LayoutRegistry system
 //! 
-//! 验证标准:
+//! Validation Standards:
 //! 1. WASM 可以获取任意节点布局（延迟 1 帧）
 //! 2. 脏标记机制正常工作（避免重复读取未变更节点）
 
@@ -52,7 +52,7 @@ fn test_layout_registry_basic() {
 
 #[test]
 fn test_layout_registry_opcodes_handled() {
-    //! 验证 LayoutRegistry 操作码被正确处理（不触发 transaction staging）
+    //! Verify LayoutRegistry opcodes handled correctly (no transaction staging)
     let mut tx = TransactionProcessor::new();
     
     // These opcodes should be handled directly, not staged
@@ -72,7 +72,7 @@ fn test_layout_registry_opcodes_handled() {
 
 #[test]
 fn test_layout_dirty_tracking_per_node() {
-    //! 验证每个节点有独立的脏标记
+    //! Verify each node has independent dirty flag
     let mut tracker = DirtyTracker::new();
     
     // Mark node 0 as dirty (Style)
@@ -99,13 +99,13 @@ fn test_layout_dirty_tracking_per_node() {
 
 #[test]
 fn test_layout_read_after_write_pattern() {
-    //! 验证布局读取的典型使用模式
+    //! Verify typical layout read usage pattern
     // Pattern:
     // 1. Host: 计算布局
     // 2. Host: sync_layout_to_wasm 写入共享内存
     // 3. Host: 设置 dirty_mask
-    // 4. WASM: tick 中检查 is_layout_dirty
-    // 5. WASM: get_layout 读取位置/大小
+    // 4. WASM: check is_layout_dirty in tick
+    // 5. WASM: get_layout 读取Position/大小
     // 6. WASM: clear_layout_dirty 清除标记
     
     let mut tracker = DirtyTracker::new();
@@ -129,7 +129,7 @@ fn test_layout_read_after_write_pattern() {
 
 #[test]
 fn test_batch_layout_operations() {
-    //! 验证批量布局操作
+    //! Verify batch layout operations
     let mut tracker = DirtyTracker::new();
     
     // Mark multiple nodes as dirty

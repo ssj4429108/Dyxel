@@ -1,15 +1,15 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Input Proxy Demo - 手势和输入验证示例
+//! Input Proxy Demo - Gesture and Input Validation Example
 //!
-//! 演示功能：
-//! - Tap 点击手势
-//! - Pan 拖动手势
-//! - 多点触控（Android）
-//! - 鼠标滚轮（macOS）
-//! - 热区扩展测试
-//! - 事件冒泡
+//! Demo Features:
+//! - Tap gesture
+//! - Pan gesture
+//! - Multi-touch (Android)
+//! - Mouse wheel (macOS)
+//! - Hot-area expansion test
+//! - Event bubbling
 
 use dyxel_view::{
     BaseView, FlexDirection, JustifyContent, AlignItems, Dimension,
@@ -18,7 +18,7 @@ use dyxel_view::{
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::cell::RefCell;
 
-// 颜色定义 (RGB)
+// Color definitions (RGB)
 const COLOR_BG: (u32, u32, u32) = (20, 20, 30);
 const COLOR_PANEL: (u32, u32, u32) = (40, 40, 55);
 const COLOR_BUTTON: (u32, u32, u32) = (60, 120, 220);
@@ -28,14 +28,14 @@ const COLOR_TEXT_SECONDARY: (u32, u32, u32) = (180, 180, 200);
 const COLOR_ACCENT: (u32, u32, u32) = (255, 100, 100);
 const COLOR_SUCCESS: (u32, u32, u32) = (100, 255, 150);
 
-// 计数器（用于显示交互次数）
+// Counters for interaction display
 static TAP_COUNTER: AtomicU32 = AtomicU32::new(0);
 static PAN_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
-    // 拖动状态
+    // Pan state
     static PAN_STATE: RefCell<PanState> = RefCell::new(PanState::default());
-    // 日志消息
+    // Log messages
     static LOG_MESSAGES: RefCell<Vec<String>> = RefCell::new(Vec::new());
 }
 
@@ -48,11 +48,10 @@ struct PanState {
     current_y: f32,
 }
 
-/// 打印日志（WASM 环境）
+/// Print log (WASM environment)
 #[cfg(target_arch = "wasm32")]
 fn log(msg: &str) {
-    // WASM: 使用 host 提供的日志接口
-    // 实际实现会通过 dyxel_view 的日志机制
+    // WASM: use host-provided logging interface
     let _ = msg;
 }
 
@@ -61,23 +60,23 @@ fn log(msg: &str) {
     println!("[InputProxyDemo] {}", msg);
 }
 
-/// 添加日志消息
+/// Add log message
 fn add_log(msg: String) {
     LOG_MESSAGES.with(|logs| {
         let mut logs = logs.borrow_mut();
         logs.push(msg);
-        // 只保留最近 10 条
+        // Keep only last 10 entries
         if logs.len() > 10 {
             logs.remove(0);
         }
     });
 }
 
-/// 初始化演示应用
+/// Initialize demo application
 pub fn init() {
     log("Input Proxy Demo initializing...");
     
-    // 创建根容器
+    // Create root container
     let root = View::new()
         .width(Dimension::Percent(100.0))
         .height(Dimension::Percent(100.0))
@@ -86,37 +85,37 @@ pub fn init() {
         .justify_content(JustifyContent::FlexStart)
         .align_items(AlignItems::Center);
     
-    // 标题
+    // Title
     let title = Text::new()
-        .value("🖐️ Input Proxy Demo")
+        .value("Input Proxy Demo")
         .font_size(24.0);
     View { id: root.node_id() }.child(title.node_id());
     
-    // 副标题
+    // Subtitle
     let subtitle = Text::new()
-        .value("手势识别与输入验证")
+        .value("Gesture Recognition & Input Validation")
         .font_size(14.0);
     View { id: root.node_id() }.child(subtitle.node_id());
     
-    // 创建演示区域
+    // Create demo areas
     let tap_panel = create_tap_demo();
     let pan_panel = create_pan_demo();
     let small_target_panel = create_small_target_demo();
     let log_panel = create_log_panel();
     
-    // 添加子节点
+    // Add child nodes
     View { id: root.node_id() }.child(tap_panel.node_id());
     View { id: root.node_id() }.child(pan_panel.node_id());
     View { id: root.node_id() }.child(small_target_panel.node_id());
     View { id: root.node_id() }.child(log_panel.node_id());
     
-    // 平台提示
+    // Platform hint
     let platform_hint = if cfg!(target_os = "android") {
-        "📱 Android: 尝试多点触控"
+        "Android: Try multi-touch"
     } else if cfg!(target_os = "macos") {
-        "🖱️ macOS: 尝试鼠标滚轮和拖拽"
+        "macOS: Try mouse wheel and drag"
     } else {
-        "🌐 Web: 触摸或鼠标输入"
+        "Web: Touch or mouse input"
     };
     
     let hint = Text::new()
@@ -125,12 +124,12 @@ pub fn init() {
     View { id: root.node_id() }.child(hint.node_id());
     
     log("Input Proxy Demo initialized");
-    add_log("应用已启动".to_string());
+    add_log("App started".to_string());
 }
 
-/// 创建 Tap 点击演示区
+/// Create Tap gesture demo area
 fn create_tap_demo() -> View {
-    // 容器
+    // Container
     let panel = View::new()
         .width(Dimension::Pixels(300.0))
         .height(Dimension::Pixels(120.0))
@@ -139,13 +138,13 @@ fn create_tap_demo() -> View {
         .justify_content(JustifyContent::Center)
         .align_items(AlignItems::Center);
     
-    // 标题
+    // Title
     let title = Text::new()
-        .value("👆 Tap 点击测试")
+        .value("Tap Gesture Test")
         .font_size(16.0);
     View { id: panel.node_id() }.child(title.node_id());
     
-    // 点击按钮（大目标）
+    // Tap button (large target)
     let tap_button = View::new()
         .width(200.0)
         .height(50.0)
@@ -155,35 +154,35 @@ fn create_tap_demo() -> View {
         .align_items(AlignItems::Center);
     
     let button_text = Text::new()
-        .value("点击我")
+        .value("Tap Me")
         .font_size(16.0);
     View { id: tap_button.node_id() }.child(button_text.node_id());
     
-    // 先添加按钮到面板，再设置点击回调（on_click 会消费 tap_button）
+    // Add button to panel first, then set click callback (on_click consumes tap_button)
     let tap_button_id = tap_button.node_id();
     View { id: panel.node_id() }.child(tap_button_id);
     
-    // 点击回调
+    // Click callback
     tap_button.on_click({
         let counter = &TAP_COUNTER;
         move || {
             let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            let msg = format!("Tap 点击 #{} - 时间: {:?}", count, std::time::Instant::now());
+            let msg = format!("Tap #{} at {:?}", count, std::time::Instant::now());
             log(&msg);
             add_log(msg);
         }
     });
     
-    // 计数器显示
+    // Counter display
     let counter_text = Text::new()
-        .value("点击次数: 0")
+        .value("Taps: 0")
         .font_size(12.0);
     View { id: panel.node_id() }.child(counter_text.node_id());
     
     panel
 }
 
-/// 创建 Pan 拖动演示区
+/// Create Pan gesture demo area
 fn create_pan_demo() -> View {
     let panel = View::new()
         .width(Dimension::Pixels(300.0))
@@ -193,13 +192,13 @@ fn create_pan_demo() -> View {
         .justify_content(JustifyContent::Center)
         .align_items(AlignItems::Center);
     
-    // 标题
+    // Title
     let title = Text::new()
-        .value("✋ Pan 拖动测试")
+        .value("Pan Gesture Test")
         .font_size(16.0);
     View { id: panel.node_id() }.child(title.node_id());
     
-    // 可拖动区域
+    // Draggable area
     let drag_area = View::new()
         .width(Dimension::Pixels(280.0))
         .height(Dimension::Pixels(80.0))
@@ -209,33 +208,33 @@ fn create_pan_demo() -> View {
         .align_items(AlignItems::Center);
     
     let drag_hint = Text::new()
-        .value("在此区域拖动")
+        .value("Drag in this area")
         .font_size(14.0);
     View { id: drag_area.node_id() }.child(drag_hint.node_id());
     
-    // 位置显示
+    // Position display
     let position_text = Text::new()
-        .value("位置: (0, 0)")
+        .value("Position: (0, 0)")
         .font_size(12.0);
     View { id: drag_area.node_id() }.child(position_text.node_id());
     
-    // TODO: 当 dyxel-view 支持 onPan 回调时添加
+    // TODO: Add onPan callbacks when dyxel-view supports them
     // drag_area.on_pan_start(|x, y| { ... });
     // drag_area.on_pan_update(|x, y, dx, dy| { ... });
     // drag_area.on_pan_end(|x, y| { ... });
     
     View { id: panel.node_id() }.child(drag_area.node_id());
     
-    // 状态显示
+    // Status display
     let state_text = Text::new()
-        .value("状态: 等待拖动...")
+        .value("Status: Waiting for drag...")
         .font_size(12.0);
     View { id: panel.node_id() }.child(state_text.node_id());
     
     panel
 }
 
-/// 创建小目标热区扩展测试
+/// Create small target hot-area expansion test
 fn create_small_target_demo() -> View {
     let panel = View::new()
         .width(Dimension::Pixels(300.0))
@@ -245,14 +244,14 @@ fn create_small_target_demo() -> View {
         .justify_content(JustifyContent::Center)
         .align_items(AlignItems::Center);
     
-    // 标题
+    // Title
     let title = Text::new()
-        .value("🎯 热区扩展测试 (20x20dp)")
+        .value("Hot-area Test (20x20dp)")
         .font_size(14.0);
     View { id: panel.node_id() }.child(title.node_id());
     
-    // 小按钮（20x20，小于 44dp 最小目标）
-    // 注意：on_click 会消费 view，所以先添加子节点再设置点击
+    // Small button (20x20, smaller than 44dp min target)
+    // Note: on_click consumes the view, so add to parent first
     let small_button = View::new()
         .width(Dimension::Pixels(20.0))
         .height(Dimension::Pixels(20.0))
@@ -264,25 +263,25 @@ fn create_small_target_demo() -> View {
     let small_button_id = small_button.node_id();
     View { id: panel.node_id() }.child(small_button_id);
     
-    // 点击回调
+    // Click callback
     small_button.on_click({
         move || {
-            let msg = "小按钮被点击！热区扩展生效".to_string();
+            let msg = "Small button tapped! Hot-area works".to_string();
             log(&msg);
             add_log(msg);
         }
     });
     
-    // 提示文字
+    // Hint text
     let hint = Text::new()
-        .value("尝试点击红色小方块（周围 8dp 也是热区）")
+        .value("Tap the red square (8dp hot-area around it)")
         .font_size(10.0);
     View { id: panel.node_id() }.child(hint.node_id());
     
     panel
 }
 
-/// 创建日志面板
+/// Create log panel
 fn create_log_panel() -> View {
     let panel = View::new()
         .width(Dimension::Pixels(300.0))
@@ -292,16 +291,16 @@ fn create_log_panel() -> View {
         .justify_content(JustifyContent::FlexStart)
         .align_items(AlignItems::Center);
     
-    // 标题
+    // Title
     let title = Text::new()
-        .value("📝 事件日志")
+        .value("Event Log")
         .font_size(14.0);
     View { id: panel.node_id() }.child(title.node_id());
     
-    // 日志内容区域（简化显示）
+    // Log content area (simplified display)
     for i in 0..5 {
         let log_line = Text::new()
-            .value(&format!("{}. 等待事件...", i + 1))
+            .value(&format!("{}. Waiting for events...", i + 1))
             .font_size(10.0);
         View { id: panel.node_id() }.child(log_line.node_id());
     }
@@ -309,16 +308,16 @@ fn create_log_panel() -> View {
     panel
 }
 
-/// 每帧更新
+/// Per-frame update
 pub fn tick() {
-    // 更新计数器显示
+    // Update counter display
     let tap_count = TAP_COUNTER.load(Ordering::SeqCst);
     let pan_count = PAN_COUNTER.load(Ordering::SeqCst);
     
-    // 在实际应用中，这里会更新 Text 节点的内容
-    // 由于当前 API 限制，我们通过其他方式反馈
+    // In real app, this would update Text node content
+    // Due to current API limitations, we use alternative feedback
     
-    // 每 60 帧输出一次状态（约 1 秒）
+    // Output status every 60 frames (~1 second)
     static FRAME: AtomicU32 = AtomicU32::new(0);
     let frame = FRAME.fetch_add(1, Ordering::SeqCst);
     
@@ -327,14 +326,14 @@ pub fn tick() {
     }
 }
 
-/// 平台检测提示
+/// Platform info
 pub fn get_platform_info() -> &'static str {
     if cfg!(target_os = "android") {
-        "Android - 支持多点触控、压力感应"
+        "Android - Multi-touch, pressure support"
     } else if cfg!(target_os = "macos") {
-        "macOS - 支持鼠标滚轮、精确指针"
+        "macOS - Mouse wheel, precise pointer"
     } else if cfg!(target_os = "ios") {
-        "iOS - 支持多点触控"
+        "iOS - Multi-touch support"
     } else {
         "Web/Unknown"
     }

@@ -3,9 +3,9 @@
 
 //! Integration tests for Transaction system
 //! 
-//! 验收标准验证:
+//! Acceptance Criteria Validation:
 //! 1. 同一帧内多次修改同一节点属性，只渲染最后一次
-//! 2. 不会出现"背景变了位置没变"的撕裂现象
+//! 2. 不会出现"背景变了Position没变"tearing phenomenon
 
 use dyxel_core::transaction::*;
 
@@ -250,7 +250,7 @@ fn test_complex_scenario() {
 
 #[test]
 fn test_same_frame_multiple_updates_renders_last() {
-    //! 关键测试: 同一帧内多次修改同一节点属性，只渲染最后一次
+    //! Key test: Multiple modifications to same node in one frame, only render last
     let mut tx = TransactionProcessor::new();
     tx.begin(1, 0).unwrap();
     
@@ -298,7 +298,7 @@ fn test_same_frame_multiple_updates_renders_last() {
 
 #[test]
 fn test_no_tearing_background_and_position_sync() {
-    //! 关键测试: 不会出现"背景变了位置没变"的撕裂现象
+    //! 关键测试: 不会出现"背景变了Position没变"tearing phenomenon
     // This is ensured by:
     // 1. All commands in a transaction are applied atomically at commit time
     // 2. Layout and style changes are batched together

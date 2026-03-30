@@ -1,9 +1,9 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Input Proxy - 宿主侧输入代理
+//! Input Proxy - Host-side Input Proxy
 //!
-//! 负责将原生输入事件转换为标准格式，完成命中检测，并压入共享缓冲区。
+//! Responsible for converting native input events to standard format, performing hit detection, and pushing to shared buffer.
 
 use kurbo::{Affine, Point, Rect as KurboRect, Vec2};
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use dyxel_shared::{
 
 use crate::state::{SharedState, ViewNode};
 
-/// 原生输入事件类型（从平台接收）
+/// Native input event type (received from platform)
 #[derive(Debug, Clone, Copy)]
 pub enum NativeInputType {
     TouchDown,
@@ -24,7 +24,7 @@ pub enum NativeInputType {
     MouseWheel { delta_x: f32, delta_y: f32 },
 }
 
-/// 多点触控状态跟踪
+/// Multi-touch state tracking
 #[derive(Debug, Clone)]
 struct PointerState {
     start_x: f32,
@@ -36,14 +36,14 @@ struct PointerState {
     is_panning: bool,
 }
 
-/// 输入代理配置
+/// Input proxy configuration
 #[derive(Debug, Clone)]
 pub struct InputProxyConfig {
-    /// 热区扩展值（dp）
+    /// Hot-area expansion value (dp)
     pub hit_area_expansion: f32,
-    /// 最小触摸目标大小（dp）
+    /// Minimum touch target size (dp)
     pub min_touch_target: f32,
-    /// 触摸偏差阈值（判定为 Pan 的像素距离）
+    /// Touch slop threshold (pixel distance to recognize as Pan)
     pub touch_slop: f32,
     /// DPI 缩放因子
     pub dpi_scale: f32,
@@ -60,25 +60,25 @@ impl Default for InputProxyConfig {
     }
 }
 
-/// 输入代理
+/// Input proxy
 ///
-/// 处理流程：
-/// 1. 接收原生输入事件
-/// 2. 坐标投影（屏幕 → 世界）
-/// 3. 热区扩展命中检测
-/// 4. 压入共享缓冲区
+/// Processing flow:
+/// 1. Receive native input events
+/// 2. Coordinate projection (screen → world)
+/// 3. Hot-area expansion hit detection
+/// 4. Push to shared buffer
 pub struct InputProxy {
     config: InputProxyConfig,
-    /// 屏幕到世界坐标的变换矩阵
+    /// Screen to world coordinate transformation matrix
     screen_to_world: Affine,
-    /// 多点触控状态（pointer_id → state）
+    /// Multi-touch state (pointer_id → state)
     pointer_states: HashMap<u32, PointerState>,
-    /// 当前时间戳（微秒）
+    /// Current timestamp (microseconds)
     current_time: u64,
 }
 
 impl InputProxy {
-    /// 创建新的输入代理
+    /// 创建新的Input proxy
     pub fn new(config: InputProxyConfig) -> Self {
         Self {
             config,
@@ -88,19 +88,19 @@ impl InputProxy {
         }
     }
 
-    /// 设置坐标变换矩阵
+    /// Set coordinate transformation matrix
     ///
-    /// 通常在渲染视图变化时调用（如缩放、平移）
+    /// Usually called when render view changes (e.g. zoom, pan)
     pub fn set_transform(&mut self, transform: Affine) {
         self.screen_to_world = transform;
     }
 
-    /// 设置 DPI 缩放
+    /// Set DPI scale
     pub fn set_dpi_scale(&mut self, scale: f32) {
         self.config.dpi_scale = scale;
     }
 
-    /// 处理原生输入事件
+    /// Process native input events
     ///
     /// 这是主要入口点，由平台层（Android/iOS/macOS）调用
     pub fn handle_native_event(
@@ -170,7 +170,7 @@ impl InputProxy {
         shared_buffer: &mut SharedBuffer,
         state: &SharedState,
     ) {
-        // 命中检测（带热区扩展）
+        // Hit detection (with hot-area expansion)
         let target_id = self
             .hit_test_with_expansion(world_pos, state)
             .unwrap_or(0);
@@ -221,7 +221,7 @@ impl InputProxy {
         let delta_x = world_pos.x as f32 - state.last_x;
         let delta_y = world_pos.y as f32 - state.last_y;
 
-        // 更新最后位置
+        // 更新最后Position
         state.last_x = world_pos.x as f32;
         state.last_y = world_pos.y as f32;
 
@@ -345,9 +345,9 @@ impl InputProxy {
         self.screen_to_world * point
     }
 
-    /// 热区扩展命中检测
+    /// Hot-area expansion hit detection
     ///
-    /// 对小尺寸节点自动扩展热区，提高移动端点击准确率
+    /// Auto-expand hot-area for small nodes to improve mobile tap accuracy
     fn hit_test_with_expansion(
         &self,
         point: Point,
@@ -362,7 +362,7 @@ impl InputProxy {
         )
     }
 
-    /// 递归命中检测（带热区扩展）
+    /// 递归Hit detection (with hot-area expansion)
     fn hit_test_recursive(
         &self,
         id: u32,
@@ -376,7 +376,7 @@ impl InputProxy {
         let global_pos = parent_pos
             + Vec2::new(layout.location.x as f64, layout.location.y as f64);
 
-        // 计算带热区扩展的命中矩形
+        // Calculate hit rectangle with hot-area expansion
         let expansion = (self.config.hit_area_expansion * self.config.dpi_scale) as f64;
         let min_target = (self.config.min_touch_target * self.config.dpi_scale) as f64;
 
@@ -418,7 +418,7 @@ impl InputProxy {
         }
     }
 
-    /// 获取当前时间戳（微秒）
+    /// 获取Current timestamp (microseconds)
     fn current_time_micros() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
@@ -445,11 +445,11 @@ impl InputProxy {
 
 /// 检查节点是否有其他类型的事件处理器
 ///
-/// 注：目前简化实现，未来可扩展为检查手势处理器等
+/// Note: Currently simplified, can be extended to check gesture handlers etc.
 fn has_other_handlers(id: u32, state: &SharedState) -> bool {
-    // 目前只检查点击监听器
+    // Currently only checks click listeners
     // 未来可以检查：
-    // - 手势处理器
+    // - Gesture handlers
     // - 滚动监听器
     // - 拖拽源/目标
     state.click_listeners.contains(&id)

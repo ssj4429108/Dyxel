@@ -1,34 +1,34 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! 手势合成器 - 将原始输入事件转换为高级手势
+//! Gesture synthesizer - Convert raw input events to high-level gestures
 //!
-//! 实现状态机模式，识别 Tap、LongPress、Pan 等手势。
+//! Implement state machine pattern to recognize Tap, LongPress, Pan, etc. gestures.
 
 use dyxel_shared::{InputEventType, RawInputEvent};
 
-/// 手势类型
+/// Gesture types
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Gesture {
-    /// 点击
+    /// Tap
     Tap {
         node_id: u32,
         x: f32,
         y: f32,
     },
-    /// 长按
+    /// Long press
     LongPress {
         node_id: u32,
         x: f32,
         y: f32,
     },
-    /// 平移开始
+    /// Pan start
     PanStart {
         node_id: u32,
         x: f32,
         y: f32,
     },
-    /// 平移更新
+    /// Pan update
     PanUpdate {
         node_id: u32,
         x: f32,
@@ -36,7 +36,7 @@ pub enum Gesture {
         delta_x: f32,
         delta_y: f32,
     },
-    /// 平移结束
+    /// Pan end
     PanEnd {
         node_id: u32,
         x: f32,
@@ -45,7 +45,7 @@ pub enum Gesture {
 }
 
 impl Gesture {
-    /// 获取手势目标节点 ID
+    /// Gesture getters目标节点 ID
     pub fn node_id(&self) -> u32 {
         match self {
             Gesture::Tap { node_id, .. } => *node_id,
@@ -56,7 +56,7 @@ impl Gesture {
         }
     }
 
-    /// 获取手势位置
+    /// Gesture gettersPosition
     pub fn position(&self) -> (f32, f32) {
         match self {
             Gesture::Tap { x, y, .. } => (*x, *y),
@@ -68,14 +68,14 @@ impl Gesture {
     }
 }
 
-/// 手势识别配置
+/// Gesture recognition config
 #[derive(Debug, Clone, Copy)]
 pub struct GestureConfig {
     /// Tap 超时时间（微秒）
     pub tap_timeout_us: u64,
     /// 触摸偏差阈值（像素）
     pub touch_slop: f32,
-    /// 长按超时时间（微秒）
+    /// Long press超时时间（微秒）
     pub long_press_timeout_us: u64,
 }
 
@@ -89,19 +89,19 @@ impl Default for GestureConfig {
     }
 }
 
-/// 单指针状态
+/// Single pointer state
 #[derive(Debug, Clone, Copy)]
 enum PointerState {
-    /// 空闲状态
+    /// Idle state
     Idle,
-    /// 按下状态
+    /// Down state
     Down {
         node_id: u32,
         start_x: f32,
         start_y: f32,
         down_time: u64,
     },
-    /// 平移状态
+    /// Panning state
     Panning {
         node_id: u32,
         last_x: f32,
@@ -109,16 +109,16 @@ enum PointerState {
     },
 }
 
-/// 手势识别器
+/// Gesture recognizer
 ///
-/// 使用状态机模式处理输入事件，识别手势。
+/// Use state machine pattern to process input events and recognize gestures.
 pub struct GestureRecognizer {
     config: GestureConfig,
     state: PointerState,
 }
 
 impl GestureRecognizer {
-    /// 创建新的手势识别器
+    /// 创建新的Gesture recognizer
     pub fn new() -> Self {
         Self {
             config: GestureConfig::default(),
@@ -134,7 +134,7 @@ impl GestureRecognizer {
         }
     }
 
-    /// 处理原始输入事件，返回识别出的手势
+    /// Process raw input events, return recognized gestures
     ///
     /// # 状态转换
     /// - Idle + PointerDown → Down
@@ -277,7 +277,7 @@ impl GestureRecognizer {
         gesture
     }
 
-    /// 检查是否处于按下状态
+    /// 检查是否处于Down state
     pub fn is_down(&self) -> bool {
         matches!(self.state, PointerState::Down { .. })
     }
@@ -309,7 +309,7 @@ impl Default for GestureRecognizer {
     }
 }
 
-/// 帧内事件合并
+/// Frame-level event coalescing
 ///
 /// 合并高频 PointerMove 事件，减少处理器负担
 pub fn coalesce_events(events: Vec<RawInputEvent>) -> Vec<RawInputEvent> {
@@ -348,7 +348,7 @@ pub fn coalesce_events(events: Vec<RawInputEvent>) -> Vec<RawInputEvent> {
                 let mut merged = *current;
                 merged.delta_x = accumulated_dx;
                 merged.delta_y = accumulated_dy;
-                // 使用最后一个事件的位置
+                // 使用最后一个事件的Position
                 merged.x = events[last_idx].x;
                 merged.y = events[last_idx].y;
                 result.push(merged);
@@ -364,9 +364,9 @@ pub fn coalesce_events(events: Vec<RawInputEvent>) -> Vec<RawInputEvent> {
     result
 }
 
-/// 批量处理输入事件
+/// Batch process input events
 ///
-/// 先合并再识别手势
+/// Merge first then recognize gestures
 pub fn process_event_batch(
     events: Vec<RawInputEvent>,
     recognizer: &mut GestureRecognizer,

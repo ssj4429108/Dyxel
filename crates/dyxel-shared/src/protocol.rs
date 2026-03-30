@@ -223,6 +223,6 @@ pub struct SharedBuffer {
     pub command_data: [u8; MAX_COMMAND_BYTES],
     pub layout_results: [LayoutResult; MAX_NODES],
     pub dirty_mask: [u32; 32],
-    /// 输入事件环形缓冲区（用于 Input Proxy）
+    /// Input event ring buffer (for Input Proxy)
     pub input_buffer: crate::input::InputBuffer,
 }
