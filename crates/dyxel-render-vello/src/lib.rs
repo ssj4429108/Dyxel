@@ -104,7 +104,7 @@ impl VelloBackend {
             return; // Already initialized
         }
         
-        let start = std::time::Instant::now();
+        let total_start = std::time::Instant::now();
         let mut info_lock = self.init_device_info.lock().unwrap();
         
         // Double-check after acquiring lock
@@ -113,6 +113,7 @@ impl VelloBackend {
         }
         
         let (_cache_path, pipeline_cache) = info_lock.take().unwrap();
+        log::info!("[ColdStart] Renderer initialization starting, cache present: {}", pipeline_cache.is_some());
         
         // Android 上限制最大线程数避免 ANR，其他平台动态获取
         #[cfg(not(target_arch = "wasm32"))]
@@ -127,6 +128,7 @@ impl VelloBackend {
         #[cfg(target_arch = "wasm32")]
         let num_threads = None;
         
+        let renderer_start = std::time::Instant::now();
         match Renderer::new(device, RendererOptions {
             antialiasing_support: vello::AaSupport::area_only(),
             pipeline_cache,
@@ -135,10 +137,10 @@ impl VelloBackend {
         }) {
             Ok(renderer) => {
                 *self.renderer.lock().unwrap() = Some(renderer);
-                log::info!("[Perf] Deferred Renderer::new() took {:?}", start.elapsed());
+                log::info!("[ColdStart] Renderer::new() took {:?}", renderer_start.elapsed());
                 
                 // Do a warmup draw to further reduce first-frame latency
-                let t = std::time::Instant::now();
+                let warmup_start = std::time::Instant::now();
                 if let Some(renderer) = self.renderer.lock().unwrap().as_mut() {
                     let dummy_texture = device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("Warmup Dummy Texture"),
@@ -159,31 +161,48 @@ impl VelloBackend {
                         antialiasing_method: vello::AaConfig::Area,
                     };
                     let _ = renderer.render_to_texture(device, queue, &scene, &dummy_view, &params);
-                    log::info!("[Perf] Deferred warmup draw took {:?}", t.elapsed());
+                    log::info!("[ColdStart] Warmup draw took {:?}", warmup_start.elapsed());
                 }
+                log::info!("[ColdStart] Total deferred initialization took {:?}", total_start.elapsed());
+                
+                // Save pipeline cache immediately after renderer initialization
+                // This ensures cache is persisted even if app crashes later
+                self.save_cache();
             }
             Err(e) => {
-                log::error!("Failed to create renderer: {}", e);
+                log::error!("[ColdStart] Failed to create renderer: {}", e);
             }
         }
     }
 
     fn save_cache(&self) {
-        if self.cache_saved.load(std::sync::atomic::Ordering::SeqCst) { return; }
+        if self.cache_saved.load(std::sync::atomic::Ordering::SeqCst) { 
+            log::debug!("[ColdStart] Cache already saved, skipping");
+            return; 
+        }
         let cache_lock = self.pipeline_cache.lock().unwrap();
         let path_lock = self.cache_path.lock().unwrap();
         if let (Some(cache), Some(path)) = (&*cache_lock, &*path_lock) {
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(data) = cache.get_data() {
-                if let Err(e) = std::fs::write(path, &data) {
-                    log::error!("VelloBackend: Failed to save pipeline cache: {}", e);
+            {
+                log::info!("[ColdStart] Saving pipeline cache to: {}", path);
+                if let Some(data) = cache.get_data() {
+                    log::info!("[ColdStart] Cache data size: {} bytes", data.len());
+                    if let Err(e) = std::fs::write(path, &data) {
+                        log::error!("[ColdStart] Failed to save pipeline cache: {}", e);
+                    } else {
+                        log::info!("[ColdStart] Pipeline cache saved successfully ({} bytes)", data.len());
+                        self.cache_saved.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                 } else {
-                    log::info!("VelloBackend: Pipeline cache saved to {} ({} bytes)", path, data.len());
-                    self.cache_saved.store(true, std::sync::atomic::Ordering::SeqCst);
+                    log::warn!("[ColdStart] Cache get_data() returned None");
                 }
             }
             #[cfg(target_arch = "wasm32")]
             let _ = (cache, path);
+        } else {
+            log::warn!("[ColdStart] Cannot save cache: cache={}, path={}", 
+                cache_lock.is_some(), path_lock.is_some());
         }
     }
 
@@ -683,21 +702,39 @@ impl RenderBackend for VelloBackend {
         });
 
         let cache_path = format!("{}/vello_v1.cache", config.data_dir);
+        log::info!("[ColdStart] Pipeline cache path: {}", cache_path);
         
+        // Detailed cache loading diagnostics
         #[cfg(not(target_arch = "wasm32"))]
-        let cache_data = std::fs::read(&cache_path).ok();
+        let cache_data = match std::fs::read(&cache_path) {
+            Ok(data) => {
+                log::info!("[ColdStart] Cache file loaded: {} bytes", data.len());
+                Some(data)
+            }
+            Err(e) => {
+                log::warn!("[ColdStart] Cache file not loaded: {} (path: {})", e, cache_path);
+                None
+            }
+        };
         #[cfg(target_arch = "wasm32")]
         let cache_data: Option<Vec<u8>> = None;
         
-        let pipeline_cache = if device.features().contains(wgpu::Features::PIPELINE_CACHE) {
-            Some(unsafe {
+        let pipeline_cache_supported = device.features().contains(wgpu::Features::PIPELINE_CACHE);
+        log::info!("[ColdStart] PIPELINE_CACHE feature supported: {}", pipeline_cache_supported);
+        
+        let pipeline_cache = if pipeline_cache_supported {
+            let start = std::time::Instant::now();
+            let cache = Some(unsafe {
                 device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
                     label: Some("Vello Pipeline Cache"),
                     data: cache_data.as_deref(),
                     fallback: true,
                 })
-            })
+            });
+            log::info!("[ColdStart] Pipeline cache creation took: {:?}", start.elapsed());
+            cache
         } else {
+            log::warn!("[ColdStart] PIPELINE_CACHE not supported, skipping cache");
             None
         };
 
