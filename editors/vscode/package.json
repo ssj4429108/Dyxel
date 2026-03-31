@@ -1,0 +1,70 @@
+{
+  "name": "dyxel-vscode",
+  "displayName": "Dyxel",
+  "description": "Dyxel RSX language support",
+  "version": "0.1.0",
+  "publisher": "dyxel",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:rust"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "dyxel-rsx",
+        "aliases": [
+          "Dyxel RSX"
+        ],
+        "extensions": [
+          ".rs"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dyxel-rsx",
+        "scopeName": "source.rust.dyxel",
+        "path": "./syntaxes/dyxel-rsx.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.rust": "rust"
+        }
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Dyxel",
+      "properties": {
+        "dyxel.languageServerPath": {
+          "type": "string",
+          "default": "dyxel-lsp",
+          "description": "Path to the Dyxel language server executable"
+        },
+        "dyxel.enableLanguageServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the Dyxel language server"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.37",
+    "@types/vscode": "1.85",
+    "typescript": "5.3"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

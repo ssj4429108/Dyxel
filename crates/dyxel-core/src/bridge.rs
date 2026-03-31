@@ -1,8 +1,7 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-#[cfg(not(target_arch = "wasm32"))]
-use kurbo::Vec2;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
@@ -16,8 +15,6 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use crate::engine::{setup_engine, LogicState, RenderState};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::input::hit_test_recursive;
 use crate::platform::{SafeWindowHandle, SurfaceId};
 use crate::renderer::render_frame;
 use crate::state::SharedState;
@@ -85,82 +82,249 @@ pub enum RenderMessage {
     SetContinuousRender(bool),
 }
 
+// =============== Input Proxy with GestureArena ===============
+
+#[cfg(not(target_arch = "wasm32"))]
+use dyxel_gesture::{GestureRouter, GestureSettings, SpatialHitTester, GestureEventType};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::handler_registry::HandlerType;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::runtime::get_handler_registry;
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// Thread-local GestureRouter for the Logic Thread
+    static GESTURE_ROUTER: std::cell::RefCell<Option<GestureRouter>> = std::cell::RefCell::new(None);
+    /// Thread-local pointer to LogicState for gesture callbacks
+    static LOGIC_STATE_PTR: std::cell::Cell<*const LogicState> = std::cell::Cell::new(std::ptr::null());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_gesture_router_initialized(logic: &LogicState) {
+    GESTURE_ROUTER.with(|router| {
+        if router.borrow().is_none() {
+            // Store LogicState pointer for callback access
+            LOGIC_STATE_PTR.with(|ptr| ptr.set(logic as *const LogicState));
+            
+            // Get shared buffer pointer for hit testing
+            let bptr = *logic.shared_buffer_ptr.lock().unwrap();
+            
+            // Create hit tester using shared buffer (with spatial index for O(1) hit testing)
+            let hit_tester: Box<dyn dyxel_gesture::HitTester> = if let Some(bptr) = bptr {
+                let mem = unsafe { &mut *logic._rt.memory_mut() };
+                let shared_buffer_ptr = unsafe { 
+                    mem.as_mut_ptr().add(bptr as usize) as *const dyxel_shared::SharedBuffer 
+                };
+                unsafe {
+                    let mut tester = SpatialHitTester::new(shared_buffer_ptr);
+                    tester.sync(); // Initial sync
+                    log::info!("SpatialHitTester initialized");
+                    Box::new(tester)
+                }
+            } else {
+                Box::new(dyxel_gesture::NoOpHitTester)
+            };
+
+            // Get runtime reference for callback
+            let rt_ptr = &logic._rt as *const wasm3::Runtime;
+            let shared_buffer_ptr = bptr;
+
+            // Create gesture router with callback that dispatches to WASM
+            let settings = GestureSettings::default();
+            let new_router = GestureRouter::new(
+                settings,
+                hit_tester,
+                move |event| {
+                    dispatch_gesture_event(rt_ptr, shared_buffer_ptr, event);
+                },
+            );
+
+            *router.borrow_mut() = Some(new_router);
+            log::info!("GestureRouter initialized with direct gesture dispatch");
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_gesture_event(
+    rt_ptr: *const wasm3::Runtime,
+    shared_buffer_ptr: Option<u32>,
+    event: dyxel_gesture::GestureEvent,
+) {
+    use dyxel_shared::push_command;
+    use dyxel_gesture::GestureEventType;
+    use crate::handler_registry::HandlerType;
+
+    if rt_ptr.is_null() || shared_buffer_ptr.is_none() {
+        return;
+    }
+
+    let bptr = shared_buffer_ptr.unwrap();
+
+    // Build bubble path from target to root using LogicState
+    let bubble_path = LOGIC_STATE_PTR.with(|ptr| {
+        let logic_ptr = ptr.get();
+        if logic_ptr.is_null() {
+            vec![event.target_node_id]
+        } else {
+            build_bubble_path(event.target_node_id, unsafe { &*logic_ptr })
+        }
+    });
+    
+    // Determine handler type from event type
+    let handler_type = match event.event_type {
+        GestureEventType::Tap => Some(HandlerType::Tap),
+        GestureEventType::LongPressStart | GestureEventType::LongPressEnd => Some(HandlerType::LongPress),
+        GestureEventType::PanStart | GestureEventType::PanUpdate | GestureEventType::PanEnd => Some(HandlerType::Pan),
+        _ => None,
+    };
+
+    // SAFETY: This is called from the Logic Thread where the runtime is valid
+    unsafe {
+        let mem = &mut *(*rt_ptr).memory_mut();
+        let shared_buffer = &mut *(mem.as_mut_ptr().add(bptr as usize) as *mut dyxel_shared::SharedBuffer);
+
+        if let Some(ht) = handler_type {
+            // Use HandlerRegistry to find the actual handler target
+            if let Some(handler_node) = get_handler_registry().lock().unwrap().find_handler(&bubble_path, ht) {
+                // Send direct gesture event (WASM should not bubble)
+                match event.event_type {
+                    GestureEventType::Tap => {
+                        push_command!(shared_buffer, DirectGestureTap, handler_node, event.x, event.y);
+                        log::debug!("DirectGesture: Tap on node {} (target was {}) at ({:.1},{:.1})", 
+                            handler_node, event.target_node_id, event.x, event.y);
+                    }
+                    GestureEventType::LongPressStart => {
+                        push_command!(shared_buffer, DirectGestureLongPress, handler_node, event.x, event.y);
+                        log::debug!("DirectGesture: LongPress on node {} (target was {}) at ({:.1},{:.1})", 
+                            handler_node, event.target_node_id, event.x, event.y);
+                    }
+                    GestureEventType::PanStart => {
+                        push_command!(shared_buffer, DirectGesturePanStart, handler_node, event.x, event.y);
+                        log::debug!("DirectGesture: PanStart on node {} (target was {}) at ({:.1},{:.1})", 
+                            handler_node, event.target_node_id, event.x, event.y);
+                    }
+                    GestureEventType::PanUpdate => {
+                        push_command!(shared_buffer, DirectGesturePanUpdate, handler_node, event.x, event.y, event.delta_x, event.delta_y);
+                    }
+                    GestureEventType::PanEnd => {
+                        push_command!(shared_buffer, DirectGesturePanEnd, handler_node, event.x, event.y);
+                        log::debug!("DirectGesture: PanEnd on node {} (target was {}) at ({:.1},{:.1})", 
+                            handler_node, event.target_node_id, event.x, event.y);
+                    }
+                    _ => {}
+                }
+                return; // Handled as direct gesture
+            }
+        }
+
+        // Fallback to legacy gesture events (WASM will bubble)
+        match event.event_type {
+            GestureEventType::Tap => {
+                push_command!(shared_buffer, GestureTap, event.target_node_id, event.x, event.y);
+            }
+            GestureEventType::DoubleTap => {
+                push_command!(shared_buffer, GestureDoubleTap, event.target_node_id, event.x, event.y);
+            }
+            GestureEventType::LongPressStart => {
+                push_command!(shared_buffer, GestureLongPressStart, event.target_node_id, event.x, event.y);
+            }
+            GestureEventType::LongPressEnd => {
+                push_command!(shared_buffer, GestureLongPressEnd, event.target_node_id, event.x, event.y);
+            }
+            GestureEventType::PanStart => {
+                push_command!(shared_buffer, GesturePanStart, event.target_node_id, event.x, event.y);
+            }
+            GestureEventType::PanUpdate => {
+                push_command!(shared_buffer, GesturePanUpdate, event.target_node_id, event.x, event.y, event.delta_x, event.delta_y);
+            }
+            GestureEventType::PanEnd => {
+                push_command!(shared_buffer, GesturePanEnd, event.target_node_id, event.x, event.y, event.delta_x, event.delta_y);
+            }
+            _ => {
+                log::debug!("Unhandled gesture event: {:?}", event.event_type);
+            }
+        }
+    }
+}
+
+/// Build bubble path from target node to root
+#[cfg(not(target_arch = "wasm32"))]
+fn build_bubble_path(target_node: u32, logic: &LogicState) -> Vec<u32> {
+    let mut path = vec![target_node];
+    
+    // Walk up parent chain using SharedState
+    // This queries the Host-side tree structure
+    if let Some(state) = logic.shared_state.try_lock() {
+        let mut current = target_node;
+        // TODO: Traverse parent chain once parent pointers are available in SharedState
+        // For now, just return the target node
+        let _ = current; // Suppress unused warning
+    }
+    
+    path
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
-    match event {
-        // Legacy single-touch events
+    use dyxel_shared::{InputEventType, RawInputEvent};
+
+    // Ensure GestureRouter is initialized
+    ensure_gesture_router_initialized(logic);
+
+    // Convert InputEvent to RawInputEvent
+    let (event_type, pointer_id, x, y, pressure) = match event {
         InputEvent::TouchDown { x, y } => {
-            let mp = Vec2::new(x as f64, y as f64);
-            let hit = {
-                let sg = logic.shared_state.lock().unwrap();
-                sg.root_id.and_then(|rid| {
-                    hit_test_recursive(
-                        rid,
-                        mp,
-                        &sg.nodes,
-                        &sg.taffy,
-                        Vec2::ZERO,
-                        &sg.click_listeners,
-                    )
-                })
-            };
-            if let Some(_target_id) = hit {
-                #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-                {
-                    if let Some(on_click) = logic.on_click_fn.lock().unwrap().as_ref() {
-                        let _ = on_click.call(_target_id);
-                    }
-                }
-            }
+            (InputEventType::PointerDown, 0, x, y, 1.0)
         }
-        
-        // New multi-touch events with Input Proxy
-        // Note: With Input Proxy, these events are processed by writing to SharedBuffer
-        // and letting WASM consume them. The Logic Thread just triggers a WASM tick.
+        InputEvent::TouchMove { x, y } => {
+            (InputEventType::PointerMove, 0, x, y, 1.0)
+        }
+        InputEvent::TouchUp { x, y } => {
+            (InputEventType::PointerUp, 0, x, y, 0.0)
+        }
         InputEvent::PointerDown { pointer_id, x, y, pressure } => {
-            // When using Input Proxy, the event is written to SharedBuffer by InputProxy
-            // and then consumed by WASM during the next tick
-            // For now, we fall back to legacy behavior
-            let mp = Vec2::new(x as f64, y as f64);
-            let hit = {
-                let sg = logic.shared_state.lock().unwrap();
-                sg.root_id.and_then(|rid| {
-                    hit_test_recursive(
-                        rid,
-                        mp,
-                        &sg.nodes,
-                        &sg.taffy,
-                        Vec2::ZERO,
-                        &sg.click_listeners,
-                    )
-                })
-            };
-            if let Some(_target_id) = hit {
-                #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-                {
-                    if let Some(on_click) = logic.on_click_fn.lock().unwrap().as_ref() {
-                        let _ = on_click.call(_target_id);
-                    }
-                }
-            }
+            (InputEventType::PointerDown, pointer_id, x, y, pressure)
         }
-        
-        InputEvent::PointerMove { pointer_id: _, x: _, y: _ } => {
-            // Pointer move events are batched and processed by WASM
-            // TODO: Implement gesture recognition in WASM
+        InputEvent::PointerMove { pointer_id, x, y } => {
+            (InputEventType::PointerMove, pointer_id, x, y, 1.0)
         }
-        
-        InputEvent::PointerUp { pointer_id: _, x: _, y: _ } => {
-            // Pointer up events are processed by WASM
+        InputEvent::PointerUp { pointer_id, x, y } => {
+            (InputEventType::PointerUp, pointer_id, x, y, 0.0)
         }
-        
         InputEvent::PointerCancel => {
-            // Cancel all active pointers
-            // TODO: Reset InputProxy state
+            (InputEventType::PointerCancel, 0, 0.0, 0.0, 0.0)
         }
-        
-        _ => {}
-    }
+    };
+
+    // Get timestamp from host (microseconds)
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+
+    // Create raw event
+    let raw_event = RawInputEvent {
+        timestamp,
+        pointer_id,
+        event_type: event_type as u8,
+        _padding: [0; 3],
+        x,
+        y,
+        pressure,
+        delta_x: 0.0,
+        delta_y: 0.0,
+        target_node_id: 0,
+        flags: 0,
+    };
+
+    // Route through GestureRouter
+    GESTURE_ROUTER.with(|router| {
+        if let Some(ref mut router) = *router.borrow_mut() {
+            router.sync(); // Sync spatial index before hit testing
+            router.handle_input_event(&raw_event);
+        }
+    });
 }
 
 // =============== Platform-specific synchronization primitives ===============
@@ -329,7 +493,16 @@ impl DyxelHost {
                                                 }
                                             }
                                             
-                                            // Process commands from WASM memory
+                                            // Debug: read counters
+                                            if let (Ok(get_events), Ok(get_gestures), Ok(get_clicks)) = (
+                                                l._rt.find_function::<(), u32>("dyxel_get_event_count"),
+                                                l._rt.find_function::<(), u32>("dyxel_get_gesture_count"),
+                                                l._rt.find_function::<(), u32>("dyxel_get_click_count")
+                                            ) {
+                                                // WASM counters debug (removed)
+                                            }
+                                            
+                                            // Process WASM commands
                                             let bptr = *l.shared_buffer_ptr.lock().unwrap();
                                             if let Some(bptr) = bptr {
                                                 let mem = unsafe { &mut *l._rt.memory_mut() };

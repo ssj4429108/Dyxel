@@ -13,7 +13,7 @@
 
 use dyxel_view::{
     BaseView, FlexDirection, JustifyContent, AlignItems, Dimension,
-    View, Text,
+    View, Text, set_text,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::cell::RefCell;
@@ -32,7 +32,34 @@ const COLOR_SUCCESS: (u32, u32, u32) = (100, 255, 150);
 static TAP_COUNTER: AtomicU32 = AtomicU32::new(0);
 static PAN_COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// UI State - stores node IDs for dynamic updates
+struct UIState {
+    // Tap demo
+    tap_counter_id: u32,
+    
+    // Pan demo
+    position_text_id: u32,
+    pan_status_id: u32,
+    
+    // Log panel
+    log_line_ids: [u32; 5],
+    last_log_count: u32,
+}
+
+impl Default for UIState {
+    fn default() -> Self {
+        Self {
+            tap_counter_id: 0,
+            position_text_id: 0,
+            pan_status_id: 0,
+            log_line_ids: [0; 5],
+            last_log_count: 0,
+        }
+    }
+}
+
 thread_local! {
+    static UI_STATE: RefCell<UIState> = RefCell::new(UIState::default());
     // Pan state
     static PAN_STATE: RefCell<PanState> = RefCell::new(PanState::default());
     // Log messages
@@ -48,25 +75,13 @@ struct PanState {
     current_y: f32,
 }
 
-/// Print log (WASM environment)
-#[cfg(target_arch = "wasm32")]
-fn log(msg: &str) {
-    // WASM: use host-provided logging interface
-    let _ = msg;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn log(msg: &str) {
-    println!("[InputProxyDemo] {}", msg);
-}
-
 /// Add log message
 fn add_log(msg: String) {
     LOG_MESSAGES.with(|logs| {
         let mut logs = logs.borrow_mut();
         logs.push(msg);
-        // Keep only last 10 entries
-        if logs.len() > 10 {
+        // Keep only last 5 entries
+        while logs.len() > 5 {
             logs.remove(0);
         }
     });
@@ -74,13 +89,11 @@ fn add_log(msg: String) {
 
 /// Initialize demo application
 pub fn init() {
-    log("Input Proxy Demo initializing...");
-    
     // Create root container
     let root = View::new()
         .width(Dimension::Percent(100.0))
         .height(Dimension::Percent(100.0))
-        .color((20, 20, 30))
+        .color(COLOR_BG)
         .flex_direction(FlexDirection::Column)
         .justify_content(JustifyContent::FlexStart)
         .align_items(AlignItems::Center);
@@ -123,8 +136,8 @@ pub fn init() {
         .font_size(12.0);
     View { id: root.node_id() }.child(hint.node_id());
     
-    log("Input Proxy Demo initialized");
     add_log("App started".to_string());
+    add_log("Tap the blue button".to_string());
 }
 
 /// Create Tap gesture demo area
@@ -167,17 +180,21 @@ fn create_tap_demo() -> View {
         let counter = &TAP_COUNTER;
         move || {
             let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            let msg = format!("Tap #{} at {:?}", count, std::time::Instant::now());
-            log(&msg);
-            add_log(msg);
+            add_log(format!("Tap #{} detected", count));
         }
     });
     
-    // Counter display
+    // Counter display - store ID for dynamic update
     let counter_text = Text::new()
         .value("Taps: 0")
         .font_size(12.0);
-    View { id: panel.node_id() }.child(counter_text.node_id());
+    let counter_id = counter_text.node_id();
+    View { id: panel.node_id() }.child(counter_id);
+    
+    // Store ID for dynamic updates
+    UI_STATE.with(|state| {
+        state.borrow_mut().tap_counter_id = counter_id;
+    });
     
     panel
 }
@@ -212,24 +229,28 @@ fn create_pan_demo() -> View {
         .font_size(14.0);
     View { id: drag_area.node_id() }.child(drag_hint.node_id());
     
-    // Position display
+    // Position display - store ID
     let position_text = Text::new()
         .value("Position: (0, 0)")
         .font_size(12.0);
-    View { id: drag_area.node_id() }.child(position_text.node_id());
-    
-    // TODO: Add onPan callbacks when dyxel-view supports them
-    // drag_area.on_pan_start(|x, y| { ... });
-    // drag_area.on_pan_update(|x, y, dx, dy| { ... });
-    // drag_area.on_pan_end(|x, y| { ... });
+    let position_id = position_text.node_id();
+    View { id: drag_area.node_id() }.child(position_id);
     
     View { id: panel.node_id() }.child(drag_area.node_id());
     
-    // Status display
+    // Status display - store ID
     let state_text = Text::new()
         .value("Status: Waiting for drag...")
         .font_size(12.0);
-    View { id: panel.node_id() }.child(state_text.node_id());
+    let status_id = state_text.node_id();
+    View { id: panel.node_id() }.child(status_id);
+    
+    // Store IDs for dynamic updates
+    UI_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.position_text_id = position_id;
+        state.pan_status_id = status_id;
+    });
     
     panel
 }
@@ -251,7 +272,6 @@ fn create_small_target_demo() -> View {
     View { id: panel.node_id() }.child(title.node_id());
     
     // Small button (20x20, smaller than 44dp min target)
-    // Note: on_click consumes the view, so add to parent first
     let small_button = View::new()
         .width(Dimension::Pixels(20.0))
         .height(Dimension::Pixels(20.0))
@@ -266,9 +286,7 @@ fn create_small_target_demo() -> View {
     // Click callback
     small_button.on_click({
         move || {
-            let msg = "Small button tapped! Hot-area works".to_string();
-            log(&msg);
-            add_log(msg);
+            add_log("Small button tapped!".to_string());
         }
     });
     
@@ -297,33 +315,70 @@ fn create_log_panel() -> View {
         .font_size(14.0);
     View { id: panel.node_id() }.child(title.node_id());
     
-    // Log content area (simplified display)
+    // Log content area - store IDs for dynamic updates
+    let mut log_ids = [0u32; 5];
     for i in 0..5 {
         let log_line = Text::new()
-            .value(&format!("{}. Waiting for events...", i + 1))
+            .value(&format!("{}. Waiting...", i + 1))
             .font_size(10.0);
-        View { id: panel.node_id() }.child(log_line.node_id());
+        let line_id = log_line.node_id();
+        log_ids[i] = line_id;
+        View { id: panel.node_id() }.child(line_id);
     }
+    
+    // Store IDs for dynamic updates
+    UI_STATE.with(|state| {
+        state.borrow_mut().log_line_ids = log_ids;
+    });
     
     panel
 }
 
-/// Per-frame update
+/// Per-frame update - dynamically update UI
 pub fn tick() {
-    // Update counter display
+    // Get current values
     let tap_count = TAP_COUNTER.load(Ordering::SeqCst);
-    let pan_count = PAN_COUNTER.load(Ordering::SeqCst);
     
-    // In real app, this would update Text node content
-    // Due to current API limitations, we use alternative feedback
-    
-    // Output status every 60 frames (~1 second)
-    static FRAME: AtomicU32 = AtomicU32::new(0);
-    let frame = FRAME.fetch_add(1, Ordering::SeqCst);
-    
-    if frame % 60 == 0 && (tap_count > 0 || pan_count > 0) {
-        log(&format!("Stats - Tap: {}, Pan: {}", tap_count, pan_count));
-    }
+    UI_STATE.with(|state| {
+        let state = state.borrow();
+        
+        // Update tap counter display
+        if state.tap_counter_id != 0 {
+            set_text(state.tap_counter_id, &format!("Taps: {}", tap_count));
+        }
+        
+        // Update pan display (simulate pan data for now)
+        PAN_STATE.with(|pan| {
+            let pan = pan.borrow();
+            if state.position_text_id != 0 {
+                set_text(state.position_text_id, 
+                    &format!("Position: ({:.0}, {:.0})", pan.current_x, pan.current_y));
+            }
+            if state.pan_status_id != 0 {
+                let status = if pan.is_dragging {
+                    "Status: Dragging..."
+                } else {
+                    "Status: Waiting for drag..."
+                };
+                set_text(state.pan_status_id, status);
+            }
+        });
+        
+        // Update log display
+        LOG_MESSAGES.with(|logs| {
+            let logs = logs.borrow();
+            for (i, &line_id) in state.log_line_ids.iter().enumerate() {
+                if line_id != 0 {
+                    let msg = if i < logs.len() {
+                        &logs[logs.len() - 1 - i]
+                    } else {
+                        ""
+                    };
+                    set_text(line_id, msg);
+                }
+            }
+        });
+    });
 }
 
 /// Platform info

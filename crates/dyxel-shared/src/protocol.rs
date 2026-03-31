@@ -114,6 +114,13 @@ define_protocol! {
     [21] UpdateLayout(),
     [22] SelectNode(id: u32),
     
+    // === Gesture Handler Registration (28-31) ===
+    // WASM notifies Host which nodes have gesture handlers
+    [28] RegisterTapHandler(id: u32),
+    [29] RegisterLongPressHandler(id: u32),
+    [30] RegisterPanHandler(id: u32),
+    [31] UnregisterGestureHandler(id: u32), // Generic unregister
+    
     // === Compact Operations (23-31) ===
     [23] SetColorCompact(r: u8, g: u8, b: u8, a: u8),
     [24] SetWidthCompact(dt: u8, v: f32),
@@ -139,6 +146,28 @@ define_protocol! {
     [53] IsLayoutDirty(id: u32),
     [54] ClearLayoutDirty(id: u32),
     [55] GetLayoutBatch(start_id: u32, count: u32),
+    
+    // === Gesture Events (56-63) - Legacy, bubble in WASM ===
+    [56] GestureTap(node_id: u32, x: f32, y: f32),
+    [57] GestureDoubleTap(node_id: u32, x: f32, y: f32),
+    [58] GestureLongPressStart(node_id: u32, x: f32, y: f32),
+    [59] GestureLongPressEnd(node_id: u32, x: f32, y: f32),
+    [60] GesturePanStart(node_id: u32, x: f32, y: f32),
+    [61] GesturePanUpdate(node_id: u32, x: f32, y: f32, delta_x: f32, delta_y: f32),
+    [62] GesturePanEnd(node_id: u32, x: f32, y: f32, velocity_x: f32, velocity_y: f32),
+    [63] GestureCancel(node_id: u32),
+    
+    // === Direct Gesture Events (72-79) - Host resolves bubbling ===
+    // These events have already been resolved by Host using HandlerRegistry
+    // WASM should call the handler directly without bubbling
+    [72] DirectGestureTap(node_id: u32, x: f32, y: f32),
+    [73] DirectGestureLongPress(node_id: u32, x: f32, y: f32),
+    [74] DirectGesturePanStart(node_id: u32, x: f32, y: f32),
+    [75] DirectGesturePanUpdate(node_id: u32, x: f32, y: f32, delta_x: f32, delta_y: f32),
+    [76] DirectGesturePanEnd(node_id: u32, x: f32, y: f32),
+    
+    // === Device Info (64) ===
+    [64] UpdateDeviceInfo(dpr: f32, text_scale: f32, width: f32, height: f32, safe_top: f32, safe_bottom: f32, platform: u32),
 }
 
 #[repr(C)]
@@ -225,4 +254,6 @@ pub struct SharedBuffer {
     pub dirty_mask: [u32; 32],
     /// Input event ring buffer (for Input Proxy)
     pub input_buffer: crate::input::InputBuffer,
+    /// Device information (read by WASM)
+    pub device_info: crate::device::DeviceInfo,
 }

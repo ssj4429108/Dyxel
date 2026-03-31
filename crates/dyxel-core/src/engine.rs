@@ -140,7 +140,16 @@ impl LogicState {
         
         let _ = main_fn.call(); 
         let memory = unsafe { &mut *self._rt.memory_mut() }; 
-        let _ = process_commands(memory, bptr, &self.shared_state);
+        
+        // Debug: check command length before processing
+        let bs = bptr as usize;
+        let clen = u32::from_le_bytes(memory[bs..bs+4].try_into().unwrap_or([0,0,0,0]));
+        log::info!("After main(): command_len = {}", clen);
+        
+        let result = process_commands(memory, bptr, &self.shared_state);
+        if let Err(e) = &result {
+            log::error!("process_commands failed: {}", e);
+        }
 
         *self.tick_fn.lock().unwrap() = Some(unsafe { std::mem::transmute(tick_fn) });
         *self.on_click_fn.lock().unwrap() = Some(unsafe { std::mem::transmute(on_click_fn) });

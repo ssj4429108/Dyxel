@@ -1,11 +1,15 @@
 [package]
 name = "sample"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 dyxel-view = { path = "../crates/dyxel-view" }
+dyxel-app = { path = "../crates/dyxel-app" }
+dyxel-state = { path = "../crates/dyxel-state" }
+dyxel-shared = { path = "../crates/dyxel-shared" }
+dyxel-app-macro = { path = "../crates/dyxel-app-macro" }
 futures-signals = "0.3"

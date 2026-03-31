@@ -1,0 +1,13 @@
+[package]
+name = "dyxel-gesture"
+version = "0.1.0"
+edition = "2021"
+description = "Robust gesture recognition system for Dyxel, inspired by Flutter's GestureArena"
+license = "Apache-2.0 OR MIT"
+
+[dependencies]
+dyxel-shared = { path = "../dyxel-shared" }
+log = "0.4"
+
+[dev-dependencies]
+# Tests will be added later

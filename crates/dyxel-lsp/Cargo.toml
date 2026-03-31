@@ -1,0 +1,30 @@
+[package]
+name = "dyxel-lsp"
+version = "0.1.0"
+edition = "2021"
+description = "Language Server Protocol implementation for Dyxel RSX"
+license = "Apache-2.0 OR MIT"
+
+[dependencies]
+# LSP 基础库 (tower-lsp 自带 lsp-types)
+tower-lsp = "0.20"
+
+# 异步运行时
+tokio = { version = "1.0", features = ["full"] }
+
+# 日志
+log = "0.4"
+env_logger = "0.11"
+
+# RSX 解析（复用 dyxel-rsx 的解析逻辑）
+dyxel-rsx = { path = "../dyxel-rsx" }
+
+# 文件操作
+ropey = "1.6"
+
+# 路径处理
+url = "2.5"
+
+[[bin]]
+name = "dyxel-lsp"
+path = "src/main.rs"

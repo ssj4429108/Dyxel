@@ -17,6 +17,7 @@ dyxel-shared.workspace = true
 dyxel-render-api = { path = "../dyxel-render-api" }
 dyxel-render-vello = { path = "../dyxel-render-vello" }
 dyxel-perf = { path = "../dyxel-perf" }
+dyxel-gesture = { path = "../dyxel-gesture" }
 wgpu = { workspace = true, features = ["spirv"] }
 vello = { workspace = true, features = ["wgpu"] }
 peniko = { version = "0.6" }

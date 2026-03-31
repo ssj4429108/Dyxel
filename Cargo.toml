@@ -6,6 +6,10 @@ members = [
     "web",
     "crates/dyxel-shared",
     "crates/dyxel-view",
+    "crates/dyxel-rsx",
+    "crates/dyxel-state",
+    "crates/dyxel-app",
+    "crates/dyxel-app-macro",
     "crates/wasm3",
     "crates/dyxel-render-api",
     "crates/dyxel-render-impeller",
@@ -13,7 +17,7 @@ members = [
     "crates/dyxel-editor",
     "crates/dyxel-perf",
     "crates/vendor/vello_shaders"
-]
+, "crates/dyxel-lsp"]
 resolver = "2"
 
 [workspace.dependencies]

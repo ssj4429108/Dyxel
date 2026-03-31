@@ -10,6 +10,8 @@ pub mod engine;
 pub mod input;
 pub mod input_proxy;
 pub mod bridge;
+pub mod spatial_index;
+pub mod handler_registry;
 // Perf module now in dyxel-perf crate
 
 pub use platform::{SurfaceId, SafeWindowHandle, SurfaceState};

@@ -9,10 +9,10 @@ use kurbo::{Affine, Point, Rect as KurboRect, Vec2};
 use std::collections::HashMap;
 
 use dyxel_shared::{
-    InputBuffer, InputEventType, RawInputEvent, SharedBuffer,
+    InputEventType, RawInputEvent, SharedBuffer,
 };
 
-use crate::state::{SharedState, ViewNode};
+use crate::state::SharedState;
 
 /// Native input event type (received from platform)
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +29,7 @@ pub enum NativeInputType {
 struct PointerState {
     start_x: f32,
     start_y: f32,
+    #[allow(dead_code)]
     start_time: u64,
     last_x: f32,
     last_y: f32,
@@ -190,8 +191,9 @@ impl InputProxy {
         // 创建事件并压入缓冲区
         let event = RawInputEvent {
             timestamp: self.current_time,
-            event_type: InputEventType::PointerDown,
             pointer_id,
+            event_type: InputEventType::PointerDown as u8,
+            _padding: [0; 3],
             x: world_pos.x as f32,
             y: world_pos.y as f32,
             pressure,
@@ -239,8 +241,9 @@ impl InputProxy {
         // 创建事件
         let event = RawInputEvent {
             timestamp: self.current_time,
-            event_type: InputEventType::PointerMove,
             pointer_id,
+            event_type: InputEventType::PointerMove as u8,
+            _padding: [0; 3],
             x: world_pos.x as f32,
             y: world_pos.y as f32,
             pressure: 1.0,
@@ -269,8 +272,9 @@ impl InputProxy {
 
         let event = RawInputEvent {
             timestamp: self.current_time,
-            event_type: InputEventType::PointerUp,
             pointer_id,
+            event_type: InputEventType::PointerUp as u8,
+            _padding: [0; 3],
             x: world_pos.x as f32,
             y: world_pos.y as f32,
             pressure: 0.0,
@@ -295,8 +299,9 @@ impl InputProxy {
 
         let event = RawInputEvent {
             timestamp: self.current_time,
-            event_type: InputEventType::PointerCancel,
             pointer_id,
+            event_type: InputEventType::PointerCancel as u8,
+            _padding: [0; 3],
             x: state.last_x,
             y: state.last_y,
             pressure: 0.0,
@@ -325,8 +330,9 @@ impl InputProxy {
 
         let event = RawInputEvent {
             timestamp: self.current_time,
-            event_type: InputEventType::MouseWheel,
             pointer_id,
+            event_type: InputEventType::MouseWheel as u8,
+            _padding: [0; 3],
             x: world_pos.x as f32,
             y: world_pos.y as f32,
             pressure: 0.0,

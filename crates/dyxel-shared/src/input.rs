@@ -44,16 +44,22 @@ impl InputEventType {
 
 /// Raw input event
 /// 
-/// Fixed 32-byte size for predictable memory layout and efficient transfer
+/// Fixed 40-byte size for predictable memory layout and efficient transfer.
+/// Fields are ordered to minimize padding while maintaining alignment.
+/// 
+/// NOTE: event_type is stored as u8 for guaranteed cross-platform compatibility
+/// between Host (native) and Guest (WASM). Use InputEventType::from_u8() to convert.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawInputEvent {
     /// Timestamp in microseconds (from system boot)
     pub timestamp: u64,
-    /// Event type
-    pub event_type: InputEventType,
     /// Multi-touch ID (0 for single pointer)
     pub pointer_id: u32,
+    /// Event type as u8 (use InputEventType::from_u8() to convert)
+    pub event_type: u8,
+    /// Padding to maintain alignment - reserved for future use
+    pub _padding: [u8; 3],
     /// World coordinate X (DPI scaled)
     pub x: f32,
     /// World coordinate Y (DPI scaled)
@@ -70,12 +76,20 @@ pub struct RawInputEvent {
     pub flags: u32,
 }
 
+impl RawInputEvent {
+    /// Get event type as enum
+    pub fn get_event_type(&self) -> Option<InputEventType> {
+        InputEventType::from_u8(self.event_type)
+    }
+}
+
 impl Default for RawInputEvent {
     fn default() -> Self {
         Self {
             timestamp: 0,
-            event_type: InputEventType::PointerDown,
             pointer_id: 0,
+            event_type: InputEventType::PointerDown as u8,
+            _padding: [0; 3],
             x: 0.0,
             y: 0.0,
             pressure: 1.0,
@@ -124,8 +138,9 @@ impl InputBuffer {
             _reserved: 0,
             events: [RawInputEvent {
                 timestamp: 0,
-                event_type: InputEventType::PointerDown,
                 pointer_id: 0,
+                event_type: InputEventType::PointerDown as u8,
+                _padding: [0; 3],
                 x: 0.0,
                 y: 0.0,
                 pressure: 1.0,

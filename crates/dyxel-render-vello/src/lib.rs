@@ -762,8 +762,8 @@ impl VelloBackend {
             #[cfg(target_os = "android")]
             {
                 let perf_monitor = self.perf_monitor.lock().unwrap();
-                let mem_trend = perf_monitor.get_memory_trend();
-                let leak_warning = if perf_monitor.has_memory_leak() {
+                let _mem_trend = perf_monitor.get_memory_trend();
+                let _leak_warning = if perf_monitor.has_memory_leak() {
                     " [LEAK]"
                 } else {
                     ""
@@ -771,7 +771,7 @@ impl VelloBackend {
                 drop(perf_monitor);
                 
                 // Temperature and thermal status
-                let temp_str = if let Some(temp) = stats.temperature_c {
+                let _temp_str = if let Some(temp) = stats.temperature_c {
                     let thermal_status = if temp > 75.0 {
                         "🔥 THROTTLING"
                     } else if temp > 60.0 {
@@ -784,21 +784,11 @@ impl VelloBackend {
                     String::new()
                 };
                 
-                log::info!(
-                    "[DIAG-Android] Frame {}: {:.2}ms (State={:.2} Scene={:.2} GPU={:.2} Blit={:.2} Present={:.2}) FPS={:.1} Mem={:.1}MB ({:.1}/min){}{}",
-                    stats.total_frames,
-                    total,
-                    state_lock_time,
-                    scene_build_time,
-                    gpu_time,
-                    blit_time,
-                    present_time,
-                    stats.fps,
-                    stats.memory_used_mb,
-                    mem_trend,
-                    leak_warning,
-                    temp_str
-                );
+                // NOTE: Frame diagnostic logging disabled for cleaner logs
+                // log::info!(
+                //     "[DIAG-Android] Frame {}: {:.2}ms (State={:.2} Scene={:.2} GPU={:.2} Blit={:.2} Present={:.2}) FPS={:.1} Mem={:.1}MB ({:.1}/min){}{}",
+                //     ...
+                // );
             }
             
             #[cfg(not(target_os = "android"))]

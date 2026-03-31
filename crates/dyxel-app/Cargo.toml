@@ -1,0 +1,10 @@
+[package]
+name = "dyxel-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dyxel-app-macro = { path = "../dyxel-app-macro" }
+dyxel-state = { path = "../dyxel-state" }
+dyxel-view = { path = "../dyxel-view" }
+dyxel-shared = { path = "../dyxel-shared" }

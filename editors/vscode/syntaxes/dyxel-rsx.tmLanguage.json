@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Dyxel RSX",
+  "scopeName": "source.rust.dyxel",
+  "injectionSelector": "L:source.rust",
+  "patterns": [
+    {
+      "include": "#rsx-property"
+    }
+  ],
+  "repository": {
+    "rsx-property": {
+      "match": "\\b(width|height|color|padding|margin|borderRadius|flexDirection|justifyContent|alignItems|flexWrap|alignContent|flexGrow|zIndex|onClick|onTap|onLongPress|fontSize|fontWeight|textColor|value|spacing)\\s*:",
+      "captures": {
+        "1": { "name": "support.type.property-name.dyxel" }
+      }
+    }
+  }
+}
