@@ -85,9 +85,9 @@ pub enum RenderMessage {
 // =============== Input Proxy with GestureArena ===============
 
 #[cfg(not(target_arch = "wasm32"))]
-use dyxel_gesture::{GestureRouter, GestureSettings, SpatialHitTester, GestureEventType};
+use dyxel_gesture::{GestureRouter, GestureSettings, SpatialHitTester};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::handler_registry::HandlerType;
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runtime::get_handler_registry;
 
@@ -174,11 +174,12 @@ fn dispatch_gesture_event(
     // Determine handler type from event type
     let handler_type = match event.event_type {
         GestureEventType::Tap => Some(HandlerType::Tap),
+        GestureEventType::DoubleTap => Some(HandlerType::DoubleTap),
         GestureEventType::LongPressStart | GestureEventType::LongPressEnd => Some(HandlerType::LongPress),
         GestureEventType::PanStart | GestureEventType::PanUpdate | GestureEventType::PanEnd => Some(HandlerType::Pan),
         _ => None,
     };
-
+    
     // SAFETY: This is called from the Logic Thread where the runtime is valid
     unsafe {
         let mem = &mut *(*rt_ptr).memory_mut();
@@ -186,12 +187,20 @@ fn dispatch_gesture_event(
 
         if let Some(ht) = handler_type {
             // Use HandlerRegistry to find the actual handler target
-            if let Some(handler_node) = get_handler_registry().lock().unwrap().find_handler(&bubble_path, ht) {
+            let registry = get_handler_registry().lock().unwrap();
+            let handler_node = registry.find_handler(&bubble_path, ht);
+            drop(registry);
+            if let Some(handler_node) = handler_node {
                 // Send direct gesture event (WASM should not bubble)
                 match event.event_type {
                     GestureEventType::Tap => {
                         push_command!(shared_buffer, DirectGestureTap, handler_node, event.x, event.y);
                         log::debug!("DirectGesture: Tap on node {} (target was {}) at ({:.1},{:.1})", 
+                            handler_node, event.target_node_id, event.x, event.y);
+                    }
+                    GestureEventType::DoubleTap => {
+                        push_command!(shared_buffer, DirectGestureDoubleTap, handler_node, event.x, event.y);
+                        log::debug!("DirectGesture: DoubleTap on node {} (target was {}) at ({:.1},{:.1})", 
                             handler_node, event.target_node_id, event.x, event.y);
                     }
                     GestureEventType::LongPressStart => {
@@ -251,15 +260,15 @@ fn dispatch_gesture_event(
 /// Build bubble path from target node to root
 #[cfg(not(target_arch = "wasm32"))]
 fn build_bubble_path(target_node: u32, logic: &LogicState) -> Vec<u32> {
-    let mut path = vec![target_node];
+    let path = vec![target_node];
     
     // Walk up parent chain using SharedState
     // This queries the Host-side tree structure
-    if let Some(state) = logic.shared_state.try_lock() {
-        let mut current = target_node;
+    if let Ok(_state) = logic.shared_state.try_lock() {
+        let _current = target_node;
         // TODO: Traverse parent chain once parent pointers are available in SharedState
         // For now, just return the target node
-        let _ = current; // Suppress unused warning
+        let _ = _current; // Suppress unused warning
     }
     
     path
@@ -494,7 +503,7 @@ impl DyxelHost {
                                             }
                                             
                                             // Debug: read counters
-                                            if let (Ok(get_events), Ok(get_gestures), Ok(get_clicks)) = (
+                                            if let (Ok(_get_events), Ok(_get_gestures), Ok(_get_clicks)) = (
                                                 l._rt.find_function::<(), u32>("dyxel_get_event_count"),
                                                 l._rt.find_function::<(), u32>("dyxel_get_gesture_count"),
                                                 l._rt.find_function::<(), u32>("dyxel_get_click_count")
@@ -560,12 +569,10 @@ impl DyxelHost {
                         if let Ok(msg) = msg_res {
                             match msg {
                                 LogicMessage::SetReady(l) => {
-
                                     logic_opt = Some(l);
                                     lifecycle = Lifecycle::Running;
                                 }
                                 LogicMessage::Input(event) => {
-
                                     if let Some(ref mut l) = logic_opt { process_input_internal(l, event); }
                                 }
                                 LogicMessage::LoadWasm(path) => {

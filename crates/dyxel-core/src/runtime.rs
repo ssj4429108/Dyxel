@@ -47,6 +47,17 @@ pub fn clear_dirty_tracker() {
     get_tx_processor().lock().unwrap().dirty_tracker.clear();
 }
 
+/// Mark all nodes as dirty after layout computation
+/// Called by Render thread after compute_layout to ensure Logic thread syncs layout to WASM
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mark_all_nodes_dirty(node_ids: &[u32]) {
+    let mut tx = get_tx_processor().lock().unwrap();
+    for &id in node_ids {
+        tx.dirty_tracker.mark_dirty(id, DirtyField::Layout);
+    }
+
+}
+
 /// Command context for processing
 struct CommandContext {
     cur_id: Option<u32>,
@@ -633,18 +644,28 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
             if payload.len() >= 4 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 get_handler_registry().lock().unwrap().register(id, HandlerType::Tap);
+
             }
         }
         OpCode::RegisterLongPressHandler => {
             if payload.len() >= 4 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 get_handler_registry().lock().unwrap().register(id, HandlerType::LongPress);
+
             }
         }
         OpCode::RegisterPanHandler => {
             if payload.len() >= 4 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 get_handler_registry().lock().unwrap().register(id, HandlerType::Pan);
+
+            }
+        }
+        OpCode::RegisterDoubleTapHandler => {
+            if payload.len() >= 4 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                get_handler_registry().lock().unwrap().register(id, HandlerType::DoubleTap);
+
             }
         }
         OpCode::UnregisterGestureHandler => {
@@ -941,7 +962,22 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
         return Err(anyhow::anyhow!("WASM memory too small for layout buffer"));
     }
     
-    // Use dirty tracker if available (non-WASM only)
+
+    
+    // Mark nodes as dirty that were registered by Render thread after layout computation
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let layout_dirty_nodes = dyxel_shared::layout_sync::take_layout_dirty_nodes();
+        if !layout_dirty_nodes.is_empty() {
+            let mut tx = get_tx_processor().lock().unwrap();
+            for id in layout_dirty_nodes {
+                tx.dirty_tracker.mark_dirty(id, DirtyField::Layout);
+            }
+
+        }
+    }
+    
+    // Get dirty tracker for this sync
     #[cfg(not(target_arch = "wasm32"))]
     let dirty_tracker_opt = get_dirty_tracker();
     #[cfg(target_arch = "wasm32")]
@@ -958,6 +994,12 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
         }
         
         if let Ok(layout) = state.taffy.layout(node.taffy_node) {
+            // Skip zero-size nodes (not yet computed)
+            if layout.size.width <= 0.0 || layout.size.height <= 0.0 {
+                continue;
+            }
+            
+
             let target = ls + (id as usize * 16);
             let nx = layout.location.x.to_le_bytes();
             let ny = layout.location.y.to_le_bytes();
@@ -981,5 +1023,10 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
             }
         }
     }
+    
+    // Clear dirty tracker after sync
+    #[cfg(not(target_arch = "wasm32"))]
+    clear_dirty_tracker();
+    
     Ok(())
 }

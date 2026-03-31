@@ -117,6 +117,8 @@ impl GestureArena {
     /// Routes the event to all members and manages the arena state
     pub fn handle_event(&mut self, event: PointerEvent) -> Vec<GestureEvent> {
         let mut all_events = Vec::new();
+        
+
 
         // Track pointer data
         match event.event_type {
@@ -137,21 +139,34 @@ impl GestureArena {
         // Route to all members
         let mut winner_to_declare: Option<u32> = None;
         
-        for member in &mut self.members {
-            // Skip already resolved members
-            if member.accepted || member.rejected {
+
+        
+        for (_idx, member) in &mut self.members.iter_mut().enumerate() {
+            // Skip rejected members
+            if member.rejected {
+
+                continue;
+            }
+            
+            // For accepted members, only send Move events (for Pan/Drag continuation)
+            if member.accepted && !matches!(event.event_type, PointerEventType::Move) {
+
                 continue;
             }
 
             // Handle event
             let events = member.recognizer.handle_event(&event, &self.tracked_pointers);
+
             all_events.extend(events);
 
             // Check if this recognizer has claimed victory
             // In Flutter, recognizers call acceptGesture() to win
-            // We map this to Accepted state, but Changed also indicates active recognition
+            // We map this to Accepted state
             match member.recognizer.state() {
                 RecognizerState::Accepted => {
+                    // Only declare winner immediately for non-tap gestures
+                    // Tap gestures use Changed state and wait for sweep to allow 
+                    // multi-tap competition (e.g., SingleTap vs DoubleTap)
                     member.accepted = true;
                     winner_to_declare = Some(member.recognizer.target_node_id());
                 }
@@ -294,6 +309,7 @@ impl GestureArena {
     pub fn pointer_id(&self) -> u32 {
         self.pointer_id
     }
+    
 }
 
 /// Manages multiple gesture arenas
@@ -341,6 +357,10 @@ impl GestureArenaManager {
             max_taps: 1,
         });
         manager.default_recognizers.push(DefaultRecognizerConfig {
+            recognizer_type: DefaultRecognizerType::DoubleTap,
+            max_taps: 2,
+        });
+        manager.default_recognizers.push(DefaultRecognizerConfig {
             recognizer_type: DefaultRecognizerType::LongPress,
             max_taps: 0,
         });
@@ -363,6 +383,7 @@ impl GestureArenaManager {
     ) -> ArenaId {
         let arena_id = ArenaId::new(self.next_arena_id);
         self.next_arena_id += 1;
+
 
         let mut arena = GestureArena::new(arena_id, pointer_id, target_node_id);
 
@@ -414,8 +435,11 @@ impl GestureArenaManager {
         if let Some(arena) = self.arenas.get_mut(&arena_id) {
             let events = arena.handle_event(event);
             
-            // Clean up if arena is resolved
-            if arena.is_resolved() {
+            // Clean up if arena is resolved and pointer is up/cancel
+            // For pan gestures, we need to keep arena alive until pointer up
+            let should_close = arena.is_resolved() && 
+                matches!(event.event_type, PointerEventType::Up | PointerEventType::Cancel);
+            if should_close {
                 self.close_arena(arena_id);
             }
             

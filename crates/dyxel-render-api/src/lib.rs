@@ -13,6 +13,10 @@
 use std::any::Any;
 use dyxel_shared::SharedState;
 
+/// Callback type for marking nodes as dirty after layout computation
+/// Render backend calls this after compute_layout to notify core
+pub type LayoutDirtyCallback = Box<dyn Fn(&[u32]) + Send + Sync>;
+
 // Platform-specific types
 #[cfg(not(target_arch = "wasm32"))]
 pub type SharedPtr<T> = std::sync::Arc<T>;

@@ -114,17 +114,18 @@ define_protocol! {
     [21] UpdateLayout(),
     [22] SelectNode(id: u32),
     
+    // === Compact Operations (23-25) ===
+    [23] SetColorCompact(r: u8, g: u8, b: u8, a: u8),
+    [24] SetWidthCompact(dt: u8, v: f32),
+    [25] SetHeightCompact(dt: u8, v: f32),
+    
     // === Gesture Handler Registration (28-31) ===
     // WASM notifies Host which nodes have gesture handlers
     [28] RegisterTapHandler(id: u32),
     [29] RegisterLongPressHandler(id: u32),
     [30] RegisterPanHandler(id: u32),
-    [31] UnregisterGestureHandler(id: u32), // Generic unregister
-    
-    // === Compact Operations (23-31) ===
-    [23] SetColorCompact(r: u8, g: u8, b: u8, a: u8),
-    [24] SetWidthCompact(dt: u8, v: f32),
-    [25] SetHeightCompact(dt: u8, v: f32),
+    [31] RegisterDoubleTapHandler(id: u32),
+    // Note: UnregisterGestureHandler moved to 80 to avoid conflict
     
     // === Rich Text Operations (32-47) ===
     [32] CreateTextNode(id: u32),
@@ -161,13 +162,17 @@ define_protocol! {
     // These events have already been resolved by Host using HandlerRegistry
     // WASM should call the handler directly without bubbling
     [72] DirectGestureTap(node_id: u32, x: f32, y: f32),
-    [73] DirectGestureLongPress(node_id: u32, x: f32, y: f32),
-    [74] DirectGesturePanStart(node_id: u32, x: f32, y: f32),
-    [75] DirectGesturePanUpdate(node_id: u32, x: f32, y: f32, delta_x: f32, delta_y: f32),
-    [76] DirectGesturePanEnd(node_id: u32, x: f32, y: f32),
+    [73] DirectGestureDoubleTap(node_id: u32, x: f32, y: f32),
+    [74] DirectGestureLongPress(node_id: u32, x: f32, y: f32),
+    [75] DirectGesturePanStart(node_id: u32, x: f32, y: f32),
+    [76] DirectGesturePanUpdate(node_id: u32, x: f32, y: f32, delta_x: f32, delta_y: f32),
+    [77] DirectGesturePanEnd(node_id: u32, x: f32, y: f32),
     
     // === Device Info (64) ===
     [64] UpdateDeviceInfo(dpr: f32, text_scale: f32, width: f32, height: f32, safe_top: f32, safe_bottom: f32, platform: u32),
+    
+    // === Gesture Handler Unregistration (80) ===
+    [80] UnregisterGestureHandler(id: u32), // Generic unregister
 }
 
 #[repr(C)]
@@ -241,6 +246,80 @@ impl DirtyField {
     
     pub fn contains(&self, other: Self) -> bool {
         self.bits() & other.bits() != 0
+    }
+}
+
+/// Dirty region tracker using bitset
+#[derive(Debug, Default, Clone)]
+pub struct DirtyTracker {
+    /// Bitset: 1 bit per node, 1024 nodes = 32 u32 words
+    pub node_bitset: [u32; 32],
+    /// Track which fields changed per node (for selective re-render)
+    /// Store as u8 to allow bit combinations (e.g., Style | Size)
+    pub node_dirty_fields: std::collections::HashMap<u32, u8>,
+    /// Global dirty flag - any change occurred
+    pub any_dirty: bool,
+}
+
+impl DirtyTracker {
+    pub fn new() -> Self {
+        Self {
+            node_bitset: [0; 32],
+            node_dirty_fields: std::collections::HashMap::new(),
+            any_dirty: false,
+        }
+    }
+    
+    /// Mark a node as dirty
+    pub fn mark_dirty(&mut self, node_id: u32, fields: DirtyField) {
+        if node_id as usize >= 1024 { return; }
+        
+        let word_idx = (node_id / 32) as usize;
+        let bit_idx = node_id % 32;
+        self.node_bitset[word_idx] |= 1 << bit_idx;
+        
+        // Accumulate dirty fields as raw bits to preserve combinations
+        let field_bits = fields.bits();
+        self.node_dirty_fields
+            .entry(node_id)
+            .and_modify(|f| *f |= field_bits)
+            .or_insert(field_bits);
+        
+        self.any_dirty = true;
+    }
+    
+    /// Check if a node is dirty
+    pub fn is_node_dirty(&self, node_id: u32) -> bool {
+        if node_id as usize >= 1024 { return false; }
+        let word_idx = (node_id / 32) as usize;
+        let bit_idx = node_id % 32;
+        (self.node_bitset[word_idx] >> bit_idx) & 1 != 0
+    }
+    
+    /// Check if any nodes are dirty
+    pub fn has_dirty(&self) -> bool {
+        self.any_dirty
+    }
+    
+    /// Clear all dirty flags
+    pub fn clear(&mut self) {
+        self.node_bitset = [0; 32];
+        self.node_dirty_fields.clear();
+        self.any_dirty = false;
+    }
+    
+    /// Iterate over all dirty node IDs
+    pub fn iter_dirty_nodes(&self) -> impl Iterator<Item = u32> + '_ {
+        self.node_bitset.iter().enumerate().flat_map(|(word_idx, &word)| {
+            let mut nodes = Vec::new();
+            let mut w = word;
+            while w != 0 {
+                let bit = w.trailing_zeros();
+                nodes.push((word_idx as u32 * 32) + bit);
+                w &= w - 1;  // Clear lowest set bit
+            }
+            nodes.into_iter()
+        })
     }
 }
 

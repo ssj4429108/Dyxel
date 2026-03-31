@@ -7,6 +7,7 @@ pub mod double_buffer;
 pub mod dual_track;
 pub mod input;
 pub mod device;
+pub mod layout_sync;
 
 #[macro_use]
 pub mod utils;

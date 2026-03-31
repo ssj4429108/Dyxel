@@ -25,6 +25,8 @@ pub fn GestureStateDemo() -> impl BaseView {
     // Clone for closures
     let tap_count2 = tap_count.clone();
     let last_event2 = last_event.clone();
+    let double_tap_count2 = double_tap_count.clone();
+    let last_event_double = last_event.clone();
     let long_press_count2 = long_press_count.clone();
     let last_event3 = last_event.clone();
     let pan_count2 = pan_count.clone();
@@ -166,6 +168,27 @@ pub fn GestureStateDemo() -> impl BaseView {
                 Text("Tap Me") {
                     fontSize: 18.0,
                     textColor: (255, 255, 255, 255),
+                }
+            }
+
+            // Double Tap Area
+            View {
+                width: "90%",
+                height: 80.0,
+                color: (55, 40, 70),
+                borderRadius: 12.0,
+                margin: (0.0, 0.0, 10.0, 0.0),
+                justifyContent: JustifyContent::Center,
+                alignItems: AlignItems::Center,
+                onDoubleTap: move |_, _| {
+                    let count = double_tap_count2.get() + 1;
+                    double_tap_count2.set(count);
+                    last_event_double.set(format!("Double Tap #{} detected", count));
+                },
+
+                Text("Double Tap Me (Quickly)") {
+                    fontSize: 16.0,
+                    textColor: (220, 180, 255, 255),
                 }
             }
 

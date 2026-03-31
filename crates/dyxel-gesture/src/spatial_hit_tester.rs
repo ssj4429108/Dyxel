@@ -26,6 +26,7 @@ pub struct SpatialHitTester {
 
 /// Node data stored in spatial index
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct NodeData {
     x: f32,
     y: f32,
@@ -66,9 +67,12 @@ impl SpatialHitTester {
     fn do_sync(&mut self) {
         unsafe {
             let current_max = (*self.shared_buffer_ptr).max_node_id;
+            log::info!("[GestureDebug] SpatialHitTester.sync: last_synced={}, current_max={}", 
+                self.last_synced_max_id, current_max);
             
             // Process new nodes
             for id in (self.last_synced_max_id + 1)..=current_max {
+
                 self.add_node(id);
             }
             
@@ -76,6 +80,7 @@ impl SpatialHitTester {
             // This would require a dirty flag or version counter
             
             self.last_synced_max_id = current_max;
+
         }
     }
 
@@ -93,8 +98,11 @@ impl SpatialHitTester {
     unsafe fn add_node(&mut self, node_id: u32) {
         let layout = (*self.shared_buffer_ptr).layout_results[node_id as usize];
         
+
+        
         // Skip zero-size nodes
         if layout.width <= 0.0 || layout.height <= 0.0 {
+
             return;
         }
 
@@ -126,6 +134,7 @@ impl SpatialHitTester {
     }
 
     /// Remove a node from spatial index
+    #[allow(dead_code)]
     fn remove_node(&mut self, node_id: u32) {
         if let Some(data) = self.nodes.remove(&node_id) {
             for cx in data.min_cell_x..=data.max_cell_x {
@@ -178,21 +187,29 @@ impl HitTester for SpatialHitTester {
         // Calculate grid cell for point
         let cell_x = (x / GRID_CELL_SIZE).floor() as i32;
         let cell_y = (y / GRID_CELL_SIZE).floor() as i32;
+        
+        log::info!("[GestureDebug] hit_test: pos=({:.1},{:.1}), cell=({},{}) grid_cells={} indexed_nodes={}", 
+            x, y, cell_x, cell_y, self.grid.len(), self.nodes.len());
 
         let mut best_node: Option<(u32, NodeData)> = None;
 
         // Check cell and neighbors (for nodes crossing cell boundaries)
         for dx in -1..=1 {
             for dy in -1..=1 {
-                if let Some(cell) = self.grid.get(&(cell_x + dx, cell_y + dy)) {
+                let check_cell = (cell_x + dx, cell_y + dy);
+                if let Some(cell) = self.grid.get(&check_cell) {
+
                     for &node_id in cell {
                         if let Some(&data) = self.nodes.get(&node_id) {
+                            log::info!("[GestureDebug]     Node {}: bounds=({:.1},{:.1})-({:.1},{:.1})", 
+                                node_id, data.x, data.y, data.x + data.width, data.y + data.height);
                             // Check if point is inside node bounds
                             if x >= data.x
                                 && x <= data.x + data.width
                                 && y >= data.y
                                 && y <= data.y + data.height
                             {
+
                                 // Keep highest node ID (z-order)
                                 if best_node.map(|(id, _)| node_id > id).unwrap_or(true) {
                                     best_node = Some((node_id, data));

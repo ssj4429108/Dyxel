@@ -551,8 +551,11 @@ impl VelloBackend {
                 }
             }
             
+
+            
             let rid = g.root_id.map(|id| {
                 if let Some(rn) = g.nodes.get(&id).map(|n| n.taffy_node) {
+
                     let _ = g.taffy.compute_layout_with_measure(rn, taffy::prelude::Size {
                         width: AvailableSpace::Definite(w as f32),
                         height: AvailableSpace::Definite(h as f32)
@@ -574,6 +577,14 @@ impl VelloBackend {
                             height: _known_dimensions.height.unwrap_or(0.0) 
                         }
                     });
+                    
+                    // Register all nodes as layout-dirty after computation
+                    // This ensures Logic Thread will sync layout to WASM memory
+                    {
+                        let node_ids: Vec<u32> = g.nodes.keys().copied().collect();
+                        dyxel_shared::layout_sync::register_layout_dirty_nodes(&node_ids);
+
+                    }
                 }
                 id
             });

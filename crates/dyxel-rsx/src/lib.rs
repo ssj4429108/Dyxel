@@ -131,9 +131,9 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
                             
                             // Collect value tokens
                             let mut value_tokens = Vec::new();
-                            let mut brace_depth = 0;
-                            let mut paren_depth = 0;
-                            let mut bracket_depth = 0;
+                            let brace_depth = 0;
+                            let paren_depth = 0;
+                            let bracket_depth = 0;
                             let mut pipe_depth = 0;
                             let mut in_closure_params = false;
                             

@@ -25,7 +25,7 @@ pub use state::{Role, ViewType};
 pub use input::hit_test_recursive;
 pub use runtime::{
     process_commands, sync_layout_to_wasm, process_command_stream,
-    is_render_needed, get_dirty_tracker, clear_dirty_tracker
+    is_render_needed, get_dirty_tracker, clear_dirty_tracker, mark_all_nodes_dirty
 };
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -27,6 +27,7 @@ fn main() -> anyhow::Result<()> {
 
 
     let mut mouse_pos = Vec2::ZERO;
+    let mut mouse_pressed = false;
     let mut surface_setup_done = false;
 
     event_loop.run(move |event, elwt| {
@@ -63,9 +64,17 @@ fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 mouse_pos = Vec2::new(position.x, position.y);
+                if mouse_pressed {
+                    host.on_pointer_move(0, mouse_pos.x as f32, mouse_pos.y as f32);
+                }
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
+                mouse_pressed = true;
                 host.on_touch(mouse_pos.x as f32, mouse_pos.y as f32);
+            }
+            Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. }, .. } => {
+                mouse_pressed = false;
+                host.on_pointer_up(0, mouse_pos.x as f32, mouse_pos.y as f32);
             }
             Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed,

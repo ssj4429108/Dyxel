@@ -12,6 +12,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HandlerType {
     Tap,
+    DoubleTap,
     LongPress,
     Pan,
 }
@@ -19,6 +20,7 @@ pub enum HandlerType {
 /// Registry of gesture handlers per node
 pub struct HandlerRegistry {
     tap_handlers: HashSet<u32>,
+    double_tap_handlers: HashSet<u32>,
     long_press_handlers: HashSet<u32>,
     pan_handlers: HashSet<u32>,
 }
@@ -27,6 +29,7 @@ impl HandlerRegistry {
     pub fn new() -> Self {
         Self {
             tap_handlers: HashSet::new(),
+            double_tap_handlers: HashSet::new(),
             long_press_handlers: HashSet::new(),
             pan_handlers: HashSet::new(),
         }
@@ -36,6 +39,7 @@ impl HandlerRegistry {
     pub fn register(&mut self, node_id: u32, handler_type: HandlerType) {
         match handler_type {
             HandlerType::Tap => self.tap_handlers.insert(node_id),
+            HandlerType::DoubleTap => self.double_tap_handlers.insert(node_id),
             HandlerType::LongPress => self.long_press_handlers.insert(node_id),
             HandlerType::Pan => self.pan_handlers.insert(node_id),
         };
@@ -44,6 +48,7 @@ impl HandlerRegistry {
     /// Unregister all handlers for a node
     pub fn unregister(&mut self, node_id: u32) {
         self.tap_handlers.remove(&node_id);
+        self.double_tap_handlers.remove(&node_id);
         self.long_press_handlers.remove(&node_id);
         self.pan_handlers.remove(&node_id);
     }
@@ -52,6 +57,7 @@ impl HandlerRegistry {
     pub fn has_handler(&self, node_id: u32, handler_type: HandlerType) -> bool {
         match handler_type {
             HandlerType::Tap => self.tap_handlers.contains(&node_id),
+            HandlerType::DoubleTap => self.double_tap_handlers.contains(&node_id),
             HandlerType::LongPress => self.long_press_handlers.contains(&node_id),
             HandlerType::Pan => self.pan_handlers.contains(&node_id),
         }
@@ -74,6 +80,7 @@ impl HandlerRegistry {
         use dyxel_gesture::GestureEventType;
         match event_type {
             GestureEventType::Tap => Some(HandlerType::Tap),
+            GestureEventType::DoubleTap => Some(HandlerType::DoubleTap),
             GestureEventType::LongPressStart => Some(HandlerType::LongPress),
             GestureEventType::LongPressEnd => Some(HandlerType::LongPress),
             GestureEventType::PanStart => Some(HandlerType::Pan),
@@ -87,6 +94,7 @@ impl HandlerRegistry {
     pub fn stats(&self) -> HandlerStats {
         HandlerStats {
             tap_count: self.tap_handlers.len(),
+            double_tap_count: self.double_tap_handlers.len(),
             long_press_count: self.long_press_handlers.len(),
             pan_count: self.pan_handlers.len(),
         }
@@ -97,6 +105,7 @@ impl HandlerRegistry {
 #[derive(Debug, Clone, Copy)]
 pub struct HandlerStats {
     pub tap_count: usize,
+    pub double_tap_count: usize,
     pub long_press_count: usize,
     pub pan_count: usize,
 }

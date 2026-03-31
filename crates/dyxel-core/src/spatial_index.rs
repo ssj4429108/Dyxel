@@ -107,6 +107,7 @@ pub struct SceneTree {
     /// Parent relationship: child -> parent
     parents: HashMap<u32, u32>,
     /// Root node id
+    #[allow(dead_code)]
     root: Option<u32>,
 }
 

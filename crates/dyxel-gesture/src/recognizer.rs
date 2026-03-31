@@ -194,7 +194,13 @@ impl GestureRecognizer for TapGestureRecognizer {
 
                             if self.tap_count >= self.max_taps {
                                 // Completed all required taps
-                                self.state = RecognizerState::Accepted;
+                                // For single tap, use Changed instead of Accepted to allow 
+                                // DoubleTap to compete. Arena sweep will resolve the winner.
+                                self.state = if self.max_taps == 1 {
+                                    RecognizerState::Changed // Allow competition from DoubleTap
+                                } else {
+                                    RecognizerState::Accepted
+                                };
                                 
                                 // Generate appropriate event
                                 let gesture_event = match self.max_taps {
@@ -533,6 +539,7 @@ impl GestureRecognizer for PanGestureRecognizer {
             PointerEventType::Down => {
                 self.tracked_pointer = Some(PointerData::new(event));
                 self.state = RecognizerState::Began;
+
             }
             PointerEventType::Move => {
                 let pan_slop = self.config.settings.pan_slop;
@@ -541,12 +548,17 @@ impl GestureRecognizer for PanGestureRecognizer {
                 let mut delta_x = 0.0;
                 let mut delta_y = 0.0;
                 
+
+                
                 if let Some(ref mut pointer) = self.tracked_pointer {
                     if pointer.pointer_id == event.pointer_id {
                         pointer.update(event);
+                        let dist = pointer.distance_from_start();
+
 
                         if !self.has_started {
-                            if pointer.distance_from_start() >= pan_slop {
+                            if dist >= pan_slop {
+
                                 should_start_pan = true;
                             }
                         } else {
@@ -556,6 +568,8 @@ impl GestureRecognizer for PanGestureRecognizer {
                             self.last_x = pointer.current_x;
                             self.last_y = pointer.current_y;
                         }
+                    } else {
+
                     }
                 }
                 

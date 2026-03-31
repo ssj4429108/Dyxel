@@ -140,6 +140,7 @@ thread_local! {
     static EXECUTOR: RefCell<Vec<std::pin::Pin<Box<dyn futures_util::future::Future<Output = ()>>>>> = RefCell::new(Vec::new());
     static CLICK_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
     static TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
+    static DOUBLE_TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
     static LONG_PRESS_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
     static LONG_PRESS_END_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
     static PAN_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
@@ -246,6 +247,18 @@ fn process_gesture_commands() {
                     offset += 12;
                     // Direct call - no bubbling needed
                     TAP_HANDLERS.with(|h| { 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
+                    });
+                    GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            OpCode::DirectGestureDoubleTap => {
+                if offset + 12 <= data.len() {
+                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
+                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
+                    offset += 12;
+                    DOUBLE_TAP_HANDLERS.with(|h| { 
                         if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
                     });
                     GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -493,6 +506,14 @@ pub trait BaseView {
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterTapHandler, id); // Notify Host
         TAP_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(handler)); });
+        self
+    }
+    fn on_double_tap(self, handler: impl FnMut(f32, f32) + 'static) -> Self where Self: Sized {
+        let id = self.node_id();
+        select_node(id);
+        push_command!(SHARED_BUFFER, AttachClick, id);
+        push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id); // Notify Host
+        DOUBLE_TAP_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(handler)); });
         self
     }
     fn on_long_press(self, handler: impl FnMut(f32, f32) + 'static) -> Self where Self: Sized {

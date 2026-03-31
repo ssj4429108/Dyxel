@@ -117,6 +117,8 @@ struct PointerState {
     arena_id: u64,
     #[allow(dead_code)]
     current_node: u32,
+    current_x: f32,
+    current_y: f32,
 }
 
 impl GestureRouter {
@@ -142,6 +144,37 @@ impl GestureRouter {
     /// Call this once per frame before processing input events
     pub fn sync(&mut self) {
         self.hit_tester.sync();
+        
+        // Check long press deadlines for all active pointers
+        // This is needed because long press triggers based on time, not just movement
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+        
+        // Collect all synthetic events first to avoid borrow issues
+        let mut all_events = Vec::new();
+        for (pointer_id, state) in &self.active_pointers {
+            let arena_id = ArenaId::new(state.arena_id);
+            // Send a synthetic Move event to trigger deadline checks
+            let synthetic_event = PointerEvent {
+                event_type: events::PointerEventType::Move,
+                pointer_id: *pointer_id,
+                timestamp_us: current_time,
+                x: state.current_x,
+                y: state.current_y,
+                pressure: 1.0,
+                target_node_id: state.current_node,
+            };
+            if let Some(events) = self.arena_manager.handle_pointer_event(arena_id, synthetic_event) {
+                all_events.extend(events);
+            }
+        }
+        
+        // Dispatch all collected events
+        if !all_events.is_empty() {
+            self.dispatch_events(all_events);
+        }
     }
 
     /// Process a raw input event
@@ -193,6 +226,7 @@ impl GestureRouter {
         let hit_result = self.hit_tester.hit_test(event.x, event.y);
         let target_node = hit_result.node_id;
 
+
         // Create or get arena for this pointer
         let arena_id = self.arena_manager.create_arena(
             event.pointer_id,
@@ -207,6 +241,8 @@ impl GestureRouter {
                 pointer_id: event.pointer_id,
                 arena_id: arena_id.as_u64(),
                 current_node: target_node,
+                current_x: event.x,
+                current_y: event.y,
             },
         );
 
@@ -217,7 +253,10 @@ impl GestureRouter {
     }
 
     fn handle_pointer_move(&mut self, event: PointerEvent) {
-        if let Some(state) = self.active_pointers.get(&event.pointer_id) {
+
+        if let Some(state) = self.active_pointers.get_mut(&event.pointer_id) {
+            state.current_x = event.x;
+            state.current_y = event.y;
             let arena_id = ArenaId::new(state.arena_id);
             if let Some(events) = self.arena_manager.handle_pointer_event(arena_id, event) {
                 self.dispatch_events(events);
@@ -247,6 +286,7 @@ impl GestureRouter {
     }
 
     fn dispatch_events(&mut self, events: Vec<GestureEvent>) {
+
         for event in events {
             (self.event_callback)(event);
         }
