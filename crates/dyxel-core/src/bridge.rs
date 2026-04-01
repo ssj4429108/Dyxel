@@ -143,6 +143,12 @@ fn ensure_gesture_router_initialized(logic: &LogicState) {
                 let shared_buffer_ptr = unsafe { 
                     mem.as_mut_ptr().add(bptr as usize) as *const dyxel_shared::SharedBuffer 
                 };
+                
+                // Set shared buffer pointer in SharedState for layout sync (Phase 2/3)
+                if let Ok(mut state) = logic.shared_state.lock() {
+                    state.set_shared_buffer_ptr(shared_buffer_ptr as *mut dyxel_shared::SharedBuffer);
+                }
+                
                 unsafe {
                     let mut tester = SpatialHitTester::new(shared_buffer_ptr);
                     tester.sync(); // Initial sync

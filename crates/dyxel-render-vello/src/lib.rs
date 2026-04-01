@@ -598,7 +598,17 @@ impl VelloBackend {
                     {
                         let node_ids: Vec<u32> = g.nodes.keys().copied().collect();
                         dyxel_shared::layout_sync::register_layout_dirty_nodes(&node_ids);
-
+                    }
+                    
+                    // Sync layout results and generations to SharedBuffer (for WASM/Guest access)
+                    // This replaces the old sync_layout_to_wasm function
+                    g.sync_to_shared_buffer();
+                    
+                    // Phase 2: Auto-expand capacity if needed (pre-expand at 80% usage)
+                    if g.should_pre_expand() {
+                        if g.auto_expand() {
+                            log::info!("Auto-expanded node capacity to {}", g.get_capacity());
+                        }
                     }
                 }
                 id

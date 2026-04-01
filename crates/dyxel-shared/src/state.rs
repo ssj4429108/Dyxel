@@ -52,6 +52,10 @@ pub struct SharedState {
     free_ids: Vec<u32>,
     /// 活跃节点映射: WASM ID -> NodeHandle
     active_handles: HashMap<u32, NodeHandle>,
+    
+    // === SharedBuffer 同步 ===
+    /// SharedBuffer 指针（用于 Render 线程同步布局结果）
+    shared_buffer_ptr: Option<*mut crate::SharedBuffer>,
 }
 
 unsafe impl Send for SharedState {}
@@ -73,6 +77,7 @@ impl SharedState {
             generations: [0; MAX_CAPACITY],
             free_ids: Vec::new(),
             active_handles: HashMap::new(),
+            shared_buffer_ptr: None,
         } 
     }
 
@@ -92,6 +97,7 @@ impl SharedState {
             self.generations = [0; MAX_CAPACITY];
             self.free_ids.clear();
             self.active_handles.clear();
+            // 注意：不清除 shared_buffer_ptr，因为缓冲区通常不变
         }
     }
     
@@ -623,17 +629,51 @@ impl SharedState {
         true
     }
     
-    /// 尝试扩容（简化版）
-    fn try_expand_capacity(&mut self) -> bool {
-        // 找到下一个容量档位
-        for &level in crate::CAPACITY_LEVELS.iter() {
-            if level > self.capacity && level <= MAX_CAPACITY {
-                self.capacity = level;
-                log::info!("Node capacity expanded to {}", level);
-                return true;
+    /// 扩容策略：预扩容（在达到80%容量时提前扩容，避免卡顿）
+    pub fn should_pre_expand(&self) -> bool {
+        let usage_ratio = self.nodes.len() as f32 / self.capacity as f32;
+        usage_ratio > 0.8 && self.capacity < MAX_CAPACITY
+    }
+    
+    /// 完整扩容逻辑（带预扩容检查）
+    pub fn expand_capacity(&mut self, new_capacity: usize) -> Result<(), NodeError> {
+        if new_capacity <= self.capacity {
+            return Err(NodeError::InvalidCapacity);
+        }
+        if new_capacity > MAX_CAPACITY {
+            return Err(NodeError::MaxCapacityExceeded);
+        }
+        
+        // 找到最接近的容量档位
+        let target_capacity = crate::CAPACITY_LEVELS
+            .iter()
+            .find(|&&level| level >= new_capacity)
+            .copied()
+            .unwrap_or(MAX_CAPACITY);
+        
+        self.capacity = target_capacity;
+        log::info!("Node capacity expanded to {}/{} (active: {})", 
+            target_capacity, MAX_CAPACITY, self.nodes.len());
+        
+        Ok(())
+    }
+    
+    /// 自动扩容（如果需要）
+    pub fn auto_expand(&mut self) -> bool {
+        if self.should_pre_expand() {
+            if let Some(&next_level) = crate::CAPACITY_LEVELS
+                .iter()
+                .find(|&&level| level > self.capacity) 
+            {
+                return self.expand_capacity(next_level).is_ok();
             }
         }
         false
+    }
+    
+    /// 尝试扩容（简化版，用于 create_node_with_handle）
+    fn try_expand_capacity(&mut self) -> bool {
+        self.auto_expand()
     }
     
     /// 获取当前容量
@@ -645,4 +685,132 @@ impl SharedState {
     pub fn get_generations(&self) -> &[u32; MAX_CAPACITY] {
         &self.generations
     }
+    
+    // === Phase 3: 延迟回收与 LRU 淘汰 ===
+    
+    /// 延迟回收队列（节点进入回收状态，延迟几帧后正式回收）
+    /// 防止异步操作访问已删除节点
+    pub fn update_recycling(&mut self) {
+        // 当前实现是立即回收，如需延迟回收可在此扩展
+        // 例如：维护一个 countdown 队列，每帧减1，到0时正式回收
+    }
+    
+    /// LRU 淘汰：当达到最大容量且需要新节点时，淘汰最久未使用的节点
+    /// 返回被回收的节点 slot（供调用者处理状态保存）
+    pub fn lru_recycle(&mut self) -> Option<u32> {
+        if self.free_ids.is_empty() && self.nodes.len() >= MAX_CAPACITY {
+            // 找到最久未使用的节点（简化：取最小编号）
+            // 实际应维护访问时间戳
+            let victim = self.nodes.keys().copied().min()?;
+            
+            // 增加代际并回收
+            self.generations[victim as usize] = self.generations[victim as usize].wrapping_add(1);
+            self.nodes.remove(&victim);
+            
+            // 清理映射
+            self.active_handles.retain(|_, h| h.slot != victim);
+            
+            log::debug!("LRU recycled node slot {}", victim);
+            Some(victim)
+        } else {
+            None
+        }
+    }
+    
+    /// 设置 SharedBuffer 指针
+    pub fn set_shared_buffer_ptr(&mut self, ptr: *mut crate::SharedBuffer) {
+        self.shared_buffer_ptr = if ptr.is_null() { None } else { Some(ptr) };
+    }
+    
+    /// 获取 SharedBuffer 指针
+    pub fn get_shared_buffer_ptr(&self) -> Option<*mut crate::SharedBuffer> {
+        self.shared_buffer_ptr
+    }
+    
+    /// 同步布局结果和代际到 SharedBuffer（供 Render 线程调用）
+    /// 使用内部存储的 shared_buffer_ptr
+    pub fn sync_to_shared_buffer(&self) {
+        if let Some(ptr) = self.shared_buffer_ptr {
+            unsafe {
+                self.sync_to_shared_buffer_raw(ptr);
+            }
+        }
+    }
+    
+    /// 同步布局结果和代际到 SharedBuffer（原始指针版本）
+    /// 
+    /// # Safety
+    /// 调用者必须确保 shared_buffer_ptr 有效
+    pub unsafe fn sync_to_shared_buffer_raw(&self, shared_buffer_ptr: *mut crate::SharedBuffer) {
+        if shared_buffer_ptr.is_null() {
+            return;
+        }
+        
+        let buffer = &mut *shared_buffer_ptr;
+        
+        // 同步容量
+        buffer.capacity = self.capacity as u32;
+        buffer.max_node_id = self.next_host_id;
+        
+        // 同步代际数组
+        buffer.generations.copy_from_slice(&self.generations);
+        
+        // 同步布局结果（从 Taffy）
+        for (slot, node) in &self.nodes {
+            let slot_idx = *slot as usize;
+            if slot_idx < MAX_CAPACITY {
+                if let Ok(layout) = self.taffy.layout(node.taffy_node) {
+                    buffer.layout_results[slot_idx] = crate::LayoutResult {
+                        x: layout.location.x,
+                        y: layout.location.y,
+                        width: layout.size.width,
+                        height: layout.size.height,
+                    };
+                }
+            }
+        }
+    }
+    
+    /// 获取节点统计信息
+    pub fn get_stats(&self) -> NodeStats {
+        NodeStats {
+            capacity: self.capacity,
+            active_count: self.nodes.len(),
+            free_count: self.free_ids.len(),
+            total_created: self.next_host_id as u64,
+            total_recycled: self.generations.iter()
+                .filter(|&&g| g > 0)
+                .count() as u64,
+            expansion_count: self.get_expansion_count(),
+        }
+    }
+    
+    fn get_expansion_count(&self) -> u32 {
+        crate::CAPACITY_LEVELS
+            .iter()
+            .position(|&level| level >= self.capacity)
+            .map(|pos| pos as u32)
+            .unwrap_or(0)
+    }
+}
+
+/// 节点错误类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeError {
+    CapacityExceeded,
+    MaxCapacityExceeded,
+    InvalidCapacity,
+    StaleHandle,
+    NodeNotFound,
+}
+
+/// 节点统计信息
+#[derive(Debug, Clone, Copy)]
+pub struct NodeStats {
+    pub capacity: usize,
+    pub active_count: usize,
+    pub free_count: usize,
+    pub total_created: u64,
+    pub total_recycled: u64,
+    pub expansion_count: u32,
 }
