@@ -20,6 +20,7 @@ use crate::{
     recognizer::{GestureRecognizer, RecognizerState},
     GestureSettings,
     GestureConfig,
+    GestureType,
     TapGestureRecognizer,
     LongPressGestureRecognizer,
     PanGestureRecognizer,
@@ -89,7 +90,6 @@ impl GestureArena {
     /// Returns the member ID. Only allowed while arena is open.
     pub fn add_recognizer(&mut self, recognizer: Box<dyn GestureRecognizer>) -> u32 {
         if !self.is_open {
-            log::warn!("Cannot add recognizer to closed arena {:?}", self.id);
             return 0;
         }
 
@@ -118,8 +118,6 @@ impl GestureArena {
     pub fn handle_event(&mut self, event: PointerEvent) -> Vec<GestureEvent> {
         let mut all_events = Vec::new();
         
-
-
         // Track pointer data
         match event.event_type {
             PointerEventType::Down => {
@@ -132,7 +130,8 @@ impl GestureArena {
                 }
             }
             PointerEventType::Up | PointerEventType::Cancel => {
-                self.tracked_pointers.remove(&event.pointer_id);
+                // Don't remove from tracked_pointers yet - recognizers may need it
+                // We'll clear it after processing
             }
         }
 
@@ -144,13 +143,13 @@ impl GestureArena {
         for (_idx, member) in &mut self.members.iter_mut().enumerate() {
             // Skip rejected members
             if member.rejected {
-
                 continue;
             }
             
             // For accepted members, only send Move events (for Pan/Drag continuation)
-            if member.accepted && !matches!(event.event_type, PointerEventType::Move) {
-
+            // But allow Up/Cancel events for gestures that need them (e.g., LongPress)
+            if member.accepted && !matches!(event.event_type, 
+                PointerEventType::Move | PointerEventType::Up | PointerEventType::Cancel) {
                 continue;
             }
 
@@ -206,6 +205,11 @@ impl GestureArena {
             });
         }
 
+        // Clean up tracked_pointers for Up/Cancel events after processing
+        if matches!(event.event_type, PointerEventType::Up | PointerEventType::Cancel) {
+            self.tracked_pointers.remove(&event.pointer_id);
+        }
+
         all_events
     }
 
@@ -229,11 +233,6 @@ impl GestureArena {
             }
         }
 
-        log::debug!(
-            "Arena {:?} winner declared: node {}",
-            self.id,
-            winner_node_id
-        );
     }
 
     /// Sweep the arena to select a winner
@@ -247,12 +246,20 @@ impl GestureArena {
 
         // Find the most eager recognizer (one that has made most progress)
         // Priority: Pan > LongPress > Tap
+        // Skip recognizers that are waiting for multi-tap (e.g., DoubleTap after first tap)
         let mut best_candidate: Option<u32> = None;
         let mut best_priority = 0;
 
         for member in &self.members {
             if member.rejected {
                 continue;
+            }
+
+            // Skip tap recognizers waiting for multi-tap
+            if let Some(tap_recognizer) = member.recognizer.as_any().downcast_ref::<TapGestureRecognizer>() {
+                if tap_recognizer.is_waiting_for_multi_tap() {
+                    continue;
+                }
             }
 
             let priority = match member.recognizer.state() {
@@ -274,10 +281,28 @@ impl GestureArena {
         if let Some(winner) = best_candidate {
             self.declare_winner(winner);
         } else {
-            // No viable candidate, reject all
-            for member in &mut self.members {
-                member.rejected = true;
-                member.recognizer.reject();
+            // No viable candidate found
+            // Check if all remaining candidates are waiting for multi-tap
+            // If so, don't reject them - just leave arena open for next tap
+            let all_waiting_for_multi_tap = self.members.iter().all(|m| {
+                if m.rejected {
+                    return true; // Already rejected, consider as "not blocking"
+                }
+                if let Some(tap) = m.recognizer.as_any().downcast_ref::<TapGestureRecognizer>() {
+                    tap.is_waiting_for_multi_tap()
+                } else {
+                    false
+                }
+            });
+            
+            if !all_waiting_for_multi_tap {
+                // No viable candidate and not all waiting for multi-tap, reject all
+                for member in &mut self.members {
+                    if !member.rejected {
+                        member.rejected = true;
+                        member.recognizer.reject();
+                    }
+                }
             }
         }
     }
@@ -309,105 +334,118 @@ impl GestureArena {
     pub fn pointer_id(&self) -> u32 {
         self.pointer_id
     }
-    
+
+    pub fn target_node_id(&self) -> u32 {
+        self.target_node_id
+    }
+
+    /// Check if any member recognizer is waiting for multi-tap
+    /// This is used to determine if the arena should be kept in delayed state
+    pub fn is_waiting_for_multi_tap(&self) -> bool {
+        self.members.iter().any(|member| {
+            // Check if this is a tap recognizer waiting for more taps
+            if let Some(tap_recognizer) = member.recognizer.as_any().downcast_ref::<TapGestureRecognizer>() {
+                tap_recognizer.is_waiting_for_multi_tap()
+            } else {
+                false
+            }
+        })
+    }
 }
 
 /// Manages multiple gesture arenas
 /// 
-/// One arena per active pointer
+/// One arena per active pointer. Supports delayed arena reuse for multi-tap gestures.
 pub struct GestureArenaManager {
     /// Active arenas by ID
     arenas: HashMap<ArenaId, GestureArena>,
     /// Map from pointer ID to arena ID
     pointer_to_arena: HashMap<u32, ArenaId>,
+    /// Delayed arenas waiting for multi-tap, keyed by (pointer_id, node_id)
+    /// These arenas are kept alive after pointer up to allow double/triple tap detection
+    delayed_arenas: HashMap<(u32, u32), (ArenaId, std::time::Instant)>,
     /// Next arena ID
     next_arena_id: u64,
-    /// Default recognizers to add to each arena
-    default_recognizers: Vec<DefaultRecognizerConfig>,
-}
-
-#[derive(Clone)]
-struct DefaultRecognizerConfig {
-    recognizer_type: DefaultRecognizerType,
-    max_taps: u32, // For tap recognizer
-}
-
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-enum DefaultRecognizerType {
-    Tap,
-    DoubleTap,
-    TripleTap,
-    LongPress,
-    Pan,
 }
 
 impl GestureArenaManager {
     pub fn new() -> Self {
-        let mut manager = Self {
+        Self {
             arenas: HashMap::new(),
             pointer_to_arena: HashMap::new(),
+            delayed_arenas: HashMap::new(),
             next_arena_id: 1,
-            default_recognizers: Vec::new(),
-        };
-
-        // Add default recognizers
-        manager.default_recognizers.push(DefaultRecognizerConfig {
-            recognizer_type: DefaultRecognizerType::Tap,
-            max_taps: 1,
-        });
-        manager.default_recognizers.push(DefaultRecognizerConfig {
-            recognizer_type: DefaultRecognizerType::DoubleTap,
-            max_taps: 2,
-        });
-        manager.default_recognizers.push(DefaultRecognizerConfig {
-            recognizer_type: DefaultRecognizerType::LongPress,
-            max_taps: 0,
-        });
-        manager.default_recognizers.push(DefaultRecognizerConfig {
-            recognizer_type: DefaultRecognizerType::Pan,
-            max_taps: 0,
-        });
-
-        manager
+        }
     }
 
-    /// Create a new arena for a pointer
+    /// Clean up expired delayed arenas
+    fn cleanup_expired_delayed_arenas(&mut self, timeout_ms: u64) {
+        let now = std::time::Instant::now();
+        let expired: Vec<_> = self
+            .delayed_arenas
+            .iter()
+            .filter(|(_, (_, created_at))| {
+                now.duration_since(*created_at).as_millis() as u64 > timeout_ms
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        
+        for key in expired {
+            if let Some((arena_id, _)) = self.delayed_arenas.remove(&key) {
+                self.arenas.remove(&arena_id);
+            }
+        }
+    }
+
+    /// Create a new arena for a pointer with specific gesture types
     /// 
-    /// Returns the arena ID
+    /// Only creates recognizers for the specified gesture types.
+    /// If gesture_types is empty, no recognizers will be created.
+    /// 
+    /// For multi-tap gestures, this may reuse a delayed arena from a previous tap.
     pub fn create_arena(
         &mut self,
         pointer_id: u32,
         target_node_id: u32,
         settings: GestureSettings,
+        gesture_types: &[GestureType],
     ) -> ArenaId {
+        // Clean up expired delayed arenas first
+        self.cleanup_expired_delayed_arenas(settings.double_tap_timeout_ms + 100);
+
+        // Check if there's a delayed arena for this (pointer_id, node_id) that we can reuse
+        let delayed_key = (pointer_id, target_node_id);
+        if let Some((arena_id, _)) = self.delayed_arenas.remove(&delayed_key) {
+            if self.arenas.contains_key(&arena_id) {
+                // Reactivate the arena
+                self.pointer_to_arena.insert(pointer_id, arena_id);
+                return arena_id;
+            }
+        }
+
         let arena_id = ArenaId::new(self.next_arena_id);
         self.next_arena_id += 1;
 
-
         let mut arena = GestureArena::new(arena_id, pointer_id, target_node_id);
 
-        // Add default recognizers
-        for config in &self.default_recognizers {
+        // Add recognizers only for the specified gesture types
+        for gesture_type in gesture_types {
             let gesture_config = GestureConfig {
                 settings,
                 target_node_id,
             };
 
-            let recognizer: Box<dyn GestureRecognizer> = match config.recognizer_type {
-                DefaultRecognizerType::Tap => {
-                    Box::new(TapGestureRecognizer::new(gesture_config, config.max_taps))
+            let recognizer: Box<dyn GestureRecognizer> = match gesture_type {
+                GestureType::Tap => {
+                    Box::new(TapGestureRecognizer::new(gesture_config, 1))
                 }
-                DefaultRecognizerType::DoubleTap => {
+                GestureType::DoubleTap => {
                     Box::new(TapGestureRecognizer::new(gesture_config, 2))
                 }
-                DefaultRecognizerType::TripleTap => {
-                    Box::new(TapGestureRecognizer::new(gesture_config, 3))
-                }
-                DefaultRecognizerType::LongPress => {
+                GestureType::LongPress => {
                     Box::new(LongPressGestureRecognizer::new(gesture_config))
                 }
-                DefaultRecognizerType::Pan => {
+                GestureType::Pan => {
                     Box::new(PanGestureRecognizer::new(gesture_config))
                 }
             };
@@ -415,8 +453,10 @@ impl GestureArenaManager {
             arena.add_recognizer(recognizer);
         }
 
-        // Close arena after adding defaults
-        arena.close();
+        // Close arena after adding recognizers
+        if !gesture_types.is_empty() {
+            arena.close();
+        }
 
         self.arenas.insert(arena_id, arena);
         self.pointer_to_arena.insert(pointer_id, arena_id);
@@ -435,12 +475,20 @@ impl GestureArenaManager {
         if let Some(arena) = self.arenas.get_mut(&arena_id) {
             let events = arena.handle_event(event);
             
-            // Clean up if arena is resolved and pointer is up/cancel
-            // For pan gestures, we need to keep arena alive until pointer up
-            let should_close = arena.is_resolved() && 
-                matches!(event.event_type, PointerEventType::Up | PointerEventType::Cancel);
-            if should_close {
-                self.close_arena(arena_id);
+            // After pointer up, check if arena should be closed or moved to delayed state
+            if matches!(event.event_type, PointerEventType::Up | PointerEventType::Cancel) {
+                // Check if any recognizer is waiting for multi-tap
+                let is_waiting_for_multi_tap = arena.is_waiting_for_multi_tap();
+                
+                if is_waiting_for_multi_tap && matches!(event.event_type, PointerEventType::Up) {
+                    // Move arena to delayed state for potential multi-tap continuation
+                    let key = (arena.pointer_id, arena.target_node_id);
+                    self.delayed_arenas.insert(key, (arena_id, std::time::Instant::now()));
+                    self.pointer_to_arena.remove(&arena.pointer_id);
+                } else if arena.is_resolved() {
+                    // No multi-tap pending and arena resolved, close the arena
+                    self.close_arena(arena_id);
+                }
             }
             
             Some(events)
@@ -503,8 +551,9 @@ mod tests {
     fn test_arena_creation() {
         let mut manager = GestureArenaManager::new();
         let settings = GestureSettings::default();
+        let gestures = vec![GestureType::Tap];
         
-        let arena_id = manager.create_arena(0, 1, settings);
+        let arena_id = manager.create_arena(0, 1, settings, &gestures);
         
         assert_eq!(manager.get_arena_for_pointer(0), Some(arena_id));
     }
@@ -513,8 +562,9 @@ mod tests {
     fn test_tap_wins_over_long_press() {
         let mut manager = GestureArenaManager::new();
         let settings = GestureSettings::default();
+        let gestures = vec![GestureType::Tap, GestureType::LongPress];
         
-        let arena_id = manager.create_arena(0, 1, settings);
+        let arena_id = manager.create_arena(0, 1, settings, &gestures);
         
         // Quick tap (before long press timeout)
         let down = create_pointer_event(PointerEventType::Down, 100.0, 100.0, 0);
@@ -534,8 +584,9 @@ mod tests {
     fn test_pan_wins_with_movement() {
         let mut manager = GestureArenaManager::new();
         let settings = GestureSettings::default();
+        let gestures = vec![GestureType::Tap, GestureType::Pan];
         
-        let arena_id = manager.create_arena(0, 1, settings);
+        let arena_id = manager.create_arena(0, 1, settings, &gestures);
         
         // Down
         let down = create_pointer_event(PointerEventType::Down, 100.0, 100.0, 0);
@@ -553,8 +604,9 @@ mod tests {
     fn test_arena_cleanup() {
         let mut manager = GestureArenaManager::new();
         let settings = GestureSettings::default();
+        let gestures = vec![GestureType::Tap];
         
-        let arena_id = manager.create_arena(0, 1, settings);
+        let arena_id = manager.create_arena(0, 1, settings, &gestures);
         
         // Complete gesture
         let down = create_pointer_event(PointerEventType::Down, 100.0, 100.0, 0);

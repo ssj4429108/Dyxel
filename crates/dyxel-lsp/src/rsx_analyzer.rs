@@ -62,7 +62,8 @@ fn utf16_to_char_idx(s: &str, utf16_pos: usize) -> usize {
     char_idx
 }
 
-/// 将字符索引转换为 UTF-16 偏移  
+/// 将字符索引转换为 UTF-16 偏移
+#[allow(dead_code)]
 fn char_to_utf16_idx(s: &str, char_pos: usize) -> usize {
     let mut utf16_count = 0;
     for (i, c) in s.chars().enumerate() {
@@ -524,7 +525,7 @@ impl RsxAnalyzer {
         let mut items = Vec::new();
         
         // 获取当前正在输入的词
-        let current_word = self.documents.get(uri)
+        let _current_word = self.documents.get(uri)
             .and_then(|doc| self.get_word_at_position(&doc.text, position));
         
         // 检查是否在 {} 插值上下文中

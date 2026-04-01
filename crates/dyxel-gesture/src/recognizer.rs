@@ -76,6 +76,10 @@ pub trait GestureRecognizer: Send {
     /// 
     /// Called by the arena to determine which recognizers are competing
     fn is_eligible(&self) -> bool;
+
+    /// Convert to Any for downcasting
+    /// This allows the arena to check for specific recognizer types
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 // =============== Tap Gesture Recognizer ===============
@@ -137,9 +141,15 @@ impl TapGestureRecognizer {
         (dx * dx + dy * dy).sqrt() <= self.config.settings.double_tap_slop
     }
 
-    fn is_within_double_tap_time(&self, current_time_us: u64) -> bool {
-        let elapsed_ms = (current_time_us - self.last_tap_time_us) / 1000;
-        elapsed_ms <= self.config.settings.double_tap_timeout_ms
+    /// Check if this recognizer is waiting for more taps to complete a multi-tap gesture
+    /// Returns true if we've started tapping but haven't reached max_taps yet
+    pub fn is_waiting_for_multi_tap(&self) -> bool {
+        self.tap_count > 0 && self.tap_count < self.max_taps
+    }
+    
+    /// Get current tap count (for debugging)
+    pub fn tap_count(&self) -> u32 {
+        self.tap_count
     }
 }
 
@@ -155,9 +165,11 @@ impl GestureRecognizer for TapGestureRecognizer {
             PointerEventType::Down => {
                 // Check if this could be a continuation of multi-tap
                 if self.tap_count > 0 {
-                    if !self.is_within_double_tap_time(event.timestamp_us)
-                        || !self.is_within_double_tap_slop(event.x, event.y)
-                    {
+                    let elapsed_ms = (event.timestamp_us - self.last_tap_time_us) / 1000;
+                    let timeout_ms = self.config.settings.double_tap_timeout_ms;
+                    let within_time = elapsed_ms <= timeout_ms;
+                    let within_slop = self.is_within_double_tap_slop(event.x, event.y);
+                    if !within_time || !within_slop {
                         // Too slow or too far - this is a new tap sequence
                         self.tap_count = 0;
                     }
@@ -175,7 +187,8 @@ impl GestureRecognizer for TapGestureRecognizer {
                         // Check if moved too far for a tap
                         if !self.is_within_tap_slop(&updated) {
                             self.state = RecognizerState::Rejected;
-                            self.reset();
+                            self.tracked_pointer = None; // Clear tracking
+                            return events; // Early return
                         }
 
                         self.tracked_pointer = Some(updated);
@@ -209,6 +222,7 @@ impl GestureRecognizer for TapGestureRecognizer {
                                         event.pointer_id,
                                         event.x,
                                         event.y,
+                                        1,
                                         event.timestamp_us,
                                     ),
                                     2 => GestureEvent::double_tap(
@@ -223,10 +237,12 @@ impl GestureRecognizer for TapGestureRecognizer {
                                         event.pointer_id,
                                         event.x,
                                         event.y,
+                                        self.max_taps,
                                         event.timestamp_us,
                                     ),
                                 };
                                 
+                                log::info!("Tap Up: generating event for max_taps={}", self.max_taps);
                                 events.push(gesture_event);
                                 self.reset();
                             } else {
@@ -288,6 +304,10 @@ impl GestureRecognizer for TapGestureRecognizer {
     fn is_eligible(&self) -> bool {
         matches!(self.state, RecognizerState::Possible | RecognizerState::Began)
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 // =============== Long Press Gesture Recognizer ===============
@@ -297,8 +317,10 @@ pub struct LongPressGestureRecognizer {
     config: GestureConfig,
     state: RecognizerState,
     tracked_pointer: Option<PointerData>,
-    /// Whether long press has triggered
+    /// Whether long press has triggered (already sent start event)
     has_triggered: bool,
+    /// Whether the deadline has been met (long press is "ready" to trigger on pointer up)
+    deadline_met: bool,
     /// Timeout deadline (for checking in handle_event)
     deadline_us: u64,
 }
@@ -310,6 +332,7 @@ impl LongPressGestureRecognizer {
             state: RecognizerState::Possible,
             tracked_pointer: None,
             has_triggered: false,
+            deadline_met: false,
             deadline_us: 0,
         }
     }
@@ -318,6 +341,7 @@ impl LongPressGestureRecognizer {
         self.state = RecognizerState::Possible;
         self.tracked_pointer = None;
         self.has_triggered = false;
+        self.deadline_met = false;
         self.deadline_us = 0;
     }
 
@@ -325,26 +349,47 @@ impl LongPressGestureRecognizer {
         pointer.distance_from_start() <= self.config.settings.long_press_slop
     }
 
-    fn check_deadline(&mut self, current_time_us: u64) -> Option<GestureEvent> {
-        if self.has_triggered || self.deadline_us == 0 {
-            return None;
+    /// Check if deadline has been met. This does NOT trigger the gesture - it only
+    /// sets the `deadline_met` flag. The gesture should only trigger on pointer up.
+    fn check_deadline(&mut self, current_time_us: u64) {
+        if self.deadline_met || self.deadline_us == 0 {
+            return;
         }
 
         if current_time_us >= self.deadline_us {
             if let Some(ref pointer) = self.tracked_pointer {
                 if self.is_within_slop(pointer) {
-                    self.has_triggered = true;
+                    // Mark deadline as met, but don't trigger yet
+                    // Wait for pointer up to actually trigger
+                    self.deadline_met = true;
                     self.state = RecognizerState::Changed;
-                    
-                    return Some(GestureEvent::long_press_start(
-                        self.config.target_node_id,
-                        pointer.pointer_id,
-                        pointer.current_x,
-                        pointer.current_y,
-                        current_time_us,
-                    ));
                 }
             }
+        }
+    }
+
+    /// Check if this recognizer is ready to trigger (deadline met but not yet triggered)
+    pub fn is_ready_to_trigger(&self) -> bool {
+        self.deadline_met && !self.has_triggered
+    }
+
+    /// Trigger the long press gesture. Should be called on pointer up when deadline_met is true.
+    fn trigger(&mut self, timestamp_us: u64) -> Option<GestureEvent> {
+        if !self.deadline_met || self.has_triggered {
+            return None;
+        }
+
+        if let Some(ref pointer) = self.tracked_pointer {
+            self.has_triggered = true;
+            self.state = RecognizerState::Accepted;
+            
+            return Some(GestureEvent::long_press_start(
+                self.config.target_node_id,
+                pointer.pointer_id,
+                pointer.current_x,
+                pointer.current_y,
+                timestamp_us,
+            ));
         }
         None
     }
@@ -367,53 +412,50 @@ impl GestureRecognizer for LongPressGestureRecognizer {
             }
             PointerEventType::Move => {
                 let slop = self.config.settings.long_press_slop;
-                let mut should_reject = false;
-                let mut should_check_deadline = false;
+                let mut distance = 0.0;
                 
                 if let Some(ref mut pointer) = self.tracked_pointer {
                     if pointer.pointer_id == event.pointer_id {
                         pointer.update(event);
-
-                        // Check if moved too far
-                        if pointer.distance_from_start() > slop {
-                            should_reject = true;
-                        } else {
-                            should_check_deadline = true;
-                        }
+                        distance = pointer.distance_from_start();
                     }
                 }
                 
-                if should_reject {
-                    if self.has_triggered {
-                        if let Some(ref pointer) = self.tracked_pointer {
-                            // Send long press end if was active
-                            events.push(GestureEvent::long_press_end(
-                                self.config.target_node_id,
-                                pointer.pointer_id,
-                                pointer.current_x,
-                                pointer.current_y,
-                                event.timestamp_us,
-                            ));
-                        }
-                    }
+                // Once deadline is met, we don't reject due to movement
+                // LongPress triggers on up if deadline was met at any point
+                if !self.deadline_met && distance > slop {
                     self.state = RecognizerState::Rejected;
                     self.reset();
-                } else if should_check_deadline {
-                    if let Some(event) = self.check_deadline(event.timestamp_us) {
-                        events.push(event);
-                    }
+                } else {
+                    // Check deadline on move events (updates deadline_met flag)
+                    self.check_deadline(event.timestamp_us);
                 }
             }
             PointerEventType::Up => {
                 if let Some(ref pointer) = self.tracked_pointer {
                     if pointer.pointer_id == event.pointer_id {
+                        // Copy data we need before calling self methods
+                        let pointer_id = pointer.pointer_id;
+                        let current_x = pointer.current_x;
+                        let current_y = pointer.current_y;
+                        
+                        // Check deadline first (in case no move events came)
+                        self.check_deadline(event.timestamp_us);
+                        
+                        if self.deadline_met && !self.has_triggered {
+                            // Trigger long press on pointer up
+                            if let Some(start_event) = self.trigger(event.timestamp_us) {
+                                events.push(start_event);
+                            }
+                        }
+                        
                         if self.has_triggered {
-                            // Send long press end
+                            // Send long press end immediately after start
                             events.push(GestureEvent::long_press_end(
                                 self.config.target_node_id,
-                                pointer.pointer_id,
-                                pointer.current_x,
-                                pointer.current_y,
+                                pointer_id,
+                                current_x,
+                                current_y,
                                 event.timestamp_us,
                             ));
                         }
@@ -439,11 +481,7 @@ impl GestureRecognizer for LongPressGestureRecognizer {
             }
         }
 
-        // Check deadline on every event (in case no move events come in time)
-        if let Some(event) = self.check_deadline(event.timestamp_us) {
-            events.push(event);
-        }
-
+        // Note: We don't check deadline here anymore - LongPress only triggers on pointer up
         events
     }
 
@@ -484,6 +522,10 @@ impl GestureRecognizer for LongPressGestureRecognizer {
 
     fn is_eligible(&self) -> bool {
         matches!(self.state, RecognizerState::Possible | RecognizerState::Began)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -689,6 +731,10 @@ impl GestureRecognizer for PanGestureRecognizer {
     fn is_eligible(&self) -> bool {
         matches!(self.state, RecognizerState::Possible | RecognizerState::Began)
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -767,17 +813,18 @@ mod tests {
         let events = recognizer.handle_event(&down, &empty_pointers);
         assert!(events.is_empty());
 
-        // Wait for timeout (500ms = 500000us)
+        // Wait for timeout (500ms = 500000us) - but no event should fire yet
+        // Long press now triggers on pointer up, not on timeout
         let timeout = create_pointer_event(PointerEventType::Move, 100.0, 100.0, 600_000);
         let events = recognizer.handle_event(&timeout, &empty_pointers);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0].event_type, crate::events::GestureEventType::LongPressStart));
+        assert!(events.is_empty()); // No event on timeout
 
-        // Up
+        // Up - now triggers both LongPressStart and LongPressEnd
         let up = create_pointer_event(PointerEventType::Up, 100.0, 100.0, 700_000);
         let events = recognizer.handle_event(&up, &empty_pointers);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0].event_type, crate::events::GestureEventType::LongPressEnd));
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].event_type, crate::events::GestureEventType::LongPressStart));
+        assert!(matches!(events[1].event_type, crate::events::GestureEventType::LongPressEnd));
     }
 
     #[test]

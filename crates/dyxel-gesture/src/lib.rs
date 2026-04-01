@@ -7,9 +7,7 @@
 //! 
 //! ## Architecture
 //! 
-//! ```
 //! Raw Touch Events → GestureArena → GestureRecognizers → GestureEvents → WASM
-//! ```
 //! 
 //! ## Key Concepts
 //! 
@@ -32,7 +30,20 @@ mod events;
 mod hit_test;
 mod spatial_hit_tester;
 
-pub use arena::{GestureArena, GestureArenaManager, ArenaId};
+pub use arena::{
+    GestureArena, 
+    GestureArenaManager, 
+    ArenaId, 
+};
+
+/// Gesture types supported by the system
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureType {
+    Tap,
+    DoubleTap,
+    LongPress,
+    Pan,
+}
 pub use recognizer::{
     GestureRecognizer, 
     RecognizerState,
@@ -97,6 +108,14 @@ impl Default for GestureSettings {
 /// 
 /// This is the primary interface that the Host layer uses to
 /// route touch events through the gesture system.
+/// Provider for node gesture configuration
+/// 
+/// Returns the list of gesture types that a node supports.
+/// This is used to determine which recognizers to create for a node.
+pub trait GestureProvider: Send {
+    fn get_node_gestures(&self, node_id: u32) -> Vec<GestureType>;
+}
+
 pub struct GestureRouter {
     /// Global gesture settings
     settings: GestureSettings,
@@ -104,6 +123,8 @@ pub struct GestureRouter {
     arena_manager: GestureArenaManager,
     /// Hit tester for finding target nodes
     hit_tester: Box<dyn HitTester>,
+    /// Gesture provider for querying node configuration
+    gesture_provider: Box<dyn GestureProvider>,
     /// Active pointers and their current arena
     active_pointers: HashMap<u32, PointerState>,
     /// Gesture event callback
@@ -125,6 +146,7 @@ impl GestureRouter {
     pub fn new<F>(
         settings: GestureSettings,
         hit_tester: Box<dyn HitTester>,
+        gesture_provider: Box<dyn GestureProvider>,
         event_callback: F,
     ) -> Self 
     where
@@ -134,6 +156,7 @@ impl GestureRouter {
             settings,
             arena_manager: GestureArenaManager::new(),
             hit_tester,
+            gesture_provider,
             active_pointers: HashMap::new(),
             event_callback: Box::new(event_callback),
         }
@@ -145,36 +168,9 @@ impl GestureRouter {
     pub fn sync(&mut self) {
         self.hit_tester.sync();
         
-        // Check long press deadlines for all active pointers
-        // This is needed because long press triggers based on time, not just movement
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as u64;
-        
-        // Collect all synthetic events first to avoid borrow issues
-        let mut all_events = Vec::new();
-        for (pointer_id, state) in &self.active_pointers {
-            let arena_id = ArenaId::new(state.arena_id);
-            // Send a synthetic Move event to trigger deadline checks
-            let synthetic_event = PointerEvent {
-                event_type: events::PointerEventType::Move,
-                pointer_id: *pointer_id,
-                timestamp_us: current_time,
-                x: state.current_x,
-                y: state.current_y,
-                pressure: 1.0,
-                target_node_id: state.current_node,
-            };
-            if let Some(events) = self.arena_manager.handle_pointer_event(arena_id, synthetic_event) {
-                all_events.extend(events);
-            }
-        }
-        
-        // Dispatch all collected events
-        if !all_events.is_empty() {
-            self.dispatch_events(all_events);
-        }
+        // Note: LongPress now triggers on pointer up, not on timeout
+        // So we don't need to send synthetic events for deadline checking
+        // The deadline_met flag will be checked on the next Move or Up event
     }
 
     /// Process a raw input event
@@ -226,12 +222,19 @@ impl GestureRouter {
         let hit_result = self.hit_tester.hit_test(event.x, event.y);
         let target_node = hit_result.node_id;
 
+        // Get gesture types supported by this node
+        let gesture_types = self.gesture_provider.get_node_gestures(target_node);
+        
+        if gesture_types.is_empty() {
+            return;
+        }
 
-        // Create or get arena for this pointer
+        // Create or get arena for this pointer with specific gesture types
         let arena_id = self.arena_manager.create_arena(
             event.pointer_id,
             target_node,
             self.settings,
+            &gesture_types,
         );
 
         // Track pointer state
@@ -253,7 +256,6 @@ impl GestureRouter {
     }
 
     fn handle_pointer_move(&mut self, event: PointerEvent) {
-
         if let Some(state) = self.active_pointers.get_mut(&event.pointer_id) {
             state.current_x = event.x;
             state.current_y = event.y;
@@ -270,8 +272,9 @@ impl GestureRouter {
             if let Some(events) = self.arena_manager.handle_pointer_event(arena_id, event) {
                 self.dispatch_events(events);
             }
-            // Clean up arena after pointer up
-            self.arena_manager.close_arena(arena_id);
+            // Note: arena is NOT closed here - it may be in Delayed state for multi-tap
+            // The arena will be cleaned up by handle_pointer_event when it resolves
+            // or when a new gesture starts
         }
     }
 
@@ -286,7 +289,6 @@ impl GestureRouter {
     }
 
     fn dispatch_events(&mut self, events: Vec<GestureEvent>) {
-
         for event in events {
             (self.event_callback)(event);
         }
@@ -298,12 +300,25 @@ impl GestureRouter {
     }
 }
 
+/// Mock gesture provider for testing
+#[cfg(test)]
+struct TestGestureProvider;
+
+#[cfg(test)]
+impl GestureProvider for TestGestureProvider {
+    fn get_node_gestures(&self, _node_id: u32) -> Vec<GestureType> {
+        vec![GestureType::Tap]
+    }
+}
+
 /// Create a default gesture router with no-op callback (for testing)
+#[cfg(test)]
 impl Default for GestureRouter {
     fn default() -> Self {
         Self::new(
             GestureSettings::default(),
             Box::new(hit_test::NoOpHitTester),
+            Box::new(TestGestureProvider),
             |_| {},
         )
     }
@@ -320,12 +335,22 @@ mod tests {
         assert_eq!(settings.tap_slop, 18.0);
     }
 
+    /// Mock gesture provider for testing
+    struct MockGestureProvider;
+    
+    impl GestureProvider for MockGestureProvider {
+        fn get_node_gestures(&self, _node_id: u32) -> Vec<GestureType> {
+            vec![GestureType::Tap]
+        }
+    }
+
     #[test]
     fn test_pointer_event_conversion() {
         let settings = GestureSettings::default();
         let router = GestureRouter::new(
             settings,
             Box::new(hit_test::NoOpHitTester),
+            Box::new(MockGestureProvider),
             |_| {},
         );
 
