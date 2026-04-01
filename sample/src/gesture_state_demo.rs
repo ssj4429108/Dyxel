@@ -129,7 +129,7 @@ pub fn GestureStateDemo() -> impl BaseView {
 
                 // Pan Counter Card
                 View {
-                    width: 100.0,
+                    width: 60.0,
                     height: 80.0,
                     color: (60, 200, 120),
                     borderRadius: 12.0,

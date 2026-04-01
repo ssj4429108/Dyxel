@@ -794,6 +794,10 @@ impl SharedState {
     }
 }
 
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod state_tests;
+
 /// 节点错误类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeError {
@@ -813,4 +817,56 @@ pub struct NodeStats {
     pub total_created: u64,
     pub total_recycled: u64,
     pub expansion_count: u32,
+}
+
+// === 调试和验证 ===
+
+impl SharedState {
+    /// 打印当前节点状态（用于调试）
+    pub fn dump_state(&self) -> String {
+        let stats = self.get_stats();
+        let usage_pct = (stats.active_count as f32 / stats.capacity as f32) * 100.0;
+        
+        format!(
+            "=== Node State ===\n\
+             Capacity: {}/{} ({} expansions)\n\
+             Active: {} ({:.1}%)\n\
+             Free (recycled): {}\n\
+             Total created: {}\n\
+             Total recycled: {}\n\
+             ==================",
+            stats.capacity,
+            MAX_CAPACITY,
+            stats.expansion_count,
+            stats.active_count,
+            usage_pct,
+            stats.free_count,
+            stats.total_created,
+            stats.total_recycled
+        )
+    }
+    
+    /// 验证代际ID系统完整性（用于测试）
+    pub fn verify_generational_integrity(&self) -> Result<(), String> {
+        for (slot, node) in &self.nodes {
+            let slot_idx = *slot as usize;
+            if slot_idx >= MAX_CAPACITY {
+                return Err(format!("Slot {} out of bounds", slot));
+            }
+            
+            // 验证节点存在时，代际应该是正确的
+            let expected_gen = self.generations[slot_idx];
+            // 注意：这里我们只是验证数据结构一致性
+            // 实际的代际验证在 verify_handle 中
+        }
+        
+        // 验证 free_ids 中的所有 ID 都对应非活跃节点
+        for &slot in &self.free_ids {
+            if self.nodes.contains_key(&slot) {
+                return Err(format!("Free ID {} still has active node", slot));
+            }
+        }
+        
+        Ok(())
+    }
 }

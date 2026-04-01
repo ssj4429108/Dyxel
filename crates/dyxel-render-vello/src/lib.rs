@@ -610,6 +610,25 @@ impl VelloBackend {
                             log::info!("Auto-expanded node capacity to {}", g.get_capacity());
                         }
                     }
+                    
+                    // 每 300 帧（约 5 秒 @ 60fps）输出一次节点统计
+                    #[cfg(target_os = "android")]
+                    {
+                        static mut FRAME_COUNTER: u32 = 0;
+                        unsafe {
+                            FRAME_COUNTER += 1;
+                            if FRAME_COUNTER % 300 == 0 {
+                                let stats = g.get_stats();
+                                log::info!(
+                                    "[NodeStats] capacity={} active={} free={} usage={:.1}%", 
+                                    stats.capacity,
+                                    stats.active_count,
+                                    stats.free_count,
+                                    (stats.active_count as f32 / stats.capacity as f32) * 100.0
+                                );
+                            }
+                        }
+                    }
                 }
                 id
             });
