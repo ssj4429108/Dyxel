@@ -756,16 +756,18 @@ impl SharedState {
         buffer.generations.copy_from_slice(&self.generations);
         
         // 同步布局结果（从 Taffy）
-        for (slot, node) in &self.nodes {
+        for (slot, _node) in &self.nodes {
             let slot_idx = *slot as usize;
             if slot_idx < MAX_CAPACITY {
-                if let Ok(layout) = self.taffy.layout(node.taffy_node) {
-                    buffer.layout_results[slot_idx] = crate::LayoutResult {
-                        x: layout.location.x,
-                        y: layout.location.y,
-                        width: layout.size.width,
-                        height: layout.size.height,
-                    };
+                if let Some(node) = self.nodes.get(slot) {
+                    if let Ok(layout) = self.taffy.layout(node.taffy_node) {
+                        buffer.layout_results[slot_idx] = crate::LayoutResult {
+                            x: layout.location.x,
+                            y: layout.location.y,
+                            width: layout.size.width,
+                            height: layout.size.height,
+                        };
+                    }
                 }
             }
         }
@@ -848,14 +850,14 @@ impl SharedState {
     
     /// 验证代际ID系统完整性（用于测试）
     pub fn verify_generational_integrity(&self) -> Result<(), String> {
-        for (slot, node) in &self.nodes {
+        for (slot, _node) in &self.nodes {
             let slot_idx = *slot as usize;
             if slot_idx >= MAX_CAPACITY {
                 return Err(format!("Slot {} out of bounds", slot));
             }
             
             // 验证节点存在时，代际应该是正确的
-            let expected_gen = self.generations[slot_idx];
+            let _expected_gen = self.generations[slot_idx];
             // 注意：这里我们只是验证数据结构一致性
             // 实际的代际验证在 verify_handle 中
         }

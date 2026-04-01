@@ -983,43 +983,78 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
     #[cfg(target_arch = "wasm32")]
     let dirty_tracker_opt: Option<DirtyTracker> = None;
     
+    // Build parent -> children mapping for topological traversal
+    let mut children_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut root_nodes = Vec::new();
     for (&id, node) in &state.nodes {
+        if node.parent_id == 0 || node.parent_id == id {
+            root_nodes.push(id);
+        } else {
+            children_map.entry(node.parent_id).or_default().push(id);
+        }
+    }
+    
+    // BFS from root to calculate absolute positions
+    let mut queue = std::collections::VecDeque::from(root_nodes);
+    let mut abs_positions: std::collections::HashMap<u32, (f32, f32)> = std::collections::HashMap::new();
+    
+    while let Some(id) = queue.pop_front() {
         if id as usize >= MAX_NODES { continue; }
         
-        // Check dirty bit if tracker available
-        if let Some(ref tracker) = dirty_tracker_opt {
-            if !tracker.is_node_dirty(id) {
-                continue;  // Skip clean nodes (fast path)
-            }
-        }
-        
-        if let Ok(layout) = state.taffy.layout(node.taffy_node) {
-            // Skip zero-size nodes (not yet computed)
-            if layout.size.width <= 0.0 || layout.size.height <= 0.0 {
-                continue;
+        if let Some(node) = state.nodes.get(&id) {
+            // Check dirty bit if tracker available
+            if let Some(ref tracker) = dirty_tracker_opt {
+                if !tracker.is_node_dirty(id) {
+                    // Still need to process children even if this node is clean
+                    if let Some(children) = children_map.get(&id) {
+                        for &child in children {
+                            queue.push_back(child);
+                        }
+                    }
+                    continue;
+                }
             }
             
-
-            let target = ls + (id as usize * 16);
-            let nx = layout.location.x.to_le_bytes();
-            let ny = layout.location.y.to_le_bytes();
-            let nw = layout.size.width.to_le_bytes();
-            let nh = layout.size.height.to_le_bytes();
-            let changed = memory[target..target+4] != nx ||
-                         memory[target+4..target+8] != ny ||
-                         memory[target+8..target+12] != nw ||
-                         memory[target+12..target+16] != nh;
-            if changed {
-                memory[target..target+4].copy_from_slice(&nx);
-                memory[target+4..target+8].copy_from_slice(&ny);
-                memory[target+8..target+12].copy_from_slice(&nw);
-                memory[target+12..target+16].copy_from_slice(&nh);
-                let word_idx = (id / 32) as usize;
-                let bit_idx = id % 32;
-                let mask_pos = ms + (word_idx * 4);
-                let mut mask = u32::from_le_bytes(memory[mask_pos..mask_pos+4].try_into()?);
-                mask |= 1 << bit_idx;
-                memory[mask_pos..mask_pos+4].copy_from_slice(&mask.to_le_bytes());
+            if let Ok(layout) = state.taffy.layout(node.taffy_node) {
+                // Skip zero-size nodes (not yet computed)
+                if layout.size.width <= 0.0 || layout.size.height <= 0.0 {
+                    continue;
+                }
+                
+                // Calculate absolute position
+                let (parent_abs_x, parent_abs_y) = abs_positions.get(&node.parent_id).copied().unwrap_or((0.0, 0.0));
+                let abs_x = parent_abs_x + layout.location.x;
+                let abs_y = parent_abs_y + layout.location.y;
+                abs_positions.insert(id, (abs_x, abs_y));
+                
+                let target = ls + (id as usize * 16);
+                let nx = abs_x.to_le_bytes();
+                let ny = abs_y.to_le_bytes();
+                let nw = layout.size.width.to_le_bytes();
+                let nh = layout.size.height.to_le_bytes();
+                let changed = memory[target..target+4] != nx ||
+                             memory[target+4..target+8] != ny ||
+                             memory[target+8..target+12] != nw ||
+                             memory[target+12..target+16] != nh;
+                if changed {
+                    memory[target..target+4].copy_from_slice(&nx);
+                    memory[target+4..target+8].copy_from_slice(&ny);
+                    memory[target+8..target+12].copy_from_slice(&nw);
+                    memory[target+12..target+16].copy_from_slice(&nh);
+                    let word_idx = (id / 32) as usize;
+                    let bit_idx = id % 32;
+                    let mask_pos = ms + (word_idx * 4);
+                    let mut mask = u32::from_le_bytes(memory[mask_pos..mask_pos+4].try_into()?);
+                    mask |= 1 << bit_idx;
+                    memory[mask_pos..mask_pos+4].copy_from_slice(&mask.to_le_bytes());
+                }
+                
+                // Add children to queue
+                if let Some(children) = children_map.get(&id) {
+                    for &child in children {
+                        queue.push_back(child);
+                    }
+                }
             }
         }
     }

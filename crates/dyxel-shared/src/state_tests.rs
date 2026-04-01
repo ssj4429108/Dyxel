@@ -70,16 +70,17 @@ mod tests {
         let mut state = SharedState::new();
         
         // 创建一些节点
-        let h1 = state.create_node_with_handle(1).unwrap();
+        let _h1 = state.create_node_with_handle(1).unwrap();
         let h2 = state.create_node_with_handle(2).unwrap();
-        let h3 = state.create_node_with_handle(3).unwrap();
+        let _h3 = state.create_node_with_handle(3).unwrap();
         
         // 删除中间的
+        let h2_slot = h2.slot;
         state.remove_node_with_handle(h2);
         
         // 创建新节点（应该复用 slot 1）
         let h4 = state.create_node_with_handle(4).unwrap();
-        assert_eq!(h4.slot, h2.slot); // 复用了 slot 1
+        assert_eq!(h4.slot, h2_slot); // 复用了 slot 1
         assert_eq!(h4.generation, 1); // 代际+1
     }
 

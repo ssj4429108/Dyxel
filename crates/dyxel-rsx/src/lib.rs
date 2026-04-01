@@ -241,6 +241,65 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
     // Static property assignments
     let static_assignments: Vec<_> = static_props.iter().map(|(name, value_tokens, name_span)| {
         let value = tokens_to_stream(value_tokens);
+        
+        // Special handling for gesture DSL
+        if name == "gesture" {
+            return quote_spanned! { *name_span =>
+                .gesture(#value)
+            };
+        }
+        
+        // Check if value is a code block (for dynamic State binding)
+        let is_code_block = value_tokens.len() == 1 && 
+            matches!(value_tokens.first(), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace);
+        
+        if is_code_block {
+            // Extract inner tokens from code block
+            let inner_tokens = match value_tokens.first() {
+                Some(TokenTree::Group(g)) => g.stream(),
+                _ => proc_macro2::TokenStream::new(),
+            };
+            
+            // Check if it's a simple State::get() call pattern
+            // Pattern: identifier . get ( )
+            let inner_vec: Vec<_> = inner_tokens.clone().into_iter().collect();
+            let is_simple_state_get = inner_vec.len() == 5 &&
+                matches!(inner_vec.get(0), Some(TokenTree::Ident(_))) &&
+                matches!(inner_vec.get(1), Some(TokenTree::Punct(p)) if p.as_char() == '.') &&
+                matches!(inner_vec.get(2), Some(TokenTree::Ident(i)) if i.to_string() == "get") &&
+                matches!(inner_vec.get(3), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis) &&
+                matches!(inner_vec.get(4), None);
+            
+            if is_simple_state_get {
+                if let Some(TokenTree::Ident(state_ident)) = inner_vec.get(0) {
+                    let method_name = camel_to_snake(name);
+                    let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
+                    
+                    // Choose appropriate signal method based on property name
+                    let sig_method = if name == "width" || name == "height" {
+                        quote! { sig_size }
+                    } else if name == "color" {
+                        quote! { sig_color }
+                    } else {
+                        quote! { sig }
+                    };
+                    
+                    // Generate dynamic binding using Signal
+                    return quote_spanned! { *name_span =>
+                        .#method_ident(#state_ident.clone().#sig_method())
+                    };
+                }
+            }
+            
+            // Regular code block - pass directly
+            let method_name = camel_to_snake(name);
+            let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
+            
+            return quote_spanned! { *name_span =>
+                .#method_ident(#value)
+            };
+        }
+        
         let method_name = camel_to_snake(name);
         let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
         

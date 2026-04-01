@@ -424,6 +424,7 @@ impl From<f32> for Prop<f32> { fn from(v: f32) -> Self { Prop::Static(v) } }
 impl From<i32> for Prop<i32> { fn from(v: i32) -> Self { Prop::Static(v) } }
 impl From<u16> for Prop<u16> { fn from(v: u16) -> Self { Prop::Static(v) } }
 impl From<(u32,u32,u32)> for Prop<(u32,u32,u32)> { fn from(v: (u32,u32,u32)) -> Self { Prop::Static(v) } }
+impl From<(u32,u32,u32,u32)> for Prop<(u32,u32,u32,u32)> { fn from(v: (u32,u32,u32,u32)) -> Self { Prop::Static(v) } }
 impl From<(u8,u8,u8,u8)> for Prop<(u8,u8,u8,u8)> { fn from(v: (u8,u8,u8,u8)) -> Self { Prop::Static(v) } }
 impl From<(f32,f32,f32,f32)> for Prop<(f32,f32,f32,f32)> { fn from(v: (f32,f32,f32,f32)) -> Self { Prop::Static(v) } }
 // SizeUnit support
@@ -442,7 +443,17 @@ impl From<i32> for Prop<SizeUnit> { fn from(v: i32) -> Self { Prop::Static(SizeU
 impl From<&str> for Prop<SizeUnit> { fn from(v: &str) -> Self { Prop::Static(SizeUnit::from(v)) } }
 
 pub trait SignalPropExt: Signal + Sized { 
-    fn sig(self) -> Prop<Self::Item> where Self: Unpin + 'static { Prop::Dynamic(Box::new(self)) } 
+    fn sig(self) -> Prop<Self::Item> where Self: Unpin + 'static { Prop::Dynamic(Box::new(self)) }
+    
+    /// Convert f32 signal to SizeUnit signal (for width/height binding)
+    fn sig_size(self) -> Prop<SizeUnit> where Self: Signal<Item = f32> + Unpin + 'static {
+        Prop::Dynamic(Box::new(self.map(SizeUnit::Lp)))
+    }
+    
+    /// Convert (u32,u32,u32,u32) signal to color Prop (for color binding)
+    fn sig_color(self) -> Prop<(u32,u32,u32,u32)> where Self: Signal<Item = (u32,u32,u32,u32)> + Unpin + 'static {
+        Prop::Dynamic(Box::new(self))
+    }
 }
 impl<S: Signal + SignalExt> SignalPropExt for S {}
 
@@ -463,10 +474,10 @@ fn apply_prop<T: 'static, F>(id: u32, p: Prop<T>, f: F) where F: Fn(u32, T) + 's
 pub trait BaseView {
     fn node_id(&self) -> u32;
     
-    fn color(self, p: impl Into<Prop<(u32,u32,u32)>>) -> Self where Self: Sized {
-        apply_prop(self.node_id(), p.into(), |id, (r, g, b)| {
+    fn color(self, p: impl Into<Prop<(u32,u32,u32,u32)>>) -> Self where Self: Sized {
+        apply_prop(self.node_id(), p.into(), |id, (r, g, b, a)| {
             select_node(id);
-            push_command!(SHARED_BUFFER, SetColorCompact, r as u8, g as u8, b as u8, 255u8);
+            push_command!(SHARED_BUFFER, SetColorCompact, r as u8, g as u8, b as u8, a as u8);
         }); self 
     }
     
@@ -643,8 +654,128 @@ impl View {
         });
         self
     }
+    
+    /// Configure a composite gesture (Sequence, Parallel, or Exclusive)
+    /// 
+    /// Example:
+    /// ```rust
+    /// View::new().gesture(
+    ///     SequenceGesture::new(vec![
+    ///         TapGesture::double_tap().into(),
+    ///         LongPressGesture::new().into(),
+    ///     ]).on_gesture_judge_begin(|e| true)
+    /// )
+    /// ```
+    pub fn gesture(self, config: impl GestureConfig) -> Self {
+        config.apply_to(self)
+    }
 }
 impl BaseView for View { fn node_id(&self) -> u32 { self.id } }
+
+/// Trait for gesture configurations that can be applied to a View
+pub trait GestureConfig {
+    fn apply_to(self, view: View) -> View;
+}
+
+impl GestureConfig for crate::SequenceGesture {
+    fn apply_to(self, view: View) -> View {
+        let id = view.node_id();
+        crate::select_node(id);
+        
+        // Register all steps in sequence
+        for step in &self.steps {
+            match step {
+                crate::GestureStep::Tap(g) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterTapHandler, id);
+                    if g.count == 2 {
+                        push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id);
+                    }
+                }
+                crate::GestureStep::LongPress(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterLongPressHandler, id);
+                }
+                crate::GestureStep::Pan(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterPanHandler, id);
+                }
+                _ => {}
+            }
+        }
+        
+        // Store sequence configuration for runtime processing
+        #[cfg(feature = "log")]
+        log::info!("SequenceGesture registered for node {} with {} steps", id, self.steps.len());
+        view
+    }
+}
+
+impl GestureConfig for crate::ParallelGesture {
+    fn apply_to(self, view: View) -> View {
+        let id = view.node_id();
+        crate::select_node(id);
+        
+        // Register all gestures to be recognized simultaneously
+        for gesture in &self.gestures {
+            match gesture {
+                crate::GestureStep::Tap(g) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterTapHandler, id);
+                    if g.count == 2 {
+                        push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id);
+                    }
+                }
+                crate::GestureStep::LongPress(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterLongPressHandler, id);
+                }
+                crate::GestureStep::Pan(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterPanHandler, id);
+                }
+                _ => {}
+            }
+        }
+        
+        #[cfg(feature = "log")]
+        log::info!("ParallelGesture registered for node {} with {} gestures", id, self.gestures.len());
+        view
+    }
+}
+
+impl GestureConfig for crate::ExclusiveGesture {
+    fn apply_to(self, view: View) -> View {
+        let id = view.node_id();
+        crate::select_node(id);
+        
+        // Register all candidates - GestureArena will handle competition
+        for candidate in &self.candidates {
+            match candidate {
+                crate::GestureStep::Tap(g) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterTapHandler, id);
+                    if g.count == 2 {
+                        push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id);
+                    }
+                }
+                crate::GestureStep::LongPress(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterLongPressHandler, id);
+                }
+                crate::GestureStep::Pan(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterPanHandler, id);
+                }
+                _ => {}
+            }
+        }
+        
+        #[cfg(feature = "log")]
+        log::info!("ExclusiveGesture registered for node {} with {} candidates", id, self.candidates.len());
+        view
+    }
+}
 
 pub struct Text { pub id: u32 }
 impl Text {
@@ -721,7 +852,7 @@ pub struct Button { view: View }
 impl Button {
     pub fn new() -> Self {
         let view = View::new()
-            .color((60, 120, 220))
+            .color((60u32, 120, 220, 255))
             .padding((10.0, 20.0, 10.0, 20.0))
             .border_radius(8.0);
         Self { view }

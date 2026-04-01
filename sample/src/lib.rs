@@ -1,2 +1,7 @@
+// Sample modules - uncomment one to build:
+
 // Gesture & State Validation Demo
-mod gesture_state_demo;
+// mod stress_test;
+
+// Gesture Orchestration Demo (RSX Gesture DSL)
+mod gesture_orchestration;

@@ -68,6 +68,8 @@ impl SpatialHitTester {
         unsafe {
             let current_max = (*self.shared_buffer_ptr).max_node_id;
             
+            // Sync spatial index with shared buffer
+            
             // Process new nodes
             for id in (self.last_synced_max_id + 1)..=current_max {
                 self.add_node(id);
@@ -77,6 +79,8 @@ impl SpatialHitTester {
             // This would require a dirty flag or version counter
             
             self.last_synced_max_id = current_max;
+            
+            log::debug!("SpatialHitTester: sync complete, total nodes in index: {}", self.nodes.len());
         }
     }
 
@@ -98,13 +102,13 @@ impl SpatialHitTester {
         }
         let layout = (*self.shared_buffer_ptr).layout_results[node_id as usize];
         
-
-        
         // Skip zero-size nodes
         if layout.width <= 0.0 || layout.height <= 0.0 {
-
+            // Skip zero-size nodes
             return;
         }
+        
+        // Node added to spatial index
 
         // Calculate grid cells this node occupies
         let min_cell_x = (layout.x / GRID_CELL_SIZE).floor() as i32;
@@ -187,6 +191,8 @@ impl HitTester for SpatialHitTester {
         // Calculate grid cell for point
         let cell_x = (x / GRID_CELL_SIZE).floor() as i32;
         let cell_y = (y / GRID_CELL_SIZE).floor() as i32;
+        
+
         
         let mut best_node: Option<(u32, NodeData)> = None;
 

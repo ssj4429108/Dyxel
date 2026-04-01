@@ -232,6 +232,7 @@ fn dispatch_gesture_event(
             let registry = get_handler_registry().lock().unwrap();
             let handler_node = registry.find_handler(&bubble_path, ht);
             drop(registry);
+            
             if let Some(handler_node) = handler_node {
                 // Send direct gesture event (WASM should not bubble)
                 match event.event_type {
@@ -315,15 +316,26 @@ fn dispatch_gesture_event(
 /// Build bubble path from target node to root
 #[cfg(not(target_arch = "wasm32"))]
 fn build_bubble_path(target_node: u32, logic: &LogicState) -> Vec<u32> {
-    let path = vec![target_node];
+    let mut path = vec![target_node];
     
     // Walk up parent chain using SharedState
     // This queries the Host-side tree structure
-    if let Ok(_state) = logic.shared_state.try_lock() {
-        let _current = target_node;
-        // TODO: Traverse parent chain once parent pointers are available in SharedState
-        // For now, just return the target node
-        let _ = _current; // Suppress unused warning
+    if let Ok(state) = logic.shared_state.try_lock() {
+        let mut current = target_node;
+        
+        // Traverse parent chain until we reach root (parent_id == 0)
+        while current != 0 {
+            if let Some(node) = state.nodes.get(&current) {
+                if node.parent_id != 0 && node.parent_id != current {
+                    path.push(node.parent_id);
+                    current = node.parent_id;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
     }
     
     path
