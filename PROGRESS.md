@@ -139,3 +139,9 @@ sample/src/gesture_orchestration.rs      - NEW: Gesture testing sample
 - **Test**: StressTest validates ID system and capacity
 - **Gesture**: GestureOrchestration demonstrates all gesture features
 - **Issue**: State binding needs executor/layout integration fix
+
+
+• gesture_demo 中 tick.call() 卡住不返回
+  • 可能是 WASM runtime 或 tick 函数本身的问题
+
+  明天可以继续从这个点排查。需要检查 guest_tick/dyxel_view_tick 的执行流程，看看在哪里陷入了死循环或阻塞。
