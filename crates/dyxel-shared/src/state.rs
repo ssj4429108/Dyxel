@@ -755,18 +755,49 @@ impl SharedState {
         // 同步代际数组
         buffer.generations.copy_from_slice(&self.generations);
         
-        // 同步布局结果（从 Taffy）
-        for (slot, _node) in &self.nodes {
-            let slot_idx = *slot as usize;
-            if slot_idx < MAX_CAPACITY {
-                if let Some(node) = self.nodes.get(slot) {
-                    if let Ok(layout) = self.taffy.layout(node.taffy_node) {
+        // Build parent -> children mapping for topological traversal
+        let mut children_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        let mut root_nodes = Vec::new();
+        for (&id, node) in &self.nodes {
+            if node.parent_id == 0 || node.parent_id == id {
+                root_nodes.push(id);
+            } else {
+                children_map.entry(node.parent_id).or_default().push(id);
+            }
+        }
+        
+        // BFS from root to calculate absolute positions
+        let mut queue = std::collections::VecDeque::from(root_nodes);
+        let mut abs_positions: std::collections::HashMap<u32, (f32, f32)> = std::collections::HashMap::new();
+        
+        while let Some(id) = queue.pop_front() {
+            if let Some(node) = self.nodes.get(&id) {
+                // Get parent absolute position
+                let (parent_abs_x, parent_abs_y) = abs_positions.get(&node.parent_id).copied().unwrap_or((0.0, 0.0));
+                
+                // Get layout from Taffy
+                if let Ok(layout) = self.taffy.layout(node.taffy_node) {
+                    // Calculate absolute position
+                    let abs_x = parent_abs_x + layout.location.x;
+                    let abs_y = parent_abs_y + layout.location.y;
+                    abs_positions.insert(id, (abs_x, abs_y));
+                    
+                    // Write to shared buffer (using absolute position)
+                    let slot_idx = id as usize;
+                    if slot_idx < MAX_CAPACITY {
                         buffer.layout_results[slot_idx] = crate::LayoutResult {
-                            x: layout.location.x,
-                            y: layout.location.y,
+                            x: abs_x,
+                            y: abs_y,
                             width: layout.size.width,
                             height: layout.size.height,
                         };
+                    }
+                    
+                    // Process children
+                    if let Some(children) = children_map.get(&id) {
+                        for &child in children {
+                            queue.push_back(child);
+                        }
                     }
                 }
             }

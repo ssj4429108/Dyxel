@@ -126,6 +126,18 @@ impl LogicState {
             let _ = crate::runtime::process_commands(mem, bptr, &s_inner); 
             Ok(()) 
         });
+        
+        // Link console_log for WASM debugging
+        let _ = module.link_closure("env", "console_log", move |ctx, (ptr, len): (u32, u32)| {
+            let mem = unsafe { &*ctx.memory() };
+            let start = ptr as usize;
+            let end = start + len as usize;
+            if end <= mem.len() {
+                let msg = String::from_utf8_lossy(&mem[start..end]);
+                log::info!("[WASM] {}", msg);
+            }
+            Ok(())
+        });
 
         let main_fn = module.find_function::<(), ()>("main").or_else(|_| module.find_function::<(), ()>("_main")).map_err(|_| anyhow::anyhow!("Main not found"))?;
         let get_hash_fn = module.find_function::<(), u64>("dyxel_get_protocol_hash").map_err(|_| anyhow::anyhow!("dyxel_get_protocol_hash not found"))?;

@@ -114,6 +114,13 @@ impl Default for GestureSettings {
 /// This is used to determine which recognizers to create for a node.
 pub trait GestureProvider: Send {
     fn get_node_gestures(&self, node_id: u32) -> Vec<GestureType>;
+    
+    /// Get parent node ID for bubbling (return 0 if no parent)
+    fn get_parent_node(&self, node_id: u32) -> u32 {
+        // Default implementation: no bubbling
+        let _ = node_id;
+        0
+    }
 }
 
 pub struct GestureRouter {
@@ -172,6 +179,23 @@ impl GestureRouter {
         // So we don't need to send synthetic events for deadline checking
         // The deadline_met flag will be checked on the next Move or Up event
     }
+    
+    /// Find a node with gesture support, bubbling up to ancestors if needed
+    fn find_node_with_gestures(&self, start_node: u32) -> (u32, Vec<GestureType>) {
+        let mut current_node = start_node;
+        
+        // Bubble up until we find a node with gestures or reach the root
+        while current_node != 0 {
+            let gestures = self.gesture_provider.get_node_gestures(current_node);
+            if !gestures.is_empty() {
+                return (current_node, gestures);
+            }
+            // Try parent node
+            current_node = self.gesture_provider.get_parent_node(current_node);
+        }
+        
+        (0, Vec::new())
+    }
 
     /// Process a raw input event
     /// 
@@ -222,8 +246,9 @@ impl GestureRouter {
         let hit_result = self.hit_tester.hit_test(event.x, event.y);
         let target_node = hit_result.node_id;
 
-        // Get gesture types supported by this node
-        let gesture_types = self.gesture_provider.get_node_gestures(target_node);
+        // Get gesture types supported by this node (with bubbling)
+        // Try target node first, then bubble up to ancestors
+        let (target_node, gesture_types) = self.find_node_with_gestures(target_node);
         
         if gesture_types.is_empty() {
             return;

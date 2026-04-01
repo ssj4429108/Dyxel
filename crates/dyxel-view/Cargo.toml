@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 dyxel-shared.workspace = true
+dyxel-state = { path = "../dyxel-state" }
 dyxel-rsx = { path = "../dyxel-rsx" }
 futures-signals.workspace = true
 futures-util.workspace = true

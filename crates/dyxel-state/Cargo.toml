@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 slotmap = "1.0"
+futures-signals = { version = "0.3", default-features = false }
+dyxel-shared = { path = "../dyxel-shared" }

@@ -23,7 +23,7 @@
 pub use dyxel_app_macro::app;
 
 // Re-export state system
-pub use dyxel_state::{use_state, use_memo, use_effect, State};
+pub use dyxel_state::{use_state, use_memo, use_effect, State, StateSignalExt};
 
 // Re-export view components
 pub use dyxel_view::{
@@ -37,7 +37,7 @@ pub use dyxel_shared::{SizeUnit, px, lp, PxExt, LpExt};
 
 /// Prelude module - import everything you need
 pub mod prelude {
-    pub use crate::{use_state, use_memo, use_effect, State, app};
+    pub use crate::{use_state, use_memo, use_effect, State, StateSignalExt, app};
     pub use crate::{
         rsx, View, Text, Button, Column, Row,
         FlexDirection, JustifyContent, AlignItems,

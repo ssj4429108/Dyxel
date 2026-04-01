@@ -14,7 +14,11 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::ops::{Add, Sub, Mul, Div, AddAssign, SubAssign, MulAssign, DivAssign, Rem, RemAssign};
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll};
+use futures_signals::signal::{Signal, SignalExt};
+use dyxel_shared::SizeUnit;
 use slotmap::{SlotMap, new_key_type};
 
 new_key_type! {
@@ -54,11 +58,21 @@ impl StateManager {
     }
 }
 
+/// Callback for signal-based subscriptions
+type SignalCallback<T> = Box<dyn FnMut(&T)>;
+
+/// Version counter for tracking state changes
+static VERSION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Internal state storage
 pub struct StateInner<T: Clone + 'static> {
     value: RefCell<T>,
     /// Callbacks to call when value changes: (node_id, format_fn)
     text_bindings: RefCell<Vec<(u32, Box<dyn Fn(&T) -> String>)>>,
+    /// Signal-based subscriptions for reactive binding
+    signal_subscribers: RefCell<Vec<SignalCallback<T>>>,
+    /// Version counter for change detection
+    version: RefCell<u64>,
 }
 
 impl<T: Clone + 'static> StateInner<T> {
@@ -66,6 +80,8 @@ impl<T: Clone + 'static> StateInner<T> {
         Self {
             value: RefCell::new(value),
             text_bindings: RefCell::new(Vec::new()),
+            signal_subscribers: RefCell::new(Vec::new()),
+            version: RefCell::new(VERSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
         }
     }
     
@@ -75,6 +91,8 @@ impl<T: Clone + 'static> StateInner<T> {
     
     pub fn set(&self, new_value: T) {
         *self.value.borrow_mut() = new_value;
+        let new_version = VERSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.version.borrow_mut() = new_version;
         self.update_subscribers();
     }
     
@@ -85,6 +103,7 @@ impl<T: Clone + 'static> StateInner<T> {
         let mut value = self.value.borrow_mut();
         f(&mut *value);
         drop(value);
+        *self.version.borrow_mut() = VERSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.update_subscribers();
     }
     
@@ -96,12 +115,28 @@ impl<T: Clone + 'static> StateInner<T> {
         self.text_bindings.borrow_mut().push((node_id, Box::new(format)));
     }
     
-    /// Update all bound text nodes
+    /// Subscribe to state changes via Signal
+    pub fn subscribe_signal<F>(&self, callback: F)
+    where
+        F: FnMut(&T) + 'static,
+    {
+        self.signal_subscribers.borrow_mut().push(Box::new(callback));
+    }
+    
+    /// Get current version
+    pub fn get_version(&self) -> u64 {
+        *self.version.borrow()
+    }
+    
+    /// Update all bound text nodes and signal subscribers
     fn update_subscribers(&self) {
         let value = self.value.borrow();
         for (node_id, format) in self.text_bindings.borrow().iter() {
             let text = format(&*value);
             update_text_node(*node_id, &text);
+        }
+        for callback in self.signal_subscribers.borrow_mut().iter_mut() {
+            callback(&*value);
         }
     }
 }
@@ -177,7 +212,120 @@ impl<T: Clone + 'static> State<T> {
     {
         self.bind_text(node_id, |v| v.to_string());
     }
+    
+    /// Convert this State into a Signal for reactive binding
+    /// 
+    /// This allows State to be used with `.sig()` method in RSX:
+    /// ```rust,ignore
+    /// let width = use_state(|| 100.0f32);
+    /// rsx! {
+    ///     View { width: {width.sig()} }
+    /// }
+    /// ```
+    pub fn sig(&self) -> StateSignal<T> {
+        StateSignal {
+            state: self.inner.clone(),
+            last_version: RefCell::new(self.inner.get_version()),
+            is_first_poll: RefCell::new(true),
+        }
+    }
 }
+
+/// SizeUnit Signal for f32 State - wraps StateSignal and converts f32 to SizeUnit
+pub struct SizeUnitSignal {
+    inner: StateSignal<f32>,
+}
+
+impl Signal for SizeUnitSignal {
+    type Item = crate::SizeUnit;
+    
+    fn poll_change(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        // Pin project to inner
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
+        match inner.poll_change(cx) {
+            Poll::Ready(Some(v)) => Poll::Ready(Some(crate::SizeUnit::Lp(v))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Unpin for SizeUnitSignal {}
+
+impl State<f32> {
+    /// Convert f32 State to SizeUnit Signal (for width/height binding)
+    pub fn sig_size(&self) -> SizeUnitSignal {
+        SizeUnitSignal {
+            inner: self.sig(),
+        }
+    }
+}
+
+impl State<(u32, u32, u32, u32)> {
+    /// Convert color State to color Signal (for color binding)
+    pub fn sig_color(&self) -> StateSignal<(u32, u32, u32, u32)> {
+        self.sig()
+    }
+}
+
+/// A Signal implementation for State<T>
+pub struct StateSignal<T: Clone + 'static> {
+    state: StateRef<T>,
+    last_version: RefCell<u64>,
+    // Track if this is the first poll - we should always emit initial value
+    is_first_poll: RefCell<bool>,
+}
+
+// StateSignal is Unpin because all fields are Unpin
+impl<T: Clone + 'static> Unpin for StateSignal<T> {}
+
+impl<T: Clone + 'static> Clone for StateSignal<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            last_version: RefCell::new(*self.last_version.borrow()),
+            // Preserve is_first_poll state to ensure consistent behavior after clone
+            is_first_poll: RefCell::new(*self.is_first_poll.borrow()),
+        }
+    }
+}
+
+impl<T: Clone + 'static> Signal for StateSignal<T> {
+    type Item = T;
+    
+    fn poll_change(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let current_version = self.state.get_version();
+        let last_version = *self.last_version.borrow();
+        let is_first = *self.is_first_poll.borrow();
+        
+        // Only emit value on first poll or when version has changed
+        if is_first || current_version != last_version {
+            *self.is_first_poll.borrow_mut() = false;
+            *self.last_version.borrow_mut() = current_version;
+            let value = self.state.get();
+            Poll::Ready(Some(value))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+// ===== Signal extension for State =====
+
+/// Extension trait for converting State to Signal
+pub trait StateSignalExt<T: Clone + 'static> {
+    /// Convert State to Signal for reactive property binding
+    fn sig(&self) -> StateSignal<T>;
+}
+
+impl<T: Clone + 'static> StateSignalExt<T> for State<T> {
+    fn sig(&self) -> StateSignal<T> {
+        State::sig(self)
+    }
+}
+
+// Re-export futures-signals types for convenience
+pub use futures_signals::signal::{Signal as FsSignal, SignalExt as FsSignalExt};
 
 // ===== Operator Overloads =====
 

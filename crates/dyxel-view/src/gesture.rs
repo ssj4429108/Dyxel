@@ -410,6 +410,7 @@ impl Default for RotationGesture {
 pub struct SequenceGesture {
     pub steps: Vec<GestureStep>,
     pub on_gesture_judge_begin: Option<Box<dyn FnMut(&GestureEvent) -> bool>>,
+    pub on_gesture_ended: Option<Box<dyn FnMut(GestureEvent)>>,
 }
 
 impl SequenceGesture {
@@ -417,11 +418,17 @@ impl SequenceGesture {
         Self {
             steps,
             on_gesture_judge_begin: None,
+            on_gesture_ended: None,
         }
     }
 
     pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
+        self
+    }
+
+    pub fn on_gesture_ended(mut self, handler: impl FnMut(GestureEvent) + 'static) -> Self {
+        self.on_gesture_ended = Some(Box::new(handler));
         self
     }
 }
@@ -432,6 +439,7 @@ impl SequenceGesture {
 pub struct ParallelGesture {
     pub gestures: Vec<GestureStep>,
     pub on_gesture_judge_begin: Option<Box<dyn FnMut(&GestureEvent) -> bool>>,
+    pub on_gesture_ended: Option<Box<dyn FnMut(GestureEvent)>>,
 }
 
 impl ParallelGesture {
@@ -439,11 +447,17 @@ impl ParallelGesture {
         Self {
             gestures,
             on_gesture_judge_begin: None,
+            on_gesture_ended: None,
         }
     }
 
     pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
+        self
+    }
+
+    pub fn on_gesture_ended(mut self, handler: impl FnMut(GestureEvent) + 'static) -> Self {
+        self.on_gesture_ended = Some(Box::new(handler));
         self
     }
 }
@@ -454,6 +468,7 @@ impl ParallelGesture {
 pub struct ExclusiveGesture {
     pub candidates: Vec<GestureStep>,
     pub on_gesture_judge_begin: Option<Box<dyn FnMut(&GestureEvent) -> bool>>,
+    pub on_gesture_ended: Option<Box<dyn FnMut(GestureEvent)>>,
 }
 
 impl ExclusiveGesture {
@@ -461,11 +476,17 @@ impl ExclusiveGesture {
         Self {
             candidates,
             on_gesture_judge_begin: None,
+            on_gesture_ended: None,
         }
     }
 
     pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
+        self
+    }
+
+    pub fn on_gesture_ended(mut self, handler: impl FnMut(GestureEvent) + 'static) -> Self {
+        self.on_gesture_ended = Some(Box::new(handler));
         self
     }
 }

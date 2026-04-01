@@ -122,8 +122,27 @@ impl GestureProvider for HandlerRegistryGestureProvider {
             gestures.push(GestureType::Pan);
         }
         
-        log::info!("get_node_gestures for node {}: {:?}", node_id, gestures);
         gestures
+    }
+    
+    fn get_parent_node(&self, node_id: u32) -> u32 {
+        // Access LogicState through thread-local pointer to get parent from SharedState
+        LOGIC_STATE_PTR.with(|ptr| {
+            let logic_ptr = ptr.get();
+            if logic_ptr.is_null() {
+                return 0;
+            }
+            
+            unsafe {
+                let logic = &*logic_ptr;
+                if let Ok(state) = logic.shared_state.lock() {
+                    if let Some(node) = state.nodes.get(&node_id) {
+                        return node.parent_id;
+                    }
+                }
+            }
+            0
+        })
     }
 }
 
@@ -231,7 +250,11 @@ fn dispatch_gesture_event(
             // Use HandlerRegistry to find the actual handler target
             let registry = get_handler_registry().lock().unwrap();
             let handler_node = registry.find_handler(&bubble_path, ht);
+            let stats = registry.stats();
             drop(registry);
+            
+            log::info!("dispatch_gesture_event: bubble_path={:?}, handler_type={:?}, handler_node={:?}, registry_stats={:?}",
+                bubble_path, ht, handler_node, stats);
             
             if let Some(handler_node) = handler_node {
                 // Send direct gesture event (WASM should not bubble)
@@ -552,16 +575,23 @@ impl DyxelHost {
                     let mut lifecycle = Lifecycle::Stopped;
 
                     loop {
+                        log::debug!("LogicThread: loop start, lifecycle={:?}", lifecycle);
                         // Clear any pending VSync signals to prevent frame lag accumulation
                         // Logic Thread should sync with latest VSync, not old ones
+                        log::debug!("LogicThread: clearing VSync signals...");
                         while render_complete_rx.try_recv().is_ok() {}
                         
                         // Receive message (block when stopped/paused to save CPU)
+                        log::debug!("LogicThread: checking for messages...");
                         let msg_res = if lifecycle == Lifecycle::Running {
                             // Running: non-blocking check then wait for VSync if no message
                             match logic_rx.try_recv() {
-                                Ok(msg) => Ok(msg),
+                                Ok(msg) => {
+                                    log::debug!("LogicThread: received message");
+                                    Ok(msg)
+                                }
                                 Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    log::debug!("LogicThread: no message, executing tick...");
                                     // No message, execute tick and sleep
                                     if let Some(ref mut l) = logic_opt {
                                         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
@@ -569,11 +599,19 @@ impl DyxelHost {
                                             use crate::runtime::{process_commands, sync_layout_to_wasm, is_render_needed, clear_dirty_tracker};
                                             
                                             // Execute WASM tick (produces commands)
-                                            if let Some(tick) = l.tick_fn.lock().unwrap().as_ref() {
+                                            log::debug!("LogicThread: acquiring tick_fn lock...");
+                                            let tick_opt = l.tick_fn.lock().unwrap();
+                                            log::debug!("LogicThread: tick_fn lock acquired");
+                                            if let Some(tick) = tick_opt.as_ref() {
+                                                log::debug!("LogicThread: calling tick...");
                                                 if let Err(e) = tick.call() {
                                                     log::error!("LogicThread: WASM tick failed: {}", e);
                                                 }
+                                                log::debug!("LogicThread: tick returned");
+                                            } else {
+                                                log::warn!("LogicThread: tick_fn is None, skipping tick");
                                             }
+                                            drop(tick_opt);
                                             
                                             // Debug: read counters
                                             if let (Ok(_get_events), Ok(_get_gestures), Ok(_get_clicks)) = (
@@ -626,6 +664,9 @@ impl DyxelHost {
                                             }
                                         }
                                     }
+                                    // After tick/VSync, check for input messages before continuing
+                                    // This prevents input events from being delayed by VSync wait
+                                    log::debug!("LogicThread: tick/VSync complete, continuing loop");
                                     continue;
                                 }
                                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -639,22 +680,41 @@ impl DyxelHost {
                         };
 
                         // Process received message
+                        log::info!("LogicThread: msg_res={:?}, lifecycle={:?}", msg_res.is_ok(), lifecycle);
                         if let Ok(msg) = msg_res {
+                            match &msg {
+                                LogicMessage::SetReady(_) => log::info!("LogicThread: msg type=SetReady"),
+                                LogicMessage::Input(_) => log::info!("LogicThread: msg type=Input"),
+                                LogicMessage::LoadWasm(_) => log::info!("LogicThread: msg type=LoadWasm"),
+                                LogicMessage::Pause => log::info!("LogicThread: msg type=Pause"),
+                                LogicMessage::Resume => log::info!("LogicThread: msg type=Resume"),
+                                LogicMessage::Shutdown => log::info!("LogicThread: msg type=Shutdown"),
+                            }
                             match msg {
                                 LogicMessage::SetReady(l) => {
+                                    log::info!("LogicThread: Received SetReady, initializing...");
                                     logic_opt = Some(l);
                                     lifecycle = Lifecycle::Running;
+                                    log::info!("LogicThread: Running now!");
                                 }
                                 LogicMessage::Input(event) => {
+                                    log::info!("LogicThread: Received Input event={:?}, logic_opt={}", event, logic_opt.is_some());
                                     if let Some(ref mut l) = logic_opt { process_input_internal(l, event); }
                                 }
                                 LogicMessage::LoadWasm(path) => {
-
+                                    log::info!("LogicThread: Processing LoadWasm...");
                                     if let Some(ref mut l) = logic_opt { 
+                                        log::info!("LogicThread: Calling load_wasm...");
                                         if let Err(e) = l.load_wasm(path) {
                                             log::error!("LogicThread: LoadWasm failed: {}", e);
+                                        } else {
+                                            log::info!("LogicThread: LoadWasm completed successfully");
                                         }
+                                        log::info!("LogicThread: LoadWasm block done");
+                                    } else {
+                                        log::warn!("LogicThread: LoadWasm - logic_opt is None");
                                     }
+                                    log::info!("LogicThread: LoadWasm message processing complete");
                                 }
                                 LogicMessage::Pause => {
 
@@ -952,14 +1012,23 @@ impl DyxelHost {
     /// 指针按下（支持多指）
     pub fn on_pointer_down(&self, pointer_id: u32, x: f32, y: f32, pressure: f32) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            log::info!("DyxelInput: on_pointer_down pid={} x={:.1} y={:.1}", pointer_id, x, y);
-            let _ = tx.send(LogicMessage::Input(InputEvent::PointerDown {
-                pointer_id,
-                x,
-                y,
-                pressure,
-            }));
+        {
+            let host_ptr = format!("{:p}", self);
+            let logic_tx_guard = self.logic_tx.lock().unwrap();
+            if let Some(tx) = &*logic_tx_guard {
+                log::info!("DyxelInput: on_pointer_down host={} pid={} x={:.1} y={:.1}", host_ptr, pointer_id, x, y);
+                match tx.send(LogicMessage::Input(InputEvent::PointerDown {
+                    pointer_id,
+                    x,
+                    y,
+                    pressure,
+                })) {
+                    Ok(_) => {},
+                    Err(e) => log::error!("DyxelInput: Failed to send message: {}", e),
+                }
+            } else {
+                log::warn!("DyxelInput: logic_tx is None, host={}", host_ptr);
+            }
         }
     }
 

@@ -1062,6 +1062,8 @@ dependencies = [
 name = "dyxel-state"
 version = "0.1.0"
 dependencies = [
+ "dyxel-shared",
+ "futures-signals",
  "slotmap",
 ]
 
@@ -1071,6 +1073,7 @@ version = "0.1.0"
 dependencies = [
  "dyxel-rsx",
  "dyxel-shared",
+ "dyxel-state",
  "futures-signals",
  "futures-util",
  "taffy",

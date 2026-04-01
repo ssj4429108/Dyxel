@@ -253,44 +253,104 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
         let is_code_block = value_tokens.len() == 1 && 
             matches!(value_tokens.first(), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace);
         
-        if is_code_block {
-            // Extract inner tokens from code block
-            let inner_tokens = match value_tokens.first() {
-                Some(TokenTree::Group(g)) => g.stream(),
-                _ => proc_macro2::TokenStream::new(),
+        // Check for State::get() pattern - either in code block or direct
+        // Pattern: identifier . get ( )
+        let tokens_to_check: Vec<_> = if is_code_block {
+            match value_tokens.first() {
+                Some(TokenTree::Group(g)) => g.stream().into_iter().collect(),
+                _ => value_tokens.to_vec(),
+            }
+        } else {
+            value_tokens.to_vec()
+        };
+        
+
+        // Pattern: identifier . get ( )  - that's 4 tokens total
+        let is_simple_state_get = tokens_to_check.len() == 4 &&
+            matches!(tokens_to_check.get(0), Some(TokenTree::Ident(_))) &&
+            matches!(tokens_to_check.get(1), Some(TokenTree::Punct(p)) if p.as_char() == '.') &&
+            matches!(tokens_to_check.get(2), Some(TokenTree::Ident(i)) if i.to_string() == "get") &&
+            matches!(tokens_to_check.get(3), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis);
+        
+        // Pattern: single identifier (e.g., box_width) - treat as State
+        let is_single_ident = tokens_to_check.len() == 1 &&
+            matches!(tokens_to_check.get(0), Some(TokenTree::Ident(_)));
+        
+        if is_simple_state_get || is_single_ident {
+            let state_ident = if is_simple_state_get {
+                tokens_to_check.get(0).and_then(|t| match t { TokenTree::Ident(i) => Some(i.clone()), _ => None })
+            } else {
+                tokens_to_check.get(0).and_then(|t| match t { TokenTree::Ident(i) => Some(i.clone()), _ => None })
             };
             
-            // Check if it's a simple State::get() call pattern
-            // Pattern: identifier . get ( )
-            let inner_vec: Vec<_> = inner_tokens.clone().into_iter().collect();
-            let is_simple_state_get = inner_vec.len() == 5 &&
-                matches!(inner_vec.get(0), Some(TokenTree::Ident(_))) &&
-                matches!(inner_vec.get(1), Some(TokenTree::Punct(p)) if p.as_char() == '.') &&
-                matches!(inner_vec.get(2), Some(TokenTree::Ident(i)) if i.to_string() == "get") &&
-                matches!(inner_vec.get(3), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis) &&
-                matches!(inner_vec.get(4), None);
-            
-            if is_simple_state_get {
-                if let Some(TokenTree::Ident(state_ident)) = inner_vec.get(0) {
-                    let method_name = camel_to_snake(name);
-                    let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
-                    
-                    // Choose appropriate signal method based on property name
-                    let sig_method = if name == "width" || name == "height" {
-                        quote! { sig_size }
-                    } else if name == "color" {
-                        quote! { sig_color }
-                    } else {
-                        quote! { sig }
-                    };
-                    
-                    // Generate dynamic binding using Signal
-                    return quote_spanned! { *name_span =>
-                        .#method_ident(#state_ident.clone().#sig_method())
-                    };
-                }
+            if let Some(state_ident) = state_ident {
+                let method_name = camel_to_snake(name);
+                let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
+                
+                // Choose appropriate signal method based on property name
+                // width/height need sig_size() for f32 -> SizeUnit conversion
+                // color needs sig_color() for (u32,u32,u32,u32) -> (u32,u32,u32,u32)
+                // other properties use sig()
+                let sig_method = if name == "width" || name == "height" {
+                    quote! { sig_size }
+                } else if name == "color" {
+                    quote! { sig_color }
+                } else {
+                    quote! { sig }
+                };
+                
+                // Generate dynamic binding using State's signal method
+                return quote_spanned! { *name_span =>
+                    .#method_ident(#state_ident.#sig_method())
+                };
             }
-            
+        }
+        
+        // Special handling for gestures
+        // Simple versions (no event parameter): onTap, onDoubleTap, onLongPress, onPanSimple
+        // Full versions (with GestureEvent): onTapEvent, onDoubleTapEvent, onLongPressEvent, onPan
+        if name == "onTap" {
+            return quote_spanned! { *name_span =>
+                .on_tap(#value)
+            };
+        }
+        if name == "onTapEvent" {
+            return quote_spanned! { *name_span =>
+                .on_tap(#value)
+            };
+        }
+        if name == "onDoubleTap" {
+            return quote_spanned! { *name_span =>
+                .on_double_tap(#value)
+            };
+        }
+        if name == "onDoubleTapEvent" {
+            return quote_spanned! { *name_span =>
+                .on_double_tap(#value)
+            };
+        }
+        if name == "onLongPress" {
+            return quote_spanned! { *name_span =>
+                .on_long_press(#value)
+            };
+        }
+        if name == "onLongPressEvent" {
+            return quote_spanned! { *name_span =>
+                .on_long_press(#value)
+            };
+        }
+        if name == "onPan" {
+            return quote_spanned! { *name_span =>
+                .on_pan(#value)
+            };
+        }
+        if name == "onPanSimple" {
+            return quote_spanned! { *name_span =>
+                .on_pan_simple(#value)
+            };
+        }
+        
+        if is_code_block {
             // Regular code block - pass directly
             let method_name = camel_to_snake(name);
             let method_ident = proc_macro2::Ident::new(&method_name, *name_span);

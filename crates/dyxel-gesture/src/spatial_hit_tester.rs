@@ -75,12 +75,68 @@ impl SpatialHitTester {
                 self.add_node(id);
             }
             
-            // TODO: Check existing nodes for layout changes
-            // This would require a dirty flag or version counter
+            // Check existing nodes for layout changes
+            // Use dirty_mask from shared buffer to detect changed nodes efficiently
+            self.update_changed_nodes();
             
             self.last_synced_max_id = current_max;
             
             log::debug!("SpatialHitTester: sync complete, total nodes in index: {}", self.nodes.len());
+        }
+    }
+    
+    /// Update nodes that have changed their layout
+    /// Uses dirty_mask from shared buffer for efficient change detection
+    unsafe fn update_changed_nodes(&mut self) {
+        let dirty_mask = &(*self.shared_buffer_ptr).dirty_mask;
+        
+        // Collect node IDs that need updating
+        let mut nodes_to_update: Vec<u32> = Vec::new();
+        let _checked_count = 0;
+        let mut dirty_mask_hits = 0;
+        let mut bounds_changed_hits = 0;
+        
+        for (node_id, data) in &self.nodes {
+            let _ = _checked_count;
+            let word_idx = (node_id / 32) as usize;
+            let bit_idx = node_id % 32;
+            
+            // Check if this node is marked as dirty in the shared buffer
+            if word_idx < dirty_mask.len() && (dirty_mask[word_idx] >> bit_idx) & 1 != 0 {
+                nodes_to_update.push(*node_id);
+                dirty_mask_hits += 1;
+                continue;
+            }
+            
+            // Also check if layout has changed (fallback for cases where dirty_mask isn't set)
+            if *node_id as usize >= dyxel_shared::MAX_NODES {
+                continue;
+            }
+            let layout = (*self.shared_buffer_ptr).layout_results[*node_id as usize];
+            
+            // Compare current layout with stored data
+            let bounds_changed = 
+                (layout.x - data.x).abs() > 0.01 ||
+                (layout.y - data.y).abs() > 0.01 ||
+                (layout.width - data.width).abs() > 0.01 ||
+                (layout.height - data.height).abs() > 0.01;
+            
+            if bounds_changed {
+                nodes_to_update.push(*node_id);
+                bounds_changed_hits += 1;
+                log::info!("[SpatialHitTester] Node {} bounds changed: stored ({:.1},{:.1},{:.1},{:.1}) vs current ({:.1},{:.1},{:.1},{:.1})",
+                    node_id, data.x, data.y, data.width, data.height, layout.x, layout.y, layout.width, layout.height);
+            }
+        }
+        
+        // Update nodes that changed
+        if !nodes_to_update.is_empty() {
+            log::info!("[SpatialHitTester] Updating {} nodes (dirty_mask: {}, bounds_changed: {})", 
+                nodes_to_update.len(), dirty_mask_hits, bounds_changed_hits);
+            for node_id in nodes_to_update {
+                self.remove_node(node_id);
+                self.add_node(node_id);
+            }
         }
     }
 
@@ -138,7 +194,6 @@ impl SpatialHitTester {
     }
 
     /// Remove a node from spatial index
-    #[allow(dead_code)]
     fn remove_node(&mut self, node_id: u32) {
         if let Some(data) = self.nodes.remove(&node_id) {
             for cx in data.min_cell_x..=data.max_cell_x {
@@ -192,9 +247,9 @@ impl HitTester for SpatialHitTester {
         let cell_x = (x / GRID_CELL_SIZE).floor() as i32;
         let cell_y = (y / GRID_CELL_SIZE).floor() as i32;
         
-
-        
         let mut best_node: Option<(u32, NodeData)> = None;
+        let mut checked_nodes = 0;
+        let mut in_bounds_nodes = 0;
 
         // Check cell and neighbors (for nodes crossing cell boundaries)
         for dx in -1..=1 {
@@ -202,6 +257,7 @@ impl HitTester for SpatialHitTester {
                 let check_cell = (cell_x + dx, cell_y + dy);
                 if let Some(cell) = self.grid.get(&check_cell) {
                     for &node_id in cell {
+                        checked_nodes += 1;
                         if let Some(&data) = self.nodes.get(&node_id) {
                             // Check if point is inside node bounds
                             if x >= data.x
@@ -209,6 +265,7 @@ impl HitTester for SpatialHitTester {
                                 && y >= data.y
                                 && y <= data.y + data.height
                             {
+                                in_bounds_nodes += 1;
                                 // Keep highest node ID (z-order)
                                 if best_node.map(|(id, _)| node_id > id).unwrap_or(true) {
                                     best_node = Some((node_id, data));
@@ -219,6 +276,9 @@ impl HitTester for SpatialHitTester {
                 }
             }
         }
+
+        log::info!("[SpatialHitTester] Hit test at ({:.1},{:.1}): cell ({},{}), checked {} nodes, {} in bounds, best: {:?}",
+            x, y, cell_x, cell_y, checked_nodes, in_bounds_nodes, best_node.map(|(id, _)| id));
 
         match best_node {
             Some((id, data)) => HitTestResult::hit(id, x - data.x, y - data.y),

@@ -1002,19 +1002,10 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
         if id as usize >= MAX_NODES { continue; }
         
         if let Some(node) = state.nodes.get(&id) {
-            // Check dirty bit if tracker available
-            if let Some(ref tracker) = dirty_tracker_opt {
-                if !tracker.is_node_dirty(id) {
-                    // Still need to process children even if this node is clean
-                    if let Some(children) = children_map.get(&id) {
-                        for &child in children {
-                            queue.push_back(child);
-                        }
-                    }
-                    continue;
-                }
-            }
+            // Always calculate absolute position for this node (needed by children)
+            let (parent_abs_x, parent_abs_y) = abs_positions.get(&node.parent_id).copied().unwrap_or((0.0, 0.0));
             
+            // Always get layout and calculate absolute position (needed for both dirty and clean nodes)
             if let Ok(layout) = state.taffy.layout(node.taffy_node) {
                 // Skip zero-size nodes (not yet computed)
                 if layout.size.width <= 0.0 || layout.size.height <= 0.0 {
@@ -1022,11 +1013,12 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
                 }
                 
                 // Calculate absolute position
-                let (parent_abs_x, parent_abs_y) = abs_positions.get(&node.parent_id).copied().unwrap_or((0.0, 0.0));
                 let abs_x = parent_abs_x + layout.location.x;
                 let abs_y = parent_abs_y + layout.location.y;
                 abs_positions.insert(id, (abs_x, abs_y));
                 
+                // Always check if layout changed and update shared buffer
+                // This is needed because parent layout changes affect child absolute positions
                 let target = ls + (id as usize * 16);
                 let nx = abs_x.to_le_bytes();
                 let ny = abs_y.to_le_bytes();
@@ -1049,7 +1041,7 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
                     memory[mask_pos..mask_pos+4].copy_from_slice(&mask.to_le_bytes());
                 }
                 
-                // Add children to queue
+                // Always process children (they may need updated parent positions)
                 if let Some(children) = children_map.get(&id) {
                     for &child in children {
                         queue.push_back(child);

@@ -442,6 +442,14 @@ impl From<f32> for Prop<SizeUnit> { fn from(v: f32) -> Self { Prop::Static(SizeU
 impl From<i32> for Prop<SizeUnit> { fn from(v: i32) -> Self { Prop::Static(SizeUnit::Lp(v as f32)) } }
 impl From<&str> for Prop<SizeUnit> { fn from(v: &str) -> Self { Prop::Static(SizeUnit::from(v)) } }
 
+// Support for State signals
+impl From<dyxel_state::SizeUnitSignal> for Prop<SizeUnit> { 
+    fn from(v: dyxel_state::SizeUnitSignal) -> Self { Prop::Dynamic(Box::new(v)) } 
+}
+impl From<dyxel_state::StateSignal<(u32, u32, u32, u32)>> for Prop<(u32, u32, u32, u32)> { 
+    fn from(v: dyxel_state::StateSignal<(u32, u32, u32, u32)>) -> Self { Prop::Dynamic(Box::new(v)) } 
+}
+
 pub trait SignalPropExt: Signal + Sized { 
     fn sig(self) -> Prop<Self::Item> where Self: Unpin + 'static { Prop::Dynamic(Box::new(self)) }
     
