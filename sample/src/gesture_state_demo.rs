@@ -145,7 +145,7 @@ pub fn GestureStateDemo() -> impl BaseView {
                     Text("{pan_count}") {
                         fontSize: 32.0,
                         fontWeight: 700,
-                        textColor: (255, 255, 255, 255),
+                        textColor: (255, 0, 0, 255),
                     }
                 }
             }
@@ -159,7 +159,7 @@ pub fn GestureStateDemo() -> impl BaseView {
                 margin: (0.0, 0.0, 10.0, 0.0),
                 justifyContent: JustifyContent::Center,
                 alignItems: AlignItems::Center,
-                onTap: move |_, _| {
+                onTap: move |_| {
                     let count = tap_count2.get() + 1;
                     tap_count2.set(count);
                     last_event2.set(format!("Tap #{} detected", count));
@@ -180,7 +180,7 @@ pub fn GestureStateDemo() -> impl BaseView {
                 margin: (0.0, 0.0, 10.0, 0.0),
                 justifyContent: JustifyContent::Center,
                 alignItems: AlignItems::Center,
-                onDoubleTap: move |_, _| {
+                onDoubleTap: move |_| {
                     let count = double_tap_count2.get() + 1;
                     double_tap_count2.set(count);
                     last_event_double.set(format!("Double Tap #{} detected", count));
@@ -201,7 +201,7 @@ pub fn GestureStateDemo() -> impl BaseView {
                 margin: (0.0, 0.0, 10.0, 0.0),
                 justifyContent: JustifyContent::Center,
                 alignItems: AlignItems::Center,
-                onLongPress: move |_, _| {
+                onLongPress: move |_| {
                     let count = long_press_count2.get() + 1;
                     long_press_count2.set(count);
                     last_event3.set(format!("LongPress #{} completed", count));
@@ -222,12 +222,12 @@ pub fn GestureStateDemo() -> impl BaseView {
                 margin: (0.0, 0.0, 10.0, 0.0),
                 justifyContent: JustifyContent::Center,
                 alignItems: AlignItems::Center,
-                onPanUpdate: move |dx, dy| {
+                onPanUpdate: move |event| {
                     let count = pan_count2.get() + 1;
                     pan_count2.set(count);
-                    pan_x2.set(pan_x2.get() + dx);
-                    pan_y2.set(pan_y2.get() + dy);
-                    last_event4.set(format!("Pan #{}: delta=({:.1}, {:.1})", count, dx, dy));
+                    pan_x2.set(pan_x2.get() + event.delta_x);
+                    pan_y2.set(pan_y2.get() + event.delta_y);
+                    last_event4.set(format!("Pan #{}: delta=({:.1}, {:.1})", count, event.delta_x, event.delta_y));
                 },
 
                 View {

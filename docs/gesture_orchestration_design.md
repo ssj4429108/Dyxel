@@ -74,102 +74,141 @@ pub trait GestureRecognizer: Send + Sync {
 
 ## 3. 手势编排 DSL
 
-### 3.1 基础手势配置
+### 3.1 基础手势配置（View 级语法糖）
 
 ```rust
-// 单击手势 (TapGesture { count: 1 })
+// 单击手势 -> 内部映射为 TapGesture { count: 1, onGestureEnded: ... }
 View {
-    onTap: |x, y| { /* ... */ }
+    onTap: |event| { /* ... */ }
 }
 
-// 双击手势 (TapGesture { count: 2 })
+// 双击手势
 View {
-    onDoubleTap: |x, y| { /* ... */ }
+    onDoubleTap: |event| { /* ... */ }
 }
 
-// 三击手势 (TapGesture { count: 3 })
+// 长按手势 -> 内部映射为 LongPressGesture { onGestureEnded: ... }
 View {
-    gesture: TapGesture { count: 3 },
-    onGestureEnded: |event| { /* ... */ }
+    onLongPress: |event| { /* ... */ }
 }
 
-// 长按手势
+// 滑动手势 -> 内部映射为 PanGesture { onGestureChanged: ... }
 View {
-    onLongPress: |x, y| { /* ... */ }
-}
-
-// 滑动手势
-View {
-    onPanUpdate: |dx, dy| { /* ... */ }
+    onPanUpdate: |event| { /* ... */ }
 }
 ```
 
-### 3.2 显式手势配置
+### 3.2 显式手势配置（完整形态）
+
+**所有单一手势统一支持以下回调**：
+- `onGestureBegan`: 状态从 `Possible` 变为 `Began` 时触发
+- `onGestureChanged`: 持续手势（Pan/Pinch/Rotation）在状态变化时触发；离散手势（Tap/LongPress/Swipe）通常不触发
+- `onGestureEnded`: 状态变为 `Ended` 时触发
+- `onGestureCancelled`: 状态变为 `Cancelled` 时触发
 
 ```rust
-// 高级 Tap 配置
+// Tap 手势（离散手势）
 View {
     gesture: TapGesture {
         count: 2,              // 双击
         max_duration_ms: 300,  // 两次点击间隔不超过300ms
-    },
-    onGestureEnded: |event| {
-        log.info("Double tap at ({}, {})", event.x, event.y);
+        onGestureBegan: |event| {
+            log.info("Double tap began at ({}, {})", event.x, event.y);
+        },
+        onGestureEnded: |event| {
+            log.info("Double tap ended at ({}, {})", event.x, event.y);
+        },
+        onGestureCancelled: |event| {
+            log.info("Double tap cancelled");
+        }
     }
 }
 
-// Pan 手势配置
+// LongPress 手势（离散手势）
+View {
+    gesture: LongPressGesture {
+        duration_ms: 500,
+        onGestureBegan: |event| {
+            log.info("Long press began");
+        },
+        onGestureEnded: |event| {
+            log.info("Long press ended");
+        },
+        onGestureCancelled: |event| {
+            log.info("Long press cancelled");
+        }
+    }
+}
+
+// Pan 手势（持续手势）
 View {
     gesture: PanGesture {
-        direction: PanDirection::Horizontal,  // 仅水平滑动
-        min_distance: 20.0,                   // 至少20px才触发
-    },
-    onGestureBegan: |event| { /* ... */ },
-    onGestureChanged: |event| { /* ... */ },
-    onGestureEnded: |event| { /* ... */ },
+        direction: PanDirection::Horizontal,
+        min_distance: 20.0,
+        onGestureBegan: |event| { /* ... */ },
+        onGestureChanged: |event| { /* ... */ },
+        onGestureEnded: |event| { /* ... */ },
+        onGestureCancelled: |event| { /* ... */ },
+    }
 }
 ```
 
 ### 3.3 组合手势
 
+**组合手势本身只支持裁决回调**（`onGestureJudgeBegin` / `onGestureRecognizerJudgeBegin`），**子手势支持完整状态监听**：
+
 ```rust
 // 顺序手势: 双击后长按
+// 组合手势只负责编排，每个子手势有自己的状态回调
 View {
     gesture: SequenceGesture([
-        TapGesture { count: 2 },
-        LongPressGesture { duration_ms: 500 }
+        TapGesture { 
+            count: 2,
+            onGestureBegan: |event| { log.info("Step 1: Double tap began"); },
+            onGestureEnded: |event| { log.info("Step 1: Double tap done"); }
+        },
+        LongPressGesture { 
+            duration_ms: 500,
+            onGestureBegan: |event| { log.info("Step 2: Long press began"); },
+            onGestureEnded: |event| { log.info("Step 2: Long press done"); }
+        }
     ]),
-    onGestureEnded: || { 
-        log.info("Double tap then long press!");
+    onGestureJudgeBegin: |gesture, context| {
+        // 只有组合手势级别支持裁决
+        GestureJudgement::Accept
     }
 }
 
 // 并行手势: 同时检测缩放和旋转
 View {
     gesture: ParallelGesture([
-        PinchGesture::default(),
-        RotationGesture::default()
-    ]),
-    onGestureChanged: |event| {
-        match event.gesture_type {
-            GestureType::Pinch => update_scale(event.scale),
-            GestureType::Rotation => update_rotation(event.rotation),
+        PinchGesture {
+            onGestureBegan: |event| { /* ... */ },
+            onGestureChanged: |event| { update_scale(event.scale); },
+            onGestureEnded: |event| { /* ... */ },
+        },
+        RotationGesture {
+            onGestureBegan: |event| { /* ... */ },
+            onGestureChanged: |event| { update_rotation(event.rotation); },
+            onGestureEnded: |event| { /* ... */ },
         }
-    }
+    ])
 }
 
 // 互斥手势: 单击或长按，只能触发一个
 View {
     gesture: ExclusiveGesture([
-        TapGesture { count: 1 },
-        LongPressGesture { duration_ms: 500 }
-    ]),
-    onGestureEnded: |event| {
-        match event.gesture_type {
-            GestureType::Tap => log.info("Tap"),
-            GestureType::LongPress => log.info("Long press"),
+        TapGesture { 
+            count: 1,
+            onGestureBegan: |event| { log.info("Tap began"); },
+            onGestureEnded: |event| { log.info("Tap triggered"); }
+        },
+        LongPressGesture { 
+            duration_ms: 500,
+            onGestureBegan: |event| { log.info("Long press began"); },
+            onGestureEnded: |event| { log.info("Long press triggered"); }
         }
-    }
+    ])
 }
 ```
 
@@ -210,7 +249,9 @@ pub enum GestureJudgement {
 
 ```rust
 // 基础裁决 - 在手势即将成功时拦截
+// 适用于单一手势和组合手势
 View {
+    gesture: TapGesture { count: 1 },
     onGestureJudgeBegin: |gesture, context| {
         if gesture.gesture_type == GestureType::Tap {
             // 只在点击区域上半部分响应
@@ -226,7 +267,9 @@ View {
 }
 
 // 高级裁决 - 获取所有竞争手势进行裁决
+// 适用于单一手势和组合手势
 View {
+    gesture: ExclusiveGesture([...]),
     onGestureRecognizerJudgeBegin: |recognizers, current, context| {
         // 检查是否有子组件的手势在竞争
         let has_child_competitor = recognizers.iter()
@@ -389,11 +432,11 @@ impl CompositeCoordinator for ExclusiveCoordinator {
 1. 实现 `SequenceCoordinator`
 2. 实现 `ParallelCoordinator` 
 3. 实现 `ExclusiveCoordinator`
-4. 添加 `CompositeGesture` DSL
+4. 添加 `CompositeGesture` DSL，子手势支持独立状态回调
 
 ### Phase 3: 冲突处理
-1. 实现 `onGestureJudgeBegin` 回调
-2. 实现 `onGestureRecognizerJudgeBegin` 回调
+1. 实现 `onGestureJudgeBegin` 回调（单一手势 + 组合手势）
+2. 实现 `onGestureRecognizerJudgeBegin` 回调（单一手势 + 组合手势）
 3. 实现 `shouldParallelWith` 机制
 4. 添加手势优先级系统
 
@@ -414,43 +457,52 @@ VideoPlayer {
     // 基础控制手势(互斥)
     gesture: ExclusiveGesture([
         // 单击: 暂停/播放
-        TapGesture { count: 1 },
+        TapGesture { 
+            count: 1,
+            onGestureBegan: |event| { /* 可在此显示视觉反馈 */ },
+            onGestureEnded: |event| { toggle_play(); }
+        },
         // 双击: 全屏切换
-        TapGesture { count: 2, max_duration_ms: 300 },
+        TapGesture { 
+            count: 2, 
+            max_duration_ms: 300,
+            onGestureBegan: |event| { /* 可在此显示视觉反馈 */ },
+            onGestureEnded: |event| { toggle_fullscreen(); }
+        },
         // 长按: 快进
-        LongPressGesture { duration_ms: 800 },
+        LongPressGesture { 
+            duration_ms: 800,
+            onGestureBegan: |event| { show_fast_forward_ui(); },
+            onGestureEnded: |event| { stop_fast_forward(); }
+        },
     ]),
-    
-    onGestureEnded: |event| {
-        match event.gesture_type {
-            GestureType::Tap if event.tap_count == 1 => toggle_play(),
-            GestureType::Tap if event.tap_count == 2 => toggle_fullscreen(),
-            GestureType::LongPress => fast_forward(),
-        }
-    },
     
     // 进度条滑动(水平)
     gesture: PanGesture {
         direction: PanDirection::Horizontal,
         min_distance: 10.0,
-    },
-    onGestureChanged: |event| {
-        seek_video(event.delta_x);
+        onGestureBegan: |event| { show_seek_preview(); },
+        onGestureChanged: |event| {
+            seek_video(event.delta_x);
+        },
+        onGestureEnded: |event| { hide_seek_preview(); },
     },
     
     // 亮度调节(垂直滑动手势 - 只在左半屏响应)
-    onGestureJudgeBegin: |gesture, context| {
-        if gesture.gesture_type == GestureType::Pan 
-            && gesture.direction == PanDirection::Vertical {
-            
+    gesture: PanGesture {
+        direction: PanDirection::Vertical,
+        onGestureJudgeBegin: |gesture, context| {
             if context.location.x < context.bounds.width / 2.0 {
                 GestureJudgement::Accept
             } else {
                 GestureJudgement::Reject
             }
-        } else {
-            GestureJudgement::Accept
-        }
+        },
+        onGestureBegan: |event| { show_brightness_ui(); },
+        onGestureChanged: |event| {
+            adjust_brightness(event.delta_y);
+        },
+        onGestureEnded: |event| { hide_brightness_ui(); },
     },
     
     // 嵌套滚动处理
@@ -473,10 +525,10 @@ VideoPlayer {
 ```rust
 // 现有 API 保持不变，内部映射到新系统
 View {
-    onTap: |x, y| { /* ... */ }  // -> TapGesture { count: 1 }
-    onDoubleTap: |x, y| { /* ... */ }  // -> TapGesture { count: 2 }
-    onLongPress: |x, y| { /* ... */ }  // -> LongPressGesture
-    onPanUpdate: |dx, dy| { /* ... */ }  // -> PanGesture
+    onTap: |event| { /* ... */ }         // -> TapGesture { count: 1, onGestureEnded: ... }
+    onDoubleTap: |event| { /* ... */ }  // -> TapGesture { count: 2, onGestureEnded: ... }
+    onLongPress: |event| { /* ... */ }  // -> LongPressGesture { onGestureEnded: ... }
+    onPanUpdate: |event| { /* ... */ }  // -> PanGesture { onGestureChanged: ... }
 }
 ```
 
@@ -486,18 +538,21 @@ View {
 // 新旧 API 可以混合使用
 View {
     // 简单手势使用旧 API
-    onTap: |x, y| { show_menu(); },
+    onTap: |event| { show_menu(); },
     
     // 复杂手势使用新 API
     gesture: SequenceGesture([
-        TapGesture { count: 2 },
-        LongPressGesture { duration_ms: 500 }
-    ]),
-    onGestureEnded: |event| {
-        if event.gesture_type == GestureType::Sequence {
-            activate_special_mode();
+        TapGesture { 
+            count: 2,
+            onGestureBegan: |event| { log.info("Double tap began"); },
+            onGestureEnded: |event| { log.info("Double tap ended"); }
+        },
+        LongPressGesture { 
+            duration_ms: 500,
+            onGestureBegan: |event| { log.info("Long press began"); },
+            onGestureEnded: |event| { log.info("Long press ended"); }
         }
-    }
+    ])
 }
 ```
 
