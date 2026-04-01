@@ -475,6 +475,7 @@ impl VelloBackend {
         shared_state: &SharedMutex<SharedState>,
     ) -> RenderResult {
         // Detailed frame timing for diagnostics
+        #[cfg(not(target_os = "android"))]
         let frame_start = std::time::Instant::now();
         let mut stage_timer = dyxel_perf::FrameTimer::new();
         
@@ -517,12 +518,11 @@ impl VelloBackend {
                     let editor = editors.entry(id).or_insert_with(|| {
                         let mut ed = Editor::new(node.font_size);
                         ed.set_text(&node.text);
-                        // node.color is already peniko::Color
                         ed.set_text_color(node.color);
                         ed
                     });
                     
-                    // Update editor if text/font changed
+                    // Update editor if text changed
                     if editor.text() != node.text {
                         editor.set_text(&node.text);
                     }
@@ -540,15 +540,30 @@ impl VelloBackend {
                 .map(|(id, n)| (n.taffy_node, *id))
                 .collect();
 
-            // Compute layout with text measurement
-            // First pass: measure with unconstrained width to get natural size
+            // Second pass: measure text nodes and detect size changes
+            // Collect nodes whose size changed significantly
+            let mut nodes_to_update: Vec<(u32, f32, f32)> = Vec::new();
             for (&id, node) in &g.nodes {
                 if node.view_type == ViewType::Text {
                     if let Some(editor) = editors.get_mut(&id) {
-                        // Measure natural size (no wrapping)
                         editor.set_width(None);
+                        let (new_width, new_height) = editor.layout_size();
+                        let (old_width, old_height) = node.last_measured_size;
+                        
+                        // If size changed significantly (more than 0.5px), record for update
+                        if (new_width - old_width).abs() > 0.5 || (new_height - old_height).abs() > 0.5 {
+                            nodes_to_update.push((id, new_width, new_height));
+                        }
                     }
                 }
+            }
+            
+            // Update last_measured_size and mark dirty (triggers Taffy relayout via set_style)
+            for (id, new_width, new_height) in nodes_to_update {
+                if let Some(node_mut) = g.nodes.get_mut(&id) {
+                    node_mut.last_measured_size = (new_width, new_height);
+                }
+                g.mark_dirty(id);
             }
             
 
@@ -763,11 +778,17 @@ impl VelloBackend {
             let report = stage_timer.report();
             
             // Calculate stage durations
+            #[cfg(not(target_os = "android"))]
             let state_lock_time = report.get("init_done_to_perf_start") + report.get("perf_start_to_state_lock");
+            #[cfg(not(target_os = "android"))]
             let scene_build_time = report.get("state_lock_to_scene_build");
+            #[cfg(not(target_os = "android"))]
             let gpu_time = report.get("scene_build_to_gpu_render");
+            #[cfg(not(target_os = "android"))]
             let blit_time = report.get("gpu_render_to_blit_submit");
+            #[cfg(not(target_os = "android"))]
             let present_time = report.get("blit_submit_to_present_return");
+            #[cfg(not(target_os = "android"))]
             let total = frame_start.elapsed().as_secs_f32() * 1000.0;
             
             #[cfg(target_os = "android")]

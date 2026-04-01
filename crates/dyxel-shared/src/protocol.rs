@@ -184,6 +184,42 @@ pub struct LayoutResult {
 pub const MAX_COMMAND_BYTES: usize = 1024 * 64;
 pub const MAX_NODES: usize = 1024;
 
+/// 容量档位（支持动态扩容）
+pub const CAPACITY_LEVELS: [usize; 5] = [256, 512, 1024, 2048, 4096];
+pub const MAX_CAPACITY: usize = 4096;
+pub const INITIAL_CAPACITY: usize = 256;
+
+/// 带代际的节点句柄（防止 Stale ID）
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NodeHandle {
+    /// 槽位索引
+    pub slot: u32,
+    /// 代际计数器（每次回收+1）
+    pub generation: u32,
+}
+
+impl NodeHandle {
+    /// 无效句柄
+    pub const INVALID: Self = Self { slot: u32::MAX, generation: 0 };
+    
+    /// 创建新句柄
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+    
+    /// 检查是否有效
+    pub fn is_valid(&self) -> bool {
+        self.slot != u32::MAX
+    }
+}
+
+impl Default for NodeHandle {
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
 /// Transaction flags for controlling behavior
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,10 +363,16 @@ impl DirtyTracker {
 pub struct SharedBuffer {
     pub command_len: u32,
     pub max_node_id: u32,
-    pub _padding: [u32; 2],
+    /// 当前容量（支持动态扩容，最大 MAX_CAPACITY）
+    pub capacity: u32,
+    pub _padding: [u32; 1],
     pub command_data: [u8; MAX_COMMAND_BYTES],
-    pub layout_results: [LayoutResult; MAX_NODES],
-    pub dirty_mask: [u32; 32],
+    /// 布局结果（实际使用 capacity，预分配 MAX_CAPACITY）
+    pub layout_results: [LayoutResult; MAX_CAPACITY],
+    /// 代际数组（与 layout_results 一一对应）
+    pub generations: [u32; MAX_CAPACITY],
+    /// 脏标记（位图，大小取决于 capacity）
+    pub dirty_mask: [u32; 128],  // 4096 / 32 = 128
     /// Input event ring buffer (for Input Proxy)
     pub input_buffer: crate::input::InputBuffer,
     /// Device information (read by WASM)

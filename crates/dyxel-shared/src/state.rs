@@ -5,11 +5,14 @@ use std::collections::HashMap;
 use taffy::prelude::*;
 use peniko::Color;
 use crate::types::{ViewType, Role};
+use crate::{NodeHandle, MAX_CAPACITY, INITIAL_CAPACITY};
 
 pub struct ViewNode { 
     pub taffy_node: NodeId, 
     pub color: Color, 
     pub children: Vec<u32>, 
+    /// Parent node ID (0 means no parent/root)
+    pub parent_id: u32,
     pub z_index: i32, 
     pub label: String, 
     pub text: String,
@@ -23,6 +26,8 @@ pub struct ViewNode {
     pub padding: (f32, f32, f32, f32),
     /// Dirty field tracking for command deduplication
     pub dirty_fields: u8,
+    /// Last measured size for detecting size changes that require relayout
+    pub last_measured_size: (f32, f32),
 }
 
 pub struct SharedState { 
@@ -37,6 +42,16 @@ pub struct SharedState {
     // ID mapping for hot restart: maps WASM ID -> Host ID
     id_map: HashMap<u32, u32>,
     next_host_id: u32,
+    
+    // === 代际ID支持 ===
+    /// 当前容量（动态扩容，初始为 INITIAL_CAPACITY）
+    capacity: usize,
+    /// 每个槽位的代际计数器（防止 Stale ID）
+    generations: [u32; MAX_CAPACITY],
+    /// 空闲槽位列表（回收的ID）
+    free_ids: Vec<u32>,
+    /// 活跃节点映射: WASM ID -> NodeHandle
+    active_handles: HashMap<u32, NodeHandle>,
 }
 
 unsafe impl Send for SharedState {}
@@ -54,6 +69,10 @@ impl SharedState {
             last_seen_id: None,
             id_map: HashMap::new(),
             next_host_id: 0,
+            capacity: INITIAL_CAPACITY,
+            generations: [0; MAX_CAPACITY],
+            free_ids: Vec::new(),
+            active_handles: HashMap::new(),
         } 
     }
 
@@ -61,7 +80,6 @@ impl SharedState {
     pub fn clear(&mut self) {
         let node_count = self.nodes.len();
         if node_count > 0 {
-
             self.nodes.clear();
             self.taffy = TaffyTree::new();
             self.root_id = None;
@@ -70,6 +88,10 @@ impl SharedState {
             self.last_seen_id = None;
             self.id_map.clear();
             self.next_host_id = 0;
+            self.capacity = INITIAL_CAPACITY;
+            self.generations = [0; MAX_CAPACITY];
+            self.free_ids.clear();
+            self.active_handles.clear();
         }
     }
     
@@ -164,6 +186,7 @@ impl SharedState {
             taffy_node, 
             color: Color::WHITE, 
             children: vec![], 
+            parent_id: 0,
             z_index: 0, 
             label: String::new(), 
             text: String::new(),
@@ -176,6 +199,7 @@ impl SharedState {
             has_click: false, 
             padding: (0.0, 0.0, 0.0, 0.0),
             dirty_fields: 0,
+            last_measured_size: (0.0, 0.0),
         });
     }
     
@@ -367,8 +391,41 @@ impl SharedState {
             if let Some(parent) = self.nodes.get_mut(&host_pid) {
                 if !parent.children.contains(&host_cid) {
                     parent.children.push(host_cid);
+                    // Update child's parent reference
+                    if let Some(child) = self.nodes.get_mut(&host_cid) {
+                        child.parent_id = host_pid;
+                    }
                     let _ = self.taffy.add_child(ptn, ctn);
                 }
+            }
+        }
+    }
+    
+    /// Get parent node ID for a given child node ID (0 means no parent)
+    pub fn get_parent(&self, node_id: u32) -> u32 {
+        self.nodes.get(&node_id).map(|n| n.parent_id).unwrap_or(0)
+    }
+    
+    /// Collect all ancestor node IDs (from immediate parent to root)
+    pub fn get_ancestors(&self, node_id: u32) -> Vec<u32> {
+        let mut ancestors = Vec::new();
+        let mut current = node_id;
+        while current != 0 {
+            let parent_id = self.get_parent(current);
+            if parent_id == 0 { break; }
+            ancestors.push(parent_id);
+            current = parent_id;
+        }
+        ancestors
+    }
+    
+    /// Mark a node as dirty by re-setting its Taffy style
+    /// Taffy's set_style automatically calls mark_dirty which recursively marks all ancestors
+    pub fn mark_dirty(&mut self, node_id: u32) {
+        if let Some(node) = self.nodes.get(&node_id) {
+            if let Ok(style) = self.taffy.style(node.taffy_node) {
+                let new_style = style.clone();
+                let _ = self.taffy.set_style(node.taffy_node, new_style);
             }
         }
     }
@@ -428,5 +485,164 @@ impl SharedState {
                 }
             }
         }
+    }
+    
+    // === 代际ID支持 ===
+    
+    /// 分配一个新的节点ID（优先使用回收的ID）
+    fn allocate_id(&mut self) -> u32 {
+        // 优先使用回收的ID
+        if let Some(id) = self.free_ids.pop() {
+            return id;
+        }
+        
+        // 否则分配新ID
+        let id = self.next_host_id;
+        self.next_host_id += 1;
+        id
+    }
+    
+    /// 创建节点并返回 NodeHandle（代际ID版本）
+    pub fn create_node_with_handle(&mut self, wasm_id: u32) -> Option<NodeHandle> {
+        let slot = self.allocate_id();
+        
+        // 检查是否超出容量
+        if slot as usize >= self.capacity {
+            // 尝试扩容（简化版，实际应调用 expand_capacity）
+            if !self.try_expand_capacity() {
+                log::warn!("Node capacity exceeded: {}/{}", slot, self.capacity);
+                return None;
+            }
+        }
+        
+        let generation = self.generations[slot as usize];
+        let handle = NodeHandle::new(slot, generation);
+        
+        // 创建 Taffy 节点
+        let taffy_node = self.taffy.new_leaf(Style::default()).ok()?;
+        
+        // 插入节点
+        self.nodes.insert(slot, ViewNode {
+            taffy_node,
+            color: Color::WHITE,
+            children: vec![],
+            parent_id: 0,
+            z_index: 0,
+            label: String::new(),
+            text: String::new(),
+            font_size: 16.0,
+            font_family: String::new(),
+            font_weight: 400,
+            border_radius: 0.0,
+            role: Role::None,
+            view_type: ViewType::Container,
+            has_click: false,
+            padding: (0.0, 0.0, 0.0, 0.0),
+            dirty_fields: 0,
+            last_measured_size: (0.0, 0.0),
+        });
+        
+        // 记录映射
+        self.id_map.insert(wasm_id, slot);
+        self.active_handles.insert(wasm_id, handle);
+        
+        // 设置根节点
+        if self.root_id.is_none() {
+            self.root_id = Some(slot);
+        }
+        
+        Some(handle)
+    }
+    
+    /// 验证 NodeHandle 是否有效
+    pub fn verify_handle(&self, handle: NodeHandle) -> bool {
+        if !handle.is_valid() {
+            return false;
+        }
+        let slot = handle.slot as usize;
+        if slot >= self.capacity {
+            return false;
+        }
+        // 检查代际是否匹配
+        self.generations[slot] == handle.generation && self.nodes.contains_key(&handle.slot)
+    }
+    
+    /// 获取 NodeHandle 对应的节点
+    pub fn get_node_by_handle(&self, handle: NodeHandle) -> Option<&ViewNode> {
+        if self.verify_handle(handle) {
+            self.nodes.get(&handle.slot)
+        } else {
+            None
+        }
+    }
+    
+    /// 获取 NodeHandle 对应的节点（可变）
+    pub fn get_node_by_handle_mut(&mut self, handle: NodeHandle) -> Option<&mut ViewNode> {
+        if self.verify_handle(handle) {
+            self.nodes.get_mut(&handle.slot)
+        } else {
+            None
+        }
+    }
+    
+    /// 删除节点并回收ID（增加代际）
+    pub fn remove_node_with_handle(&mut self, handle: NodeHandle) -> bool {
+        if !self.verify_handle(handle) {
+            return false;
+        }
+        
+        let slot = handle.slot;
+        
+        // 从 Taffy 中移除
+        if let Some(node) = self.nodes.get(&slot) {
+            let _ = self.taffy.remove(node.taffy_node);
+        }
+        
+        // 从 nodes 中移除
+        self.nodes.remove(&slot);
+        
+        // 清理映射
+        self.active_handles.retain(|_, h| h.slot != slot);
+        
+        // 增加代际（防止 Stale ID）
+        let slot_idx = slot as usize;
+        if slot_idx < MAX_CAPACITY {
+            self.generations[slot_idx] = self.generations[slot_idx].wrapping_add(1);
+        }
+        
+        // 回收ID
+        self.free_ids.push(slot);
+        
+        // 清理子节点的 parent_id
+        for node in self.nodes.values_mut() {
+            if node.parent_id == slot {
+                node.parent_id = 0;
+            }
+        }
+        
+        true
+    }
+    
+    /// 尝试扩容（简化版）
+    fn try_expand_capacity(&mut self) -> bool {
+        // 找到下一个容量档位
+        for &level in crate::CAPACITY_LEVELS.iter() {
+            if level > self.capacity && level <= MAX_CAPACITY {
+                self.capacity = level;
+                log::info!("Node capacity expanded to {}", level);
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// 获取当前容量
+    pub fn get_capacity(&self) -> usize {
+        self.capacity
+    }
+    
+    /// 获取代际数组（用于同步到 SharedBuffer）
+    pub fn get_generations(&self) -> &[u32; MAX_CAPACITY] {
+        &self.generations
     }
 }

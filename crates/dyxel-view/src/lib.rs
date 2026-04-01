@@ -62,10 +62,12 @@ pub mod dual_track_wasm;
 pub static mut SHARED_BUFFER: SharedBuffer = SharedBuffer {
     command_len: 0,
     max_node_id: 0,
-    _padding: [0; 2],
+    capacity: dyxel_shared::INITIAL_CAPACITY as u32,
+    _padding: [0; 1],
     command_data: [0; MAX_COMMAND_BYTES],
-    layout_results: [LayoutResult { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }; dyxel_shared::MAX_NODES],
-    dirty_mask: [0; 32],
+    layout_results: [LayoutResult { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }; dyxel_shared::MAX_CAPACITY],
+    generations: [0; dyxel_shared::MAX_CAPACITY],
+    dirty_mask: [0; 128],
     input_buffer: dyxel_shared::InputBuffer::new(),
     device_info: dyxel_shared::DeviceInfo {
         device_pixel_ratio: 1.0,
@@ -105,7 +107,15 @@ fn select_node(id: u32) {
 }
 
 fn track_node(id: u32) { unsafe { if id > SHARED_BUFFER.max_node_id { SHARED_BUFFER.max_node_id = id; } } }
-pub fn get_layout(id: u32) -> LayoutResult { unsafe { SHARED_BUFFER.layout_results[id as usize] } }
+pub fn get_layout(id: u32) -> LayoutResult { 
+    unsafe { 
+        if (id as usize) < SHARED_BUFFER.layout_results.len() {
+            SHARED_BUFFER.layout_results[id as usize] 
+        } else {
+            LayoutResult { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
+        }
+    } 
+}
 
 pub fn hit_test(x: f32, y: f32) -> Option<u32> {
     let max_id = unsafe { SHARED_BUFFER.max_node_id };

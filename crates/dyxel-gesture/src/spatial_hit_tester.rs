@@ -92,6 +92,10 @@ impl SpatialHitTester {
 
     /// Add a single node to spatial index
     unsafe fn add_node(&mut self, node_id: u32) {
+        // Bounds check to prevent out-of-bounds access
+        if node_id as usize >= dyxel_shared::MAX_NODES {
+            return;
+        }
         let layout = (*self.shared_buffer_ptr).layout_results[node_id as usize];
         
 
