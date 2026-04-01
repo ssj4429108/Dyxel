@@ -75,21 +75,6 @@ impl HandlerRegistry {
         None
     }
 
-    /// Map GestureEventType to HandlerType
-    pub fn handler_type_for_event(event_type: dyxel_gesture::GestureEventType) -> Option<HandlerType> {
-        use dyxel_gesture::GestureEventType;
-        match event_type {
-            GestureEventType::Tap => Some(HandlerType::Tap),
-            GestureEventType::DoubleTap => Some(HandlerType::DoubleTap),
-            GestureEventType::LongPressStart => Some(HandlerType::LongPress),
-            GestureEventType::LongPressEnd => Some(HandlerType::LongPress),
-            GestureEventType::PanStart => Some(HandlerType::Pan),
-            GestureEventType::PanUpdate => Some(HandlerType::Pan),
-            GestureEventType::PanEnd => Some(HandlerType::Pan),
-            _ => None,
-        }
-    }
-
     /// Get stats for debugging
     pub fn stats(&self) -> HandlerStats {
         HandlerStats {

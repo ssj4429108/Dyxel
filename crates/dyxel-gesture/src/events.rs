@@ -105,19 +105,15 @@ impl PointerData {
 /// High-level gesture event types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureEventType {
-    /// Single tap detected
+    /// Tap detected (tap_count field indicates single/double/triple/etc)
     Tap,
-    /// Double tap detected
-    DoubleTap,
-    /// Triple tap detected
-    TripleTap,
     /// Long press started
     LongPressStart,
-    /// Long press ended (finger lifted after long press)
+    /// Long press ended
     LongPressEnd,
     /// Pan started
     PanStart,
-    /// Pan updated (finger moved during pan)
+    /// Pan updated (finger moved)
     PanUpdate,
     /// Pan ended
     PanEnd,
@@ -155,13 +151,15 @@ pub struct GestureEvent {
     pub scale: f32,
     /// For ScaleUpdate: scale delta since last event
     pub scale_delta: f32,
+    /// For Tap: number of taps (1=single, 2=double, 3=triple, etc)
+    pub tap_count: u32,
     /// Timestamp of the event
     pub timestamp_us: u64,
 }
 
 impl GestureEvent {
-    /// Create a tap event
-    pub fn tap(node_id: u32, pointer_id: u32, x: f32, y: f32, timestamp_us: u64) -> Self {
+    /// Create a tap event with specified count
+    pub fn tap(node_id: u32, pointer_id: u32, x: f32, y: f32, tap_count: u32, timestamp_us: u64) -> Self {
         Self {
             event_type: GestureEventType::Tap,
             target_node_id: node_id,
@@ -173,6 +171,7 @@ impl GestureEvent {
             delta_y: 0.0,
             scale: 1.0,
             scale_delta: 0.0,
+            tap_count,
             timestamp_us,
         }
     }
@@ -180,7 +179,7 @@ impl GestureEvent {
     /// Create a double tap event
     pub fn double_tap(node_id: u32, pointer_id: u32, x: f32, y: f32, timestamp_us: u64) -> Self {
         Self {
-            event_type: GestureEventType::DoubleTap,
+            event_type: GestureEventType::Tap,
             target_node_id: node_id,
             primary_pointer_id: pointer_id,
             pointer_count: 1,
@@ -190,6 +189,7 @@ impl GestureEvent {
             delta_y: 0.0,
             scale: 1.0,
             scale_delta: 0.0,
+            tap_count: 2,
             timestamp_us,
         }
     }
@@ -207,6 +207,7 @@ impl GestureEvent {
             delta_y: 0.0,
             scale: 1.0,
             scale_delta: 0.0,
+            tap_count: 0,
             timestamp_us,
         }
     }
@@ -224,6 +225,7 @@ impl GestureEvent {
             delta_y: 0.0,
             scale: 1.0,
             scale_delta: 0.0,
+            tap_count: 0,
             timestamp_us,
         }
     }
@@ -241,6 +243,7 @@ impl GestureEvent {
             delta_y: 0.0,
             scale: 1.0,
             scale_delta: 0.0,
+            tap_count: 0,
             timestamp_us,
         }
     }
@@ -266,6 +269,7 @@ impl GestureEvent {
             delta_y,
             scale: 1.0,
             scale_delta: 0.0,
+            tap_count: 0,
             timestamp_us,
         }
     }
@@ -291,6 +295,7 @@ impl GestureEvent {
             delta_y: velocity_y,
             scale: 1.0,
             scale_delta: 0.0,
+            tap_count: 0,
             timestamp_us,
         }
     }

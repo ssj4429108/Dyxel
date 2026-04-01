@@ -2,26 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Dyxel View Layer - WASM-side UI Building
-//! 
+//!
 //! ## Logical Pixel System
-//! 
+//!
 //! Default unit is logical pixels (LP). Use `px()` for physical pixels:
-//! 
-//! ```rust
-//! use dyxel_view::{rsx, PxExt, LpExt};
-//! 
-//! rsx! {
-//!     View {
-//!         width: "100%",      // Percentage
-//!         height: "auto",     // Auto
-//!         
-//!         Text("Hello") {
-//!             fontSize: 16.0       // 16 logical pixels
-//!             fontSize: px(48)     // 48 physical pixels
-//!             fontSize: 16.lp()    // Explicit logical pixels
-//!         }
-//!     }
-//! }
+
+pub mod gesture;
+pub use gesture::*;
 
 // Re-export device pixel utilities
 pub use dyxel_shared::{PxExt, LpExt, px, lp, SizeUnit, FontSizeUnit, DeviceInfo};
@@ -139,13 +126,13 @@ pub fn hit_test(x: f32, y: f32) -> Option<u32> {
 thread_local! {
     static EXECUTOR: RefCell<Vec<std::pin::Pin<Box<dyn futures_util::future::Future<Output = ()>>>>> = RefCell::new(Vec::new());
     static CLICK_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
-    static TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
-    static DOUBLE_TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
-    static LONG_PRESS_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
-    static LONG_PRESS_END_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
-    static PAN_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
-    static PAN_UPDATE_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32, f32, f32)>>> = RefCell::new(HashMap::new());
-    static PAN_END_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(f32, f32)>>> = RefCell::new(HashMap::new());
+    static TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    static DOUBLE_TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    static LONG_PRESS_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    static LONG_PRESS_END_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    static PAN_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    static PAN_UPDATE_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    static PAN_END_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     // Note: PARENT_MAP removed - Host now handles event bubbling via HandlerRegistry
 }
 
@@ -194,7 +181,7 @@ fn process_gesture_commands() {
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
                     LONG_PRESS_START_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press_start(node_id, x, y)); } 
                     });
                 }
             }
@@ -205,7 +192,19 @@ fn process_gesture_commands() {
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
                     LONG_PRESS_END_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent {
+                                gesture_type: GestureEventType::LongPressEnd,
+                                target_node_id: node_id,
+                                pointer_id: 0,
+                                x,
+                                y,
+                                delta_x: 0.0,
+                                delta_y: 0.0,
+                                velocity_x: 0.0,
+                                velocity_y: 0.0,
+                                tap_count: 0,
+                                timestamp_us: 0,
+                            }); } 
                     });
                 }
             }
@@ -215,7 +214,9 @@ fn process_gesture_commands() {
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
-                    PAN_START_HANDLERS.with(|h| { if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } });
+                    PAN_START_HANDLERS.with(|h| { 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan_start(node_id, x, y)); } 
+                    });
                 }
             }
             OpCode::GesturePanUpdate => {
@@ -226,7 +227,9 @@ fn process_gesture_commands() {
                     let dx = f32::from_le_bytes([data[offset+12], data[offset+13], data[offset+14], data[offset+15]]);
                     let dy = f32::from_le_bytes([data[offset+16], data[offset+17], data[offset+18], data[offset+19]]);
                     offset += 20;
-                    PAN_UPDATE_HANDLERS.with(|h| { if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y, dx, dy); } });
+                    PAN_UPDATE_HANDLERS.with(|h| { 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan_update(node_id, x, y, dx, dy)); } 
+                    });
                 }
             }
             OpCode::GesturePanEnd => {
@@ -235,7 +238,23 @@ fn process_gesture_commands() {
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 20;
-                    PAN_END_HANDLERS.with(|h| { if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } });
+                    PAN_END_HANDLERS.with(|h| { 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { 
+                            f(GestureEvent {
+                                gesture_type: GestureEventType::PanEnd,
+                                target_node_id: node_id,
+                                pointer_id: 0,
+                                x,
+                                y,
+                                delta_x: 0.0,
+                                delta_y: 0.0,
+                                velocity_x: 0.0,
+                                velocity_y: 0.0,
+                                tap_count: 0,
+                                timestamp_us: 0,
+                            }); 
+                        } 
+                    });
                 }
             }
             // === Direct Gesture Events (Host has already resolved bubbling) ===
@@ -247,7 +266,7 @@ fn process_gesture_commands() {
                     offset += 12;
                     // Direct call - no bubbling needed
                     TAP_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::tap(node_id, x, y, 1)); } 
                     });
                     GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
                 }
@@ -259,7 +278,7 @@ fn process_gesture_commands() {
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
                     DOUBLE_TAP_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::double_tap(node_id, x, y)); } 
                     });
                     GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
                 }
@@ -271,7 +290,7 @@ fn process_gesture_commands() {
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
                     LONG_PRESS_START_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press_start(node_id, x, y)); } 
                     });
                 }
             }
@@ -282,7 +301,7 @@ fn process_gesture_commands() {
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
                     PAN_START_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan_start(node_id, x, y)); } 
                     });
                 }
             }
@@ -295,7 +314,7 @@ fn process_gesture_commands() {
                     let dy = f32::from_le_bytes([data[offset+16], data[offset+17], data[offset+18], data[offset+19]]);
                     offset += 20;
                     PAN_UPDATE_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y, dx, dy); } 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan_update(node_id, x, y, dx, dy)); } 
                     });
                 }
             }
@@ -306,7 +325,21 @@ fn process_gesture_commands() {
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
                     PAN_END_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(x, y); } 
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { 
+                            f(GestureEvent {
+                                gesture_type: GestureEventType::PanEnd,
+                                target_node_id: node_id,
+                                pointer_id: 0,
+                                x,
+                                y,
+                                delta_x: 0.0,
+                                delta_y: 0.0,
+                                velocity_x: 0.0,
+                                velocity_y: 0.0,
+                                tap_count: 0,
+                                timestamp_us: 0,
+                            }); 
+                        } 
                     });
                 }
             }
@@ -321,7 +354,7 @@ fn dispatch_tap_with_bubble(node_id: u32, x: f32, y: f32) {
     // Simple direct dispatch - no bubbling since Host now handles it via HandlerRegistry
     TAP_HANDLERS.with(|h| { 
         if let Some(f) = h.borrow_mut().get_mut(&node_id) { 
-            f(x, y); 
+            f(GestureEvent::tap(node_id, x, y, 1)); 
         } 
     });
 }
@@ -500,51 +533,65 @@ pub trait BaseView {
         CLICK_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(handler)); }); 
         self
     }
-    fn on_tap(self, handler: impl FnMut(f32, f32) + 'static) -> Self where Self: Sized {
+    /// On tap handler - receives GestureEvent
+    fn on_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterTapHandler, id); // Notify Host
-        TAP_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(handler)); });
+        TAP_HANDLERS.with(|h| { 
+            h.borrow_mut().insert(id, Box::new(handler)); 
+        });
         self
     }
-    fn on_double_tap(self, handler: impl FnMut(f32, f32) + 'static) -> Self where Self: Sized {
+    /// On double tap handler - receives GestureEvent
+    fn on_double_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id); // Notify Host
-        DOUBLE_TAP_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(handler)); });
+        DOUBLE_TAP_HANDLERS.with(|h| { 
+            h.borrow_mut().insert(id, Box::new(handler)); 
+        });
         self
     }
-    fn on_long_press(self, handler: impl FnMut(f32, f32) + 'static) -> Self where Self: Sized {
+    /// On long press handler - receives GestureEvent
+    fn on_long_press(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterLongPressHandler, id); // Notify Host
-        LONG_PRESS_START_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(handler)); });
+        LONG_PRESS_START_HANDLERS.with(|h| { 
+            h.borrow_mut().insert(id, Box::new(handler)); 
+        });
         self
     }
+    /// On pan handler (update and end) - receives GestureEvent
     fn on_pan(
         self,
-        on_update: impl FnMut(f32, f32, f32, f32) + 'static,
-        on_end: impl FnMut(f32, f32) + 'static,
+        on_update: impl FnMut(GestureEvent) + 'static,
+        on_end: impl FnMut(GestureEvent) + 'static,
     ) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterPanHandler, id); // Notify Host
-        PAN_UPDATE_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(on_update)); });
-        PAN_END_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(on_end)); });
+        PAN_UPDATE_HANDLERS.with(|h| { 
+            h.borrow_mut().insert(id, Box::new(on_update)); 
+        });
+        PAN_END_HANDLERS.with(|h| { 
+            h.borrow_mut().insert(id, Box::new(on_end)); 
+        });
         self
     }
-    /// Simplified on_pan with just update handler (delta_x, delta_y, total_x, total_y)
-    fn on_pan_update(self, mut handler: impl FnMut(f32, f32) + 'static) -> Self where Self: Sized {
+    /// Simplified on_pan with just update handler - receives GestureEvent
+    fn on_pan_update(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterPanHandler, id); // Notify Host
         PAN_UPDATE_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(move |dx, dy, _, _| handler(dx, dy))); 
+            h.borrow_mut().insert(id, Box::new(handler)); 
         });
         self
     }
@@ -572,13 +619,17 @@ impl View {
             .flex_direction(FlexDirection::Row)
             .justify_content(JustifyContent::FlexStart)
             .align_items(AlignItems::FlexStart)
+            .flex_wrap(FlexWrap::Wrap)
     }
     
     /// Simple tap handler without coordinates (for convenience)
     pub fn on_tap_simple(self, mut handler: impl FnMut() + 'static) -> Self {
         let id = self.node_id();
+        select_node(id);
+        push_command!(SHARED_BUFFER, AttachClick, id);
+        push_command!(SHARED_BUFFER, RegisterTapHandler, id); // Notify Host
         TAP_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(move |_x, _y| handler())); 
+            h.borrow_mut().insert(id, Box::new(move |_| handler())); 
         });
         self
     }
@@ -665,9 +716,14 @@ impl Button {
             .border_radius(8.0);
         Self { view }
     }
-    pub fn on_tap(self, handler: impl FnMut(f32, f32) + 'static) -> Self {
+    pub fn on_tap(self, mut handler: impl FnMut(GestureEvent) + 'static) -> Self {
         let id = self.node_id();
-        TAP_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(handler)); });
+        select_node(id);
+        push_command!(SHARED_BUFFER, AttachClick, id);
+        push_command!(SHARED_BUFFER, RegisterTapHandler, id); // Notify Host
+        TAP_HANDLERS.with(|h| { 
+            h.borrow_mut().insert(id, Box::new(move |e| handler(e))); 
+        });
         self
     }
 }

@@ -643,29 +643,29 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
         OpCode::RegisterTapHandler => {
             if payload.len() >= 4 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                log::info!("RegisterTapHandler for node {}", id);
                 get_handler_registry().lock().unwrap().register(id, HandlerType::Tap);
-
             }
         }
         OpCode::RegisterLongPressHandler => {
             if payload.len() >= 4 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                log::info!("RegisterLongPressHandler for node {}", id);
                 get_handler_registry().lock().unwrap().register(id, HandlerType::LongPress);
-
             }
         }
         OpCode::RegisterPanHandler => {
             if payload.len() >= 4 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                log::info!("RegisterPanHandler for node {}", id);
                 get_handler_registry().lock().unwrap().register(id, HandlerType::Pan);
-
             }
         }
         OpCode::RegisterDoubleTapHandler => {
             if payload.len() >= 4 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                log::info!("RegisterDoubleTapHandler for node {}", id);
                 get_handler_registry().lock().unwrap().register(id, HandlerType::DoubleTap);
-
             }
         }
         OpCode::UnregisterGestureHandler => {
