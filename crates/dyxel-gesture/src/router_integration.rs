@@ -164,13 +164,10 @@ impl GestureRouter {
     pub fn route_pointer_event_with_path(&mut self, event: &PointerEvent, bubble_path: Vec<u32>) -> Vec<GestureEvent> {
         // On pointer down, create a new arena and add recognizers for all nodes in path
         if event.event_type == PointerEventType::Down {
-            // Collect node configs first to avoid borrow issues
-            let nodes_to_register: Vec<(u32, GestureConfig)> = bubble_path
-                .iter()
-                .filter(|&&node_id| node_id != 0)
-                .filter_map(|&node_id| {
-                    self.node_configs.get(&node_id).map(|config| (node_id, config.clone()))
-                })
+            // Collect valid node ids first (without configs to avoid clone)
+            let node_ids: Vec<u32> = bubble_path
+                .into_iter()
+                .filter(|id| *id != 0)
                 .collect();
 
             // Check if arena already exists for this pointer
@@ -180,19 +177,25 @@ impl GestureRouter {
             let _ = self.arena_manager.get_or_create_arena(event.pointer_id, event.target_node_id);
 
             // Get the arena_id for this pointer
-            if let Some(&arena_id) = self.arena_manager.pointer_to_arena.get(&event.pointer_id) {
-                // Only add recognizers if this is a new arena
-                // For multi-tap, the same recognizer handles all taps
+            let arena_id_opt = self.arena_manager.pointer_to_arena.get(&event.pointer_id).copied();
+
+            // Only add recognizers if this is a new arena
+            // For multi-tap, the same recognizer handles all taps
+            if let Some(arena_id) = arena_id_opt {
                 if !arena_existed {
                     // Create recognizer factory with current next_id
                     let mut factory = RecognizerFactory::new(self.next_recognizer_id);
 
-                    // Add recognizers for each node
-                    for (node_id, config) in nodes_to_register {
-                        if let Some(arena) = self.arena_manager.get_arena_mut(arena_id) {
-                            let ids = factory.create_recognizers(node_id, &config, arena);
-                            if !ids.is_empty() {
-                                self.node_recognizers.insert(node_id, ids);
+                    // Add recognizers for each node - fetch config by reference to avoid clone
+                    for node_id in node_ids {
+                        // SAFETY: We check if config exists and immediately use it
+                        // The borrow checker ensures no mutable borrow overlaps
+                        if let Some(config) = self.node_configs.get(&node_id) {
+                            if let Some(arena) = self.arena_manager.get_arena_mut(arena_id) {
+                                let ids = factory.create_recognizers(node_id, config, arena);
+                                if !ids.is_empty() {
+                                    self.node_recognizers.insert(node_id, ids);
+                                }
                             }
                         }
                     }
