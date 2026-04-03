@@ -107,14 +107,15 @@ fn select_node(id: u32) {
 }
 
 fn track_node(id: u32) { unsafe { if id > SHARED_BUFFER.max_node_id { SHARED_BUFFER.max_node_id = id; } } }
-pub fn get_layout(id: u32) -> LayoutResult { 
-    unsafe { 
-        if (id as usize) < SHARED_BUFFER.layout_results.len() {
-            SHARED_BUFFER.layout_results[id as usize] 
+pub fn get_layout(id: u32) -> LayoutResult {
+    unsafe {
+        let len = (*std::ptr::addr_of!(SHARED_BUFFER.layout_results)).len();
+        if (id as usize) < len {
+            SHARED_BUFFER.layout_results[id as usize]
         } else {
             LayoutResult { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
         }
-    } 
+    }
 }
 
 pub fn hit_test(x: f32, y: f32) -> Option<u32> {
@@ -136,14 +137,57 @@ pub fn hit_test(x: f32, y: f32) -> Option<u32> {
 thread_local! {
     static EXECUTOR: RefCell<Vec<std::pin::Pin<Box<dyn futures_util::future::Future<Output = ()>>>>> = RefCell::new(Vec::new());
     static CLICK_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
-    static TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
-    static DOUBLE_TAP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
-    static LONG_PRESS_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
-    static LONG_PRESS_END_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
-    static PAN_START_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
-    static PAN_UPDATE_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
-    static PAN_END_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    // Unified tap handlers - all tap counts (single, double, triple+) use this
+    // Now supports multiple handlers per node for different tap counts
+    static TAP_HANDLERS: RefCell<HashMap<u32, TapHandlerEntry>> = RefCell::new(HashMap::new());
+    static LONG_PRESS_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    static PAN_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    // Scale gesture handlers
+    static SCALE_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    // Rotation gesture handlers
+    static ROTATION_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     // Note: PARENT_MAP removed - Host now handles event bubbling via HandlerRegistry
+}
+
+/// Entry for tap handlers - supports multiple callbacks for different tap counts
+struct TapHandlerEntry {
+    /// Handler for single tap (count = 1)
+    single_tap: Option<Box<dyn FnMut(GestureEvent)>>,
+    /// Handler for double tap (count = 2)
+    double_tap: Option<Box<dyn FnMut(GestureEvent)>>,
+    /// Handler for triple+ taps (count >= 3)
+    multi_tap: Option<Box<dyn FnMut(GestureEvent)>>,
+}
+
+impl TapHandlerEntry {
+    fn new() -> Self {
+        Self {
+            single_tap: None,
+            double_tap: None,
+            multi_tap: None,
+        }
+    }
+
+    /// Dispatch event to the appropriate handler based on tap_count
+    fn dispatch(&mut self, event: GestureEvent) {
+        match event.tap_count {
+            1 => {
+                if let Some(handler) = &mut self.single_tap {
+                    handler(event);
+                }
+            }
+            2 => {
+                if let Some(handler) = &mut self.double_tap {
+                    handler(event);
+                }
+            }
+            _ => {
+                if let Some(handler) = &mut self.multi_tap {
+                    handler(event);
+                }
+            }
+        }
+    }
 }
 
 fn process_gesture_commands() {
@@ -161,7 +205,12 @@ fn process_gesture_commands() {
         
         let op = match OpCode::from_u8(op_byte) {
             Some(o) => o,
-            None => continue,
+            None => {
+                // Unknown opcode - skip remaining data to avoid infinite loop
+                log(&format!("Warning: Unknown opcode {} at offset {}, skipping remaining {}", 
+                    op_byte, offset, data.len() - offset));
+                break;
+            }
         };
         
         match op {
@@ -175,23 +224,15 @@ fn process_gesture_commands() {
                     GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
                 }
             }
-            OpCode::GestureDoubleTap => {
-                if offset + 12 <= data.len() {
-                    let _node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let _x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let _y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    // TODO: Implement double tap handling
-                }
-            }
+            // Note: GestureDoubleTap removed - unified with GestureTap using tap_count
             OpCode::GestureLongPressStart => {
                 if offset + 12 <= data.len() {
                     let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
-                    LONG_PRESS_START_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press_start(node_id, x, y)); } 
+                    LONG_PRESS_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press(node_id, x, y, GesturePhase::Began)); }
                     });
                 }
             }
@@ -201,20 +242,8 @@ fn process_gesture_commands() {
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
-                    LONG_PRESS_END_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent {
-                                gesture_type: GestureEventType::LongPressEnd,
-                                target_node_id: node_id,
-                                pointer_id: 0,
-                                x,
-                                y,
-                                delta_x: 0.0,
-                                delta_y: 0.0,
-                                velocity_x: 0.0,
-                                velocity_y: 0.0,
-                                tap_count: 0,
-                                timestamp_us: 0,
-                            }); } 
+                    LONG_PRESS_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press(node_id, x, y, GesturePhase::Ended)); }
                     });
                 }
             }
@@ -224,8 +253,8 @@ fn process_gesture_commands() {
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
-                    PAN_START_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan_start(node_id, x, y)); } 
+                    PAN_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Began)); }
                     });
                 }
             }
@@ -237,8 +266,8 @@ fn process_gesture_commands() {
                     let dx = f32::from_le_bytes([data[offset+12], data[offset+13], data[offset+14], data[offset+15]]);
                     let dy = f32::from_le_bytes([data[offset+16], data[offset+17], data[offset+18], data[offset+19]]);
                     offset += 20;
-                    PAN_UPDATE_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan_update(node_id, x, y, dx, dy)); } 
+                    PAN_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan(node_id, x, y, dx, dy, GesturePhase::Changed)); }
                     });
                 }
             }
@@ -248,22 +277,10 @@ fn process_gesture_commands() {
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 20;
-                    PAN_END_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { 
-                            f(GestureEvent {
-                                gesture_type: GestureEventType::PanEnd,
-                                target_node_id: node_id,
-                                pointer_id: 0,
-                                x,
-                                y,
-                                delta_x: 0.0,
-                                delta_y: 0.0,
-                                velocity_x: 0.0,
-                                velocity_y: 0.0,
-                                tap_count: 0,
-                                timestamp_us: 0,
-                            }); 
-                        } 
+                    PAN_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) {
+                            f(GestureEvent::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Ended));
+                        }
                     });
                 }
             }
@@ -275,32 +292,34 @@ fn process_gesture_commands() {
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
                     // Direct call - no bubbling needed
-                    TAP_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::tap(node_id, x, y, 1)); } 
+                    TAP_HANDLERS.with(|h| {
+                        if let Some(entry) = h.borrow_mut().get_mut(&node_id) {
+                            entry.dispatch(GestureEvent::tap(node_id, x, y, 1));
+                        }
                     });
                     GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
                 }
             }
-            OpCode::DirectGestureDoubleTap => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    DOUBLE_TAP_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::double_tap(node_id, x, y)); } 
-                    });
-                    GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
-                }
-            }
+            // Note: DirectGestureDoubleTap removed - unified with DirectGestureTap using tap_count
             OpCode::DirectGestureLongPress => {
                 if offset + 12 <= data.len() {
                     let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
-                    LONG_PRESS_START_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press_start(node_id, x, y)); } 
+                    LONG_PRESS_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press(node_id, x, y, GesturePhase::Began)); }
+                    });
+                }
+            }
+            OpCode::DirectGestureLongPressEnd => {
+                if offset + 12 <= data.len() {
+                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
+                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
+                    offset += 12;
+                    LONG_PRESS_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press(node_id, x, y, GesturePhase::Ended)); }
                     });
                 }
             }
@@ -310,8 +329,8 @@ fn process_gesture_commands() {
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
-                    PAN_START_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan_start(node_id, x, y)); } 
+                    PAN_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Began)); }
                     });
                 }
             }
@@ -323,8 +342,8 @@ fn process_gesture_commands() {
                     let dx = f32::from_le_bytes([data[offset+12], data[offset+13], data[offset+14], data[offset+15]]);
                     let dy = f32::from_le_bytes([data[offset+16], data[offset+17], data[offset+18], data[offset+19]]);
                     offset += 20;
-                    PAN_UPDATE_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan_update(node_id, x, y, dx, dy)); } 
+                    PAN_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan(node_id, x, y, dx, dy, GesturePhase::Changed)); }
                     });
                 }
             }
@@ -334,23 +353,35 @@ fn process_gesture_commands() {
                     let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
                     let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
                     offset += 12;
-                    PAN_END_HANDLERS.with(|h| { 
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { 
-                            f(GestureEvent {
-                                gesture_type: GestureEventType::PanEnd,
-                                target_node_id: node_id,
-                                pointer_id: 0,
-                                x,
-                                y,
-                                delta_x: 0.0,
-                                delta_y: 0.0,
-                                velocity_x: 0.0,
-                                velocity_y: 0.0,
-                                tap_count: 0,
-                                timestamp_us: 0,
-                            }); 
-                        } 
+                    PAN_HANDLERS.with(|h| {
+                        if let Some(f) = h.borrow_mut().get_mut(&node_id) {
+                            f(GestureEvent::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Ended));
+                        }
                     });
+                }
+            }
+            // === Unified V2 Gesture Events (replaces all legacy/direct events) ===
+            OpCode::GestureEventV2 => {
+                if offset + 14 <= data.len() {
+                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+                    let event_type = data[offset+4];
+                    let phase = data[offset+5];
+                    let x = f32::from_le_bytes([data[offset+6], data[offset+7], data[offset+8], data[offset+9]]);
+                    let y = f32::from_le_bytes([data[offset+10], data[offset+11], data[offset+12], data[offset+13]]);
+                    offset += 14;
+                    dispatch_v2_gesture_event(node_id, event_type, phase, x, y, 0);
+                }
+            }
+            OpCode::GestureEventV2Ex => {
+                if offset + 18 <= data.len() {
+                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+                    let event_type = data[offset+4];
+                    let phase = data[offset+5];
+                    let x = f32::from_le_bytes([data[offset+6], data[offset+7], data[offset+8], data[offset+9]]);
+                    let y = f32::from_le_bytes([data[offset+10], data[offset+11], data[offset+12], data[offset+13]]);
+                    let payload = u32::from_le_bytes([data[offset+14], data[offset+15], data[offset+16], data[offset+17]]);
+                    offset += 18;
+                    dispatch_v2_gesture_event(node_id, event_type, phase, x, y, payload);
                 }
             }
             _ => { offset += op.data_len(); }
@@ -360,12 +391,103 @@ fn process_gesture_commands() {
 
 // Legacy tap dispatch with bubbling - kept for backward compatibility with GestureTap commands
 // New code uses DirectGestureTap which doesn't require bubbling
+/// V2 Gesture Event Type constants (must match bridge.rs)
+const V2_GESTURE_TYPE_TAP: u8 = 0;
+const V2_GESTURE_TYPE_LONG_PRESS: u8 = 1;
+const V2_GESTURE_TYPE_PAN: u8 = 2;
+const V2_GESTURE_TYPE_SCALE: u8 = 3;
+const V2_GESTURE_TYPE_ROTATION: u8 = 4;
+
+const V2_GESTURE_PHASE_BEGAN: u8 = 0;
+const V2_GESTURE_PHASE_CHANGED: u8 = 1;
+const V2_GESTURE_PHASE_ENDED: u8 = 2;
+const V2_GESTURE_PHASE_CANCELLED: u8 = 3;
+
+/// Decode u32 payload to delta values
+fn decode_v2_payload_dxdy(payload: u32) -> (f32, f32) {
+    let dx = ((payload >> 16) as i16) as f32 / 100.0;
+    let dy = (payload as i16) as f32 / 100.0;
+    (dx, dy)
+}
+
+/// Decode u32 payload to scale value
+fn decode_v2_payload_scale(payload: u32) -> f32 {
+    let int_part = ((payload >> 24) & 0xFF) as f32;
+    let frac_part = ((payload >> 16) & 0xFF) as f32 / 256.0;
+    int_part + frac_part
+}
+
+/// Dispatch unified V2 gesture event to appropriate handler
+fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y: f32, payload: u32) {
+    use crate::gesture::GesturePhase;
+
+    let gesture_phase = match phase {
+        V2_GESTURE_PHASE_BEGAN => GesturePhase::Began,
+        V2_GESTURE_PHASE_CHANGED => GesturePhase::Changed,
+        V2_GESTURE_PHASE_ENDED => GesturePhase::Ended,
+        V2_GESTURE_PHASE_CANCELLED => GesturePhase::Cancelled,
+        _ => GesturePhase::Ended,
+    };
+
+    match event_type {
+        V2_GESTURE_TYPE_TAP => {
+            let tap_count = if payload == 0 { 1 } else { payload };
+            // All tap events (single, double, triple+) go through TAP_HANDLERS
+            // Dispatch to appropriate handler based on tap_count
+            TAP_HANDLERS.with(|h| {
+                if let Some(entry) = h.borrow_mut().get_mut(&node_id) {
+                    entry.dispatch(GestureEvent::tap(node_id, x, y, tap_count));
+                }
+            });
+        }
+        V2_GESTURE_TYPE_LONG_PRESS => {
+            LONG_PRESS_HANDLERS.with(|h| {
+                if let Some(f) = h.borrow_mut().get_mut(&node_id) {
+                    f(GestureEvent::long_press(node_id, x, y, gesture_phase));
+                }
+            });
+        }
+        V2_GESTURE_TYPE_PAN => {
+            let (dx, dy) = if phase == V2_GESTURE_PHASE_CHANGED {
+                decode_v2_payload_dxdy(payload)
+            } else {
+                (0.0, 0.0)
+            };
+            PAN_HANDLERS.with(|h| {
+                if let Some(f) = h.borrow_mut().get_mut(&node_id) {
+                    f(GestureEvent::pan(node_id, x, y, dx, dy, gesture_phase));
+                }
+            });
+        }
+        V2_GESTURE_TYPE_SCALE => {
+            let scale = if phase == V2_GESTURE_PHASE_CHANGED {
+                decode_v2_payload_scale(payload)
+            } else {
+                1.0
+            };
+            SCALE_HANDLERS.with(|h| {
+                if let Some(f) = h.borrow_mut().get_mut(&node_id) {
+                    f(GestureEvent::scale(node_id, x, y, scale, 0.0, gesture_phase));
+                }
+            });
+        }
+        V2_GESTURE_TYPE_ROTATION => {
+            ROTATION_HANDLERS.with(|h| {
+                if let Some(f) = h.borrow_mut().get_mut(&node_id) {
+                    f(GestureEvent::rotation(node_id, x, y, 0.0, 0.0, gesture_phase));
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
 fn dispatch_tap_with_bubble(node_id: u32, x: f32, y: f32) {
     // Simple direct dispatch - no bubbling since Host now handles it via HandlerRegistry
-    TAP_HANDLERS.with(|h| { 
-        if let Some(f) = h.borrow_mut().get_mut(&node_id) { 
-            f(GestureEvent::tap(node_id, x, y, 1)); 
-        } 
+    TAP_HANDLERS.with(|h| {
+        if let Some(entry) = h.borrow_mut().get_mut(&node_id) {
+            entry.dispatch(GestureEvent::tap(node_id, x, y, 1));
+        }
     });
 }
 
@@ -567,60 +689,76 @@ pub trait BaseView {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
-        push_command!(SHARED_BUFFER, RegisterTapHandler, id); // Notify Host
-        TAP_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(handler)); 
+        push_command!(SHARED_BUFFER, RegisterTapHandler, id, 1u32); // Notify Host (count=1 for single tap)
+        // Store in the appropriate slot of TapHandlerEntry
+        TAP_HANDLERS.with(|h| {
+            let mut handlers = h.borrow_mut();
+            let entry = handlers.entry(id).or_insert_with(TapHandlerEntry::new);
+            entry.single_tap = Some(Box::new(handler));
         });
         self
     }
     /// On double tap handler - receives GestureEvent
+    /// Internally uses RegisterTapHandler with count=2 (unified tap command)
     fn on_double_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
-        push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id); // Notify Host
-        DOUBLE_TAP_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(handler)); 
+        // Use unified RegisterTapHandler with count=2
+        push_command!(SHARED_BUFFER, RegisterTapHandler, id, 2u32);
+        // Store in the appropriate slot of TapHandlerEntry
+        TAP_HANDLERS.with(|h| {
+            let mut handlers = h.borrow_mut();
+            let entry = handlers.entry(id).or_insert_with(TapHandlerEntry::new);
+            entry.double_tap = Some(Box::new(handler));
         });
         self
     }
     /// On long press handler - receives GestureEvent
+    /// Use `event.phase` to check state (Began/Ended/Cancelled)
     fn on_long_press(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterLongPressHandler, id); // Notify Host
-        LONG_PRESS_START_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(handler)); 
+        LONG_PRESS_HANDLERS.with(|h| {
+            h.borrow_mut().insert(id, Box::new(handler));
         });
         self
     }
-    /// On pan handler (update and end) - receives GestureEvent
-    fn on_pan(
-        self,
-        on_update: impl FnMut(GestureEvent) + 'static,
-        on_end: impl FnMut(GestureEvent) + 'static,
-    ) -> Self where Self: Sized {
+    /// On pan handler - receives GestureEvent
+    /// Use `event.phase` to check state (Began/Changed/Ended/Cancelled)
+    fn on_pan(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterPanHandler, id); // Notify Host
-        PAN_UPDATE_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(on_update)); 
-        });
-        PAN_END_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(on_end)); 
+        PAN_HANDLERS.with(|h| {
+            h.borrow_mut().insert(id, Box::new(handler));
         });
         self
     }
-    /// Simplified on_pan with just update handler - receives GestureEvent
-    fn on_pan_update(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
+    /// On scale handler - receives GestureEvent
+    /// Use `event.phase` to check state (Began/Changed/Ended/Cancelled)
+    fn on_scale(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
-        push_command!(SHARED_BUFFER, RegisterPanHandler, id); // Notify Host
-        PAN_UPDATE_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(handler)); 
+        push_command!(SHARED_BUFFER, RegisterScaleHandler, id); // Notify Host
+        SCALE_HANDLERS.with(|h| {
+            h.borrow_mut().insert(id, Box::new(handler));
+        });
+        self
+    }
+    /// On rotation handler - receives GestureEvent
+    /// Use `event.phase` to check state (Began/Changed/Ended/Cancelled)
+    fn on_rotation(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
+        let id = self.node_id();
+        select_node(id);
+        push_command!(SHARED_BUFFER, AttachClick, id);
+        push_command!(SHARED_BUFFER, RegisterRotationHandler, id); // Notify Host
+        ROTATION_HANDLERS.with(|h| {
+            h.borrow_mut().insert(id, Box::new(handler));
         });
         self
     }
@@ -656,9 +794,11 @@ impl View {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
-        push_command!(SHARED_BUFFER, RegisterTapHandler, id); // Notify Host
-        TAP_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(move |_| handler())); 
+        push_command!(SHARED_BUFFER, RegisterTapHandler, id, 1u32); // Notify Host (count=1 for single tap)
+        TAP_HANDLERS.with(|h| {
+            let mut handlers = h.borrow_mut();
+            let entry = handlers.entry(id).or_insert_with(TapHandlerEntry::new);
+            entry.single_tap = Some(Box::new(move |_| handler()));
         });
         self
     }
@@ -689,16 +829,12 @@ impl GestureConfig for crate::SequenceGesture {
     fn apply_to(self, view: View) -> View {
         let id = view.node_id();
         crate::select_node(id);
-        
+
         // Register all steps in sequence
         for step in &self.steps {
             match step {
                 crate::GestureStep::Tap(g) => {
-                    push_command!(SHARED_BUFFER, AttachClick, id);
-                    push_command!(SHARED_BUFFER, RegisterTapHandler, id);
-                    if g.count == 2 {
-                        push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id);
-                    }
+                    push_tap_registration(id, g.count);
                 }
                 crate::GestureStep::LongPress(_) => {
                     push_command!(SHARED_BUFFER, AttachClick, id);
@@ -708,14 +844,112 @@ impl GestureConfig for crate::SequenceGesture {
                     push_command!(SHARED_BUFFER, AttachClick, id);
                     push_command!(SHARED_BUFFER, RegisterPanHandler, id);
                 }
+                crate::GestureStep::Scale(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterScaleHandler, id);
+                }
+                crate::GestureStep::Rotation(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterRotationHandler, id);
+                }
+                // Nested gestures - recursively register their components
+                crate::GestureStep::Exclusive(exclusive) => {
+                    Self::register_exclusive_gesture(id, exclusive);
+                }
+                crate::GestureStep::Simultaneous(simultaneous) => {
+                    Self::register_parallel_gesture(id, simultaneous);
+                }
+                crate::GestureStep::Sequenced(sequenced) => {
+                    Self::register_sequence_gesture(id, sequenced);
+                }
+            }
+        }
+
+        // Store sequence configuration for runtime processing
+        view
+    }
+}
+
+impl crate::SequenceGesture {
+    fn register_exclusive_gesture(node_id: u32, gesture: &crate::ExclusiveGesture) {
+        for candidate in &gesture.candidates {
+            match candidate {
+                crate::GestureStep::Tap(g) => {
+                    push_tap_registration(node_id, g.count);
+                }
+                crate::GestureStep::LongPress(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterLongPressHandler, node_id);
+                }
+                crate::GestureStep::Pan(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterPanHandler, node_id);
+                }
+                crate::GestureStep::Scale(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterScaleHandler, node_id);
+                }
+                crate::GestureStep::Rotation(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterRotationHandler, node_id);
+                }
                 _ => {}
             }
         }
-        
-        // Store sequence configuration for runtime processing
-        #[cfg(feature = "log")]
-        log::info!("SequenceGesture registered for node {} with {} steps", id, self.steps.len());
-        view
+    }
+
+    fn register_parallel_gesture(node_id: u32, gesture: &crate::ParallelGesture) {
+        for gesture_step in &gesture.gestures {
+            match gesture_step {
+                crate::GestureStep::Tap(g) => {
+                    push_tap_registration(node_id, g.count);
+                }
+                crate::GestureStep::LongPress(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterLongPressHandler, node_id);
+                }
+                crate::GestureStep::Pan(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterPanHandler, node_id);
+                }
+                crate::GestureStep::Scale(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterScaleHandler, node_id);
+                }
+                crate::GestureStep::Rotation(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterRotationHandler, node_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn register_sequence_gesture(node_id: u32, gesture: &crate::SequenceGesture) {
+        for step in &gesture.steps {
+            match step {
+                crate::GestureStep::Tap(g) => {
+                    push_tap_registration(node_id, g.count);
+                }
+                crate::GestureStep::LongPress(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterLongPressHandler, node_id);
+                }
+                crate::GestureStep::Pan(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterPanHandler, node_id);
+                }
+                crate::GestureStep::Scale(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterScaleHandler, node_id);
+                }
+                crate::GestureStep::Rotation(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, node_id);
+                    push_command!(SHARED_BUFFER, RegisterRotationHandler, node_id);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -723,16 +957,12 @@ impl GestureConfig for crate::ParallelGesture {
     fn apply_to(self, view: View) -> View {
         let id = view.node_id();
         crate::select_node(id);
-        
+
         // Register all gestures to be recognized simultaneously
         for gesture in &self.gestures {
             match gesture {
                 crate::GestureStep::Tap(g) => {
-                    push_command!(SHARED_BUFFER, AttachClick, id);
-                    push_command!(SHARED_BUFFER, RegisterTapHandler, id);
-                    if g.count == 2 {
-                        push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id);
-                    }
+                    push_tap_registration(id, g.count);
                 }
                 crate::GestureStep::LongPress(_) => {
                     push_command!(SHARED_BUFFER, AttachClick, id);
@@ -742,12 +972,27 @@ impl GestureConfig for crate::ParallelGesture {
                     push_command!(SHARED_BUFFER, AttachClick, id);
                     push_command!(SHARED_BUFFER, RegisterPanHandler, id);
                 }
-                _ => {}
+                crate::GestureStep::Scale(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterScaleHandler, id);
+                }
+                crate::GestureStep::Rotation(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterRotationHandler, id);
+                }
+                // Nested gestures
+                crate::GestureStep::Exclusive(exclusive) => {
+                    crate::SequenceGesture::register_exclusive_gesture(id, exclusive);
+                }
+                crate::GestureStep::Simultaneous(simultaneous) => {
+                    crate::SequenceGesture::register_parallel_gesture(id, simultaneous);
+                }
+                crate::GestureStep::Sequenced(sequenced) => {
+                    crate::SequenceGesture::register_sequence_gesture(id, sequenced);
+                }
             }
         }
-        
-        #[cfg(feature = "log")]
-        log::info!("ParallelGesture registered for node {} with {} gestures", id, self.gestures.len());
+
         view
     }
 }
@@ -756,16 +1001,12 @@ impl GestureConfig for crate::ExclusiveGesture {
     fn apply_to(self, view: View) -> View {
         let id = view.node_id();
         crate::select_node(id);
-        
+
         // Register all candidates - GestureArena will handle competition
         for candidate in &self.candidates {
             match candidate {
                 crate::GestureStep::Tap(g) => {
-                    push_command!(SHARED_BUFFER, AttachClick, id);
-                    push_command!(SHARED_BUFFER, RegisterTapHandler, id);
-                    if g.count == 2 {
-                        push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, id);
-                    }
+                    push_tap_registration(id, g.count);
                 }
                 crate::GestureStep::LongPress(_) => {
                     push_command!(SHARED_BUFFER, AttachClick, id);
@@ -775,12 +1016,65 @@ impl GestureConfig for crate::ExclusiveGesture {
                     push_command!(SHARED_BUFFER, AttachClick, id);
                     push_command!(SHARED_BUFFER, RegisterPanHandler, id);
                 }
-                _ => {}
+                crate::GestureStep::Scale(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterScaleHandler, id);
+                }
+                crate::GestureStep::Rotation(_) => {
+                    push_command!(SHARED_BUFFER, AttachClick, id);
+                    push_command!(SHARED_BUFFER, RegisterRotationHandler, id);
+                }
+                // Nested gestures
+                crate::GestureStep::Exclusive(exclusive) => {
+                    crate::SequenceGesture::register_exclusive_gesture(id, exclusive);
+                }
+                crate::GestureStep::Simultaneous(simultaneous) => {
+                    crate::SequenceGesture::register_parallel_gesture(id, simultaneous);
+                }
+                crate::GestureStep::Sequenced(sequenced) => {
+                    crate::SequenceGesture::register_sequence_gesture(id, sequenced);
+                }
             }
         }
-        
-        #[cfg(feature = "log")]
-        log::info!("ExclusiveGesture registered for node {} with {} candidates", id, self.candidates.len());
+
+        view
+    }
+}
+
+/// Push tap registration commands for a specific count
+/// All tap gestures (single, double, triple, etc.) use the same command with count parameter
+fn push_tap_registration(node_id: u32, count: u32) {
+    crate::select_node(node_id);
+    push_command!(SHARED_BUFFER, AttachClick, node_id);
+    push_command!(SHARED_BUFFER, RegisterTapHandler, node_id, count);
+}
+
+impl GestureConfig for crate::TapGesture {
+    fn apply_to(self, view: View) -> View {
+        let id = view.node_id();
+        let count = self.count;
+        push_tap_registration(id, count);
+
+        // Store the callback if provided
+        if let Some(mut on_ended) = self.on_gesture_ended {
+            TAP_HANDLERS.with(|h| {
+                let mut handlers = h.borrow_mut();
+                let entry = handlers.entry(id).or_insert_with(TapHandlerEntry::new);
+                // Store in appropriate slot based on count
+                match count {
+                    1 => entry.single_tap = Some(Box::new(move |e| {
+                        if e.tap_count == count { on_ended(e); }
+                    })),
+                    2 => entry.double_tap = Some(Box::new(move |e| {
+                        if e.tap_count == count { on_ended(e); }
+                    })),
+                    _ => entry.multi_tap = Some(Box::new(move |e| {
+                        if e.tap_count == count { on_ended(e); }
+                    })),
+                }
+            });
+        }
+
         view
     }
 }
@@ -865,13 +1159,15 @@ impl Button {
             .border_radius(8.0);
         Self { view }
     }
-    pub fn on_tap(self, mut handler: impl FnMut(GestureEvent) + 'static) -> Self {
+    pub fn on_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
-        push_command!(SHARED_BUFFER, RegisterTapHandler, id); // Notify Host
-        TAP_HANDLERS.with(|h| { 
-            h.borrow_mut().insert(id, Box::new(move |e| handler(e))); 
+        push_command!(SHARED_BUFFER, RegisterTapHandler, id, 1u32); // Notify Host (count=1 for single tap)
+        TAP_HANDLERS.with(|h| {
+            let mut handlers = h.borrow_mut();
+            let entry = handlers.entry(id).or_insert_with(TapHandlerEntry::new);
+            entry.single_tap = Some(Box::new(handler));
         });
         self
     }

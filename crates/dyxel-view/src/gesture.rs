@@ -7,13 +7,15 @@
 //!
 //! ## Usage
 //!
-//! ### View-level syntax sugar (old API, updated signature):
+//! ### View-level syntax sugar:
 //! ```ignore
 //! View {
-//!     onTap: |event| { /* ... */ }
+//!     onTap: |event| { /* event.tap_count */ }
 //!     onDoubleTap: |event| { /* ... */ }
-//!     onLongPress: |event| { /* ... */ }
-//!     onPanUpdate: |event| { /* ... */ }
+//!     onLongPress: |event| { /* event.phase: Began/Ended */ }
+//!     onPan: |event| { /* event.phase: Began/Changed/Ended, event.delta_x/y */ }
+//!     onScale: |event| { /* event.phase: Began/Changed/Ended, event.scale */ }
+//!     onRotation: |event| { /* event.phase: Began/Changed/Ended, event.rotation */ }
 //! }
 //! ```
 //!
@@ -39,31 +41,56 @@
 
 use crate::{push_command, SHARED_BUFFER};
 
+/// Gesture phase - indicates the state of a continuous gesture
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GesturePhase {
+    /// Gesture has started
+    Began,
+    /// Gesture is in progress (value has changed)
+    Changed,
+    /// Gesture has ended successfully
+    Ended,
+    /// Gesture was cancelled
+    Cancelled,
+}
+
 /// Unified gesture event type
 #[derive(Debug, Clone, Copy)]
 pub enum GestureEventType {
     /// Tap detected (tap_count field indicates single/double/triple/etc)
     Tap,
-    /// Long press began
-    LongPressStart,
-    /// Long press ended
-    LongPressEnd,
-    /// Pan began
-    PanStart,
-    /// Pan updated (finger moved)
-    PanUpdate,
-    /// Pan ended
-    PanEnd,
+    /// Long press gesture
+    LongPress,
+    /// Pan gesture (use phase to check state)
+    Pan,
+    /// Scale gesture (use phase to check state)
+    Scale,
+    /// Rotation gesture (use phase to check state)
+    Rotation,
 }
 
 /// Unified gesture event
 ///
 /// This is the argument passed to all gesture callbacks.
 /// Different gesture types populate different fields.
+///
+/// For continuous gestures (Pan, Scale, Rotation), use `phase` to determine state:
+/// ```rust
+/// view.on_pan(|event| {
+///     match event.phase {
+///         GesturePhase::Began => println!("Pan started at {} {}", event.x, event.y),
+///         GesturePhase::Changed => println!("Pan moved by {} {}", event.delta_x, event.delta_y),
+///         GesturePhase::Ended => println!("Pan ended"),
+///         GesturePhase::Cancelled => println!("Pan cancelled"),
+///     }
+/// });
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct GestureEvent {
     /// Type of gesture
     pub gesture_type: GestureEventType,
+    /// Phase of the gesture (Began, Changed, Ended, Cancelled)
+    pub phase: GesturePhase,
     /// Target node ID
     pub target_node_id: u32,
     /// Pointer ID
@@ -82,6 +109,14 @@ pub struct GestureEvent {
     pub velocity_y: f32,
     /// For Tap: number of taps (1=single, 2=double, 3=triple, etc)
     pub tap_count: u32,
+    /// For Scale: current scale factor (1.0 = original size)
+    pub scale: f32,
+    /// For Scale: scale delta since last update
+    pub delta_scale: f32,
+    /// For Rotation: current angle in radians
+    pub rotation: f32,
+    /// For Rotation: rotation delta since last update
+    pub delta_rotation: f32,
     /// Timestamp (microseconds)
     pub timestamp_us: u64,
 }
@@ -91,6 +126,7 @@ impl GestureEvent {
     pub fn tap(node_id: u32, x: f32, y: f32, tap_count: u32) -> Self {
         Self {
             gesture_type: GestureEventType::Tap,
+            phase: GesturePhase::Ended, // Tap is discrete, so it's always Ended
             target_node_id: node_id,
             pointer_id: 0,
             x,
@@ -100,6 +136,10 @@ impl GestureEvent {
             velocity_x: 0.0,
             velocity_y: 0.0,
             tap_count,
+            scale: 1.0,
+            delta_scale: 0.0,
+            rotation: 0.0,
+            delta_rotation: 0.0,
             timestamp_us: 0,
         }
     }
@@ -109,44 +149,38 @@ impl GestureEvent {
         Self::tap(node_id, x, y, 2)
     }
 
-    /// Create a long press start event
+    /// Create a long press event
+    pub fn long_press(node_id: u32, x: f32, y: f32, phase: GesturePhase) -> Self {
+        Self {
+            gesture_type: GestureEventType::LongPress,
+            phase,
+            target_node_id: node_id,
+            pointer_id: 0,
+            x,
+            y,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            velocity_x: 0.0,
+            velocity_y: 0.0,
+            tap_count: 0,
+            scale: 1.0,
+            delta_scale: 0.0,
+            rotation: 0.0,
+            delta_rotation: 0.0,
+            timestamp_us: 0,
+        }
+    }
+
+    /// Create a long press start event (deprecated, use long_press with Began)
     pub fn long_press_start(node_id: u32, x: f32, y: f32) -> Self {
-        Self {
-            gesture_type: GestureEventType::LongPressStart,
-            target_node_id: node_id,
-            pointer_id: 0,
-            x,
-            y,
-            delta_x: 0.0,
-            delta_y: 0.0,
-            velocity_x: 0.0,
-            velocity_y: 0.0,
-            tap_count: 0,
-            timestamp_us: 0,
-        }
+        Self::long_press(node_id, x, y, GesturePhase::Began)
     }
 
-    /// Create a pan start event
-    pub fn pan_start(node_id: u32, x: f32, y: f32) -> Self {
+    /// Create a pan event
+    pub fn pan(node_id: u32, x: f32, y: f32, dx: f32, dy: f32, phase: GesturePhase) -> Self {
         Self {
-            gesture_type: GestureEventType::PanStart,
-            target_node_id: node_id,
-            pointer_id: 0,
-            x,
-            y,
-            delta_x: 0.0,
-            delta_y: 0.0,
-            velocity_x: 0.0,
-            velocity_y: 0.0,
-            tap_count: 0,
-            timestamp_us: 0,
-        }
-    }
-
-    /// Create a pan update event
-    pub fn pan_update(node_id: u32, x: f32, y: f32, dx: f32, dy: f32) -> Self {
-        Self {
-            gesture_type: GestureEventType::PanUpdate,
+            gesture_type: GestureEventType::Pan,
+            phase,
             target_node_id: node_id,
             pointer_id: 0,
             x,
@@ -156,8 +190,124 @@ impl GestureEvent {
             velocity_x: 0.0,
             velocity_y: 0.0,
             tap_count: 0,
+            scale: 1.0,
+            delta_scale: 0.0,
+            rotation: 0.0,
+            delta_rotation: 0.0,
             timestamp_us: 0,
         }
+    }
+
+    /// Create a pan start event (deprecated, use pan with Began)
+    pub fn pan_start(node_id: u32, x: f32, y: f32) -> Self {
+        Self::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Began)
+    }
+
+    /// Create a pan update event (deprecated, use pan with Changed)
+    pub fn pan_update(node_id: u32, x: f32, y: f32, dx: f32, dy: f32) -> Self {
+        Self::pan(node_id, x, y, dx, dy, GesturePhase::Changed)
+    }
+
+    /// Create a pan end event (deprecated, use pan with Ended)
+    pub fn pan_end(node_id: u32, x: f32, y: f32, vx: f32, vy: f32) -> Self {
+        let mut event = Self::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Ended);
+        event.velocity_x = vx;
+        event.velocity_y = vy;
+        event
+    }
+
+    /// Create a scale event
+    pub fn scale(node_id: u32, x: f32, y: f32, scale: f32, delta_scale: f32, phase: GesturePhase) -> Self {
+        Self {
+            gesture_type: GestureEventType::Scale,
+            phase,
+            target_node_id: node_id,
+            pointer_id: 0,
+            x,
+            y,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            velocity_x: 0.0,
+            velocity_y: 0.0,
+            tap_count: 0,
+            scale,
+            delta_scale,
+            rotation: 0.0,
+            delta_rotation: 0.0,
+            timestamp_us: 0,
+        }
+    }
+
+    /// Create a scale start event (deprecated, use scale with Began)
+    pub fn scale_start(node_id: u32, x: f32, y: f32, scale: f32) -> Self {
+        Self::scale(node_id, x, y, scale, 0.0, GesturePhase::Began)
+    }
+
+    /// Create a scale update event (deprecated, use scale with Changed)
+    pub fn scale_update(node_id: u32, x: f32, y: f32, scale: f32, delta_scale: f32) -> Self {
+        Self::scale(node_id, x, y, scale, delta_scale, GesturePhase::Changed)
+    }
+
+    /// Create a scale end event (deprecated, use scale with Ended)
+    pub fn scale_end(node_id: u32, x: f32, y: f32) -> Self {
+        Self::scale(node_id, x, y, 1.0, 0.0, GesturePhase::Ended)
+    }
+
+    /// Create a rotation event
+    pub fn rotation(node_id: u32, x: f32, y: f32, angle: f32, delta_angle: f32, phase: GesturePhase) -> Self {
+        Self {
+            gesture_type: GestureEventType::Rotation,
+            phase,
+            target_node_id: node_id,
+            pointer_id: 0,
+            x,
+            y,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            velocity_x: 0.0,
+            velocity_y: 0.0,
+            tap_count: 0,
+            scale: 1.0,
+            delta_scale: 0.0,
+            rotation: angle,
+            delta_rotation: delta_angle,
+            timestamp_us: 0,
+        }
+    }
+
+    /// Create a rotation start event (deprecated, use rotation with Began)
+    pub fn rotation_start(node_id: u32, x: f32, y: f32, angle: f32) -> Self {
+        Self::rotation(node_id, x, y, angle, 0.0, GesturePhase::Began)
+    }
+
+    /// Create a rotation update event (deprecated, use rotation with Changed)
+    pub fn rotation_update(node_id: u32, x: f32, y: f32, angle: f32, delta_angle: f32) -> Self {
+        Self::rotation(node_id, x, y, angle, delta_angle, GesturePhase::Changed)
+    }
+
+    /// Create a rotation end event (deprecated, use rotation with Ended)
+    pub fn rotation_end(node_id: u32, x: f32, y: f32) -> Self {
+        Self::rotation(node_id, x, y, 0.0, 0.0, GesturePhase::Ended)
+    }
+
+    /// Check if this is the beginning of a gesture
+    pub fn is_began(&self) -> bool {
+        self.phase == GesturePhase::Began
+    }
+
+    /// Check if this is a change/update to a gesture
+    pub fn is_changed(&self) -> bool {
+        self.phase == GesturePhase::Changed
+    }
+
+    /// Check if this is the end of a gesture
+    pub fn is_ended(&self) -> bool {
+        self.phase == GesturePhase::Ended
+    }
+
+    /// Check if this gesture was cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.phase == GesturePhase::Cancelled
     }
 }
 
@@ -185,6 +335,11 @@ pub struct TapGesture {
 }
 
 impl TapGesture {
+    /// Create a tap gesture (defaults to single tap, use `.count(n)` to customize)
+    pub fn new() -> Self {
+        Self::single_tap()
+    }
+
     /// Create a single tap gesture
     pub fn single_tap() -> Self {
         Self {
@@ -347,35 +502,53 @@ impl Default for PanGesture {
     }
 }
 
-/// Pinch gesture configuration (scale)
-pub struct PinchGesture {
-    pub min_scale: f32,
+/// Scale gesture configuration (pinch-to-zoom)
+pub struct ScaleGesture {
+    pub min_scale_delta: f32,
     pub on_gesture_began: Option<Box<dyn FnMut(GestureEvent)>>,
     pub on_gesture_changed: Option<Box<dyn FnMut(GestureEvent)>>,
     pub on_gesture_ended: Option<Box<dyn FnMut(GestureEvent)>>,
 }
 
-impl PinchGesture {
+impl ScaleGesture {
     pub fn new() -> Self {
         Self {
-            min_scale: 0.1,
+            min_scale_delta: 0.1,
             on_gesture_began: None,
             on_gesture_changed: None,
             on_gesture_ended: None,
         }
     }
 
-    pub fn min_scale(mut self, scale: f32) -> Self {
-        self.min_scale = scale;
+    pub fn min_scale_delta(mut self, delta: f32) -> Self {
+        self.min_scale_delta = delta;
+        self
+    }
+
+    pub fn on_gesture_began(mut self, handler: impl FnMut(GestureEvent) + 'static) -> Self {
+        self.on_gesture_began = Some(Box::new(handler));
+        self
+    }
+
+    pub fn on_gesture_changed(mut self, handler: impl FnMut(GestureEvent) + 'static) -> Self {
+        self.on_gesture_changed = Some(Box::new(handler));
+        self
+    }
+
+    pub fn on_gesture_ended(mut self, handler: impl FnMut(GestureEvent) + 'static) -> Self {
+        self.on_gesture_ended = Some(Box::new(handler));
         self
     }
 }
 
-impl Default for PinchGesture {
+impl Default for ScaleGesture {
     fn default() -> Self {
         Self::new()
     }
 }
+
+// Alias for backward compatibility
+pub type PinchGesture = ScaleGesture;
 
 /// Rotation gesture configuration
 pub struct RotationGesture {
@@ -496,8 +669,14 @@ pub enum GestureStep {
     Tap(TapGesture),
     LongPress(LongPressGesture),
     Pan(PanGesture),
-    Pinch(PinchGesture),
+    Scale(ScaleGesture),
     Rotation(RotationGesture),
+    /// Nested exclusive gesture
+    Exclusive(ExclusiveGesture),
+    /// Nested simultaneous gesture
+    Simultaneous(ParallelGesture),
+    /// Nested sequenced gesture
+    Sequenced(SequenceGesture),
 }
 
 // Helper constructors for GestureStep
@@ -519,9 +698,9 @@ impl From<PanGesture> for GestureStep {
     }
 }
 
-impl From<PinchGesture> for GestureStep {
-    fn from(g: PinchGesture) -> Self {
-        GestureStep::Pinch(g)
+impl From<ScaleGesture> for GestureStep {
+    fn from(g: ScaleGesture) -> Self {
+        GestureStep::Scale(g)
     }
 }
 
@@ -531,7 +710,55 @@ impl From<RotationGesture> for GestureStep {
     }
 }
 
+impl From<ExclusiveGesture> for GestureStep {
+    fn from(g: ExclusiveGesture) -> Self {
+        GestureStep::Exclusive(g)
+    }
+}
+
+impl From<ParallelGesture> for GestureStep {
+    fn from(g: ParallelGesture) -> Self {
+        GestureStep::Simultaneous(g)
+    }
+}
+
+impl From<SequenceGesture> for GestureStep {
+    fn from(g: SequenceGesture) -> Self {
+        GestureStep::Sequenced(g)
+    }
+}
+
 // =============== Gesture Registration Helpers ===============
+
+/// Gesture type bitflags for unified registration
+pub const GESTURE_TAP: u16 = 1 << 0;
+pub const GESTURE_LONG_PRESS: u16 = 1 << 1;
+pub const GESTURE_PAN: u16 = 1 << 2;
+pub const GESTURE_SCALE: u16 = 1 << 3;
+pub const GESTURE_ROTATION: u16 = 1 << 4;
+
+/// Config types for SetGestureConfig
+pub const CONFIG_TAP_COUNT: u8 = 0;
+pub const CONFIG_LONG_PRESS_TIMEOUT: u8 = 1;
+pub const CONFIG_PAN_SLOP: u8 = 2;
+
+/// Unified gesture registration - Phase 1 API
+///
+/// Example:
+/// ```ignore
+/// // Register tap and long press on same node
+/// register_gesture(node_id, GESTURE_TAP | GESTURE_LONG_PRESS);
+/// set_gesture_config(node_id, CONFIG_TAP_COUNT, 2); // double tap
+/// ```
+pub fn register_gesture(node_id: u32, mask: u16) {
+    push_command!(SHARED_BUFFER, AttachClick, node_id);
+    push_command!(SHARED_BUFFER, RegisterGesture, node_id, mask);
+}
+
+/// Set gesture configuration for a node
+pub fn set_gesture_config(node_id: u32, config_type: u8, value: u32) {
+    push_command!(SHARED_BUFFER, SetGestureConfig, node_id, config_type, value);
+}
 
 /// Register a tap handler for a node (new API with GestureEvent)
 pub fn register_tap_handler<F>(node_id: u32, mut handler: F)
@@ -546,8 +773,9 @@ where
     }
     
     push_command!(SHARED_BUFFER, AttachClick, node_id);
-    push_command!(SHARED_BUFFER, RegisterTapHandler, node_id);
-    
+    // Unified tap handler with count=1 for single tap
+    push_command!(SHARED_BUFFER, RegisterTapHandler, node_id, 1u32);
+
     TAP_HANDLERS_V2.with(|h| {
         h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
     });
@@ -566,8 +794,9 @@ where
     }
     
     push_command!(SHARED_BUFFER, AttachClick, node_id);
-    push_command!(SHARED_BUFFER, RegisterDoubleTapHandler, node_id);
-    
+    // Use unified RegisterTapHandler with count=2 for double tap
+    push_command!(SHARED_BUFFER, RegisterTapHandler, node_id, 2u32);
+
     DOUBLE_TAP_HANDLERS_V2.with(|h| {
         h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
     });

@@ -17,7 +17,7 @@ use std::ops::{Add, Sub, Mul, Div, AddAssign, SubAssign, MulAssign, DivAssign, R
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
-use futures_signals::signal::{Signal, SignalExt};
+use futures_signals::signal::Signal;
 use dyxel_shared::SizeUnit;
 use slotmap::{SlotMap, new_key_type};
 

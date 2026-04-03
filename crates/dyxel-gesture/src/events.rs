@@ -102,7 +102,27 @@ impl PointerData {
     }
 }
 
-/// High-level gesture event types
+/// Pan gesture phase - unified API for onPan handler
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanPhase {
+    /// Pan gesture started
+    Start,
+    /// Pan gesture updated (finger moved)
+    Update,
+    /// Pan gesture ended
+    End,
+}
+
+/// Long press gesture phase
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongPressPhase {
+    /// Long press started
+    Start,
+    /// Long press ended
+    End,
+}
+
+/// High-level gesture event types (legacy, will be replaced by GestureEvent with phase)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureEventType {
     /// Tap detected (tap_count field indicates single/double/triple/etc)
@@ -155,6 +175,16 @@ pub struct GestureEvent {
     pub tap_count: u32,
     /// Timestamp of the event
     pub timestamp_us: u64,
+    /// Phase for continuous gestures (Pan, Scale, etc)
+    pub phase: Option<GesturePhase>,
+}
+
+/// Unified gesture phase for continuous gestures
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GesturePhase {
+    Start,
+    Update,
+    End,
 }
 
 impl GestureEvent {
@@ -173,6 +203,7 @@ impl GestureEvent {
             scale_delta: 0.0,
             tap_count,
             timestamp_us,
+            phase: None,
         }
     }
 
@@ -191,6 +222,7 @@ impl GestureEvent {
             scale_delta: 0.0,
             tap_count: 2,
             timestamp_us,
+            phase: None,
         }
     }
 
@@ -209,6 +241,7 @@ impl GestureEvent {
             scale_delta: 0.0,
             tap_count: 0,
             timestamp_us,
+            phase: None,
         }
     }
 
@@ -227,6 +260,7 @@ impl GestureEvent {
             scale_delta: 0.0,
             tap_count: 0,
             timestamp_us,
+            phase: None,
         }
     }
 
@@ -245,6 +279,7 @@ impl GestureEvent {
             scale_delta: 0.0,
             tap_count: 0,
             timestamp_us,
+            phase: Some(GesturePhase::Start),
         }
     }
 
@@ -271,6 +306,7 @@ impl GestureEvent {
             scale_delta: 0.0,
             tap_count: 0,
             timestamp_us,
+            phase: Some(GesturePhase::Update),
         }
     }
 
@@ -297,6 +333,7 @@ impl GestureEvent {
             scale_delta: 0.0,
             tap_count: 0,
             timestamp_us,
+            phase: Some(GesturePhase::End),
         }
     }
 }

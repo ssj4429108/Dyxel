@@ -853,7 +853,7 @@ impl VelloBackend {
             }
             
             #[cfg(not(target_os = "android"))]
-            log::info!(
+            log::debug!(
                 "[DIAG] Frame {}: Total={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FPS={:.1}",
                 stats.total_frames,
                 total,
@@ -864,9 +864,10 @@ impl VelloBackend {
                 present_time,
                 stats.fps
             );
-            
+
             // Print full breakdown every 300 frames (5 seconds at 60 FPS)
-            if stats.total_frames % 300 == 0 {
+            // Note: Only printed when debug logging is enabled
+            if stats.total_frames % 300 == 0 && log::log_enabled!(log::Level::Debug) {
                 report.print();
             }
         }

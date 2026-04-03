@@ -124,14 +124,14 @@ impl SpatialHitTester {
             if bounds_changed {
                 nodes_to_update.push(*node_id);
                 bounds_changed_hits += 1;
-                log::info!("[SpatialHitTester] Node {} bounds changed: stored ({:.1},{:.1},{:.1},{:.1}) vs current ({:.1},{:.1},{:.1},{:.1})",
+                log::debug!("[SpatialHitTester] Node {} bounds changed: stored ({:.1},{:.1},{:.1},{:.1}) vs current ({:.1},{:.1},{:.1},{:.1})",
                     node_id, data.x, data.y, data.width, data.height, layout.x, layout.y, layout.width, layout.height);
             }
         }
         
         // Update nodes that changed
         if !nodes_to_update.is_empty() {
-            log::info!("[SpatialHitTester] Updating {} nodes (dirty_mask: {}, bounds_changed: {})", 
+            log::debug!("[SpatialHitTester] Updating {} nodes (dirty_mask: {}, bounds_changed: {})",
                 nodes_to_update.len(), dirty_mask_hits, bounds_changed_hits);
             for node_id in nodes_to_update {
                 self.remove_node(node_id);
@@ -277,7 +277,7 @@ impl HitTester for SpatialHitTester {
             }
         }
 
-        log::info!("[SpatialHitTester] Hit test at ({:.1},{:.1}): cell ({},{}), checked {} nodes, {} in bounds, best: {:?}",
+        log::trace!("[SpatialHitTester] Hit test at ({:.1},{:.1}): cell ({},{}), checked {} nodes, {} in bounds, best: {:?}",
             x, y, cell_x, cell_y, checked_nodes, in_bounds_nodes, best_node.map(|(id, _)| id));
 
         match best_node {

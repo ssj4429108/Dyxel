@@ -640,11 +640,13 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
             }
         }
         // === Gesture Handler Registration ===
+        // Unified tap handler - count determines single/double/triple/etc (1-N)
         OpCode::RegisterTapHandler => {
-            if payload.len() >= 4 {
+            if payload.len() >= 8 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                log::info!("RegisterTapHandler for node {}", id);
-                get_handler_registry().lock().unwrap().register(id, HandlerType::Tap);
+                let count = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                log::info!("RegisterTapHandler for node {} with count {}", id, count);
+                get_handler_registry().lock().unwrap().register(id, HandlerType::Tap(count));
             }
         }
         OpCode::RegisterLongPressHandler => {
@@ -661,17 +663,30 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
                 get_handler_registry().lock().unwrap().register(id, HandlerType::Pan);
             }
         }
-        OpCode::RegisterDoubleTapHandler => {
-            if payload.len() >= 4 {
-                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                log::info!("RegisterDoubleTapHandler for node {}", id);
-                get_handler_registry().lock().unwrap().register(id, HandlerType::DoubleTap);
-            }
-        }
+        // Note: RegisterDoubleTapHandler and RegisterMultiTapHandler removed
+        // All tap gestures now use unified RegisterTapHandler with count parameter
         OpCode::UnregisterGestureHandler => {
             if payload.len() >= 4 {
                 let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 get_handler_registry().lock().unwrap().unregister(id);
+            }
+        }
+        // === Unified Gesture Registration (Phase 1) ===
+        OpCode::RegisterGesture => {
+            if payload.len() >= 6 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let mask = u16::from_le_bytes([payload[4], payload[5]]);
+                log::info!("RegisterGesture for node {} with mask {:#b}", id, mask);
+                get_handler_registry().lock().unwrap().register_by_mask(id, mask);
+            }
+        }
+        OpCode::SetGestureConfig => {
+            if payload.len() >= 9 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let config_type = payload[4];
+                let value = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+                log::info!("SetGestureConfig for node {}: type={} value={}", id, config_type, value);
+                get_handler_registry().lock().unwrap().set_config(id, config_type, value);
             }
         }
         OpCode::UpdateDeviceInfo => {
@@ -979,9 +994,9 @@ pub fn sync_layout_to_wasm(memory: &mut [u8], buffer_ptr: u32, state: &SharedSta
     
     // Get dirty tracker for this sync
     #[cfg(not(target_arch = "wasm32"))]
-    let dirty_tracker_opt = get_dirty_tracker();
+    let _dirty_tracker_opt = get_dirty_tracker();
     #[cfg(target_arch = "wasm32")]
-    let dirty_tracker_opt: Option<DirtyTracker> = None;
+    let _dirty_tracker_opt: Option<DirtyTracker> = None;
     
     // Build parent -> children mapping for topological traversal
     let mut children_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();

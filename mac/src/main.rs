@@ -7,6 +7,9 @@ use dyxel_core::DyxelHost;
 use kurbo::Vec2;
 use std::thread;
 
+mod touch;
+use touch::TouchTracker;
+
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new()?;
@@ -17,27 +20,24 @@ fn main() -> anyhow::Result<()> {
 
     let host = DyxelHost::new();
 
-    // 1. Start preparing engine in background thread without blocking main thread
+    // Start preparing engine in background thread
     let h_init = host.clone();
     thread::spawn(move || {
         pollster::block_on(h_init.prepare_engine(".".to_string()));
-        // Load business logic immediately after environment is ready, otherwise screen will be black
         pollster::block_on(h_init.load_wasm("guest.wasm".to_string()));
     });
-
 
     let mut mouse_pos = Vec2::ZERO;
     let mut mouse_pressed = false;
     let mut surface_setup_done = false;
+    let mut touch_tracker = TouchTracker::new();
 
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Wait);
 
         match event {
-            // Execute Setup when window is ready and engine is also ready
             Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
                 if surface_setup_done {
-                    // Window was resized after initial setup, notify engine
                     host.resize_native(new_size.width, new_size.height);
                 }
             }
@@ -46,7 +46,6 @@ fn main() -> anyhow::Result<()> {
                     let h = host.clone();
                     let w = window.clone();
                     let size = w.inner_size();
-                    // Create wgpu::SurfaceTarget and wrap it in SurfaceTargetHandle
                     let wgpu_target: vello::wgpu::SurfaceTarget<'static> = w.clone().into();
                     let target_handle = dyxel_render_api::SurfaceTargetHandle::new(wgpu_target);
                     pollster::block_on(h.setup(
@@ -62,20 +61,61 @@ fn main() -> anyhow::Result<()> {
                 host.stop_native();
                 elwt.exit();
             }
+
+            // Multi-touch support via winit's Touch event
+            // NOTE: On macOS, this only works if the window system is configured
+            // to send touch events (usually requires Info.plist configuration
+            // or specific NSTouchBar/NSTouch handling)
+            Event::WindowEvent { event: WindowEvent::Touch(touch), .. } => {
+                let native_id = touch.id as u64;
+                let x = touch.location.x;
+                let y = touch.location.y;
+
+                match touch.phase {
+                    winit::event::TouchPhase::Started => {
+                        let pid = touch_tracker.get_pointer_id(native_id);
+                        log::debug!("Touch began: native={} pointer={} pos=({:.1},{:.1})", native_id, pid, x, y);
+                        host.on_pointer_down(pid, x as f32, y as f32, 1.0);
+                    }
+                    winit::event::TouchPhase::Moved => {
+                        let pid = touch_tracker.get_pointer_id(native_id);
+                        host.on_pointer_move(pid, x as f32, y as f32);
+                    }
+                    winit::event::TouchPhase::Ended => {
+                        if let Some(pid) = touch_tracker.release_touch(native_id) {
+                            log::debug!("Touch ended: native={} pointer={} pos=({:.1},{:.1})", native_id, pid, x, y);
+                            host.on_pointer_up(pid, x as f32, y as f32);
+                        }
+                    }
+                    winit::event::TouchPhase::Cancelled => {
+                        if let Some(pid) = touch_tracker.release_touch(native_id) {
+                            log::debug!("Touch cancelled: native={} pointer={}", native_id, pid);
+                            host.on_pointer_up(pid, x as f32, y as f32);
+                        }
+                    }
+                }
+            }
+
+            // Mouse fallback (only active when no touches)
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 mouse_pos = Vec2::new(position.x, position.y);
-                if mouse_pressed {
+                if mouse_pressed && !touch_tracker.has_active_touches() {
                     host.on_pointer_move(0, mouse_pos.x as f32, mouse_pos.y as f32);
                 }
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
                 mouse_pressed = true;
-                host.on_touch(mouse_pos.x as f32, mouse_pos.y as f32);
+                if !touch_tracker.has_active_touches() {
+                    host.on_pointer_down(0, mouse_pos.x as f32, mouse_pos.y as f32, 1.0);
+                }
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. }, .. } => {
                 mouse_pressed = false;
-                host.on_pointer_up(0, mouse_pos.x as f32, mouse_pos.y as f32);
+                if !touch_tracker.has_active_touches() {
+                    host.on_pointer_up(0, mouse_pos.x as f32, mouse_pos.y as f32);
+                }
             }
+
             Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed,
                 logical_key: winit::keyboard::Key::Character(c),
@@ -88,7 +128,6 @@ fn main() -> anyhow::Result<()> {
                 logical_key: winit::keyboard::Key::Character(c),
                 ..
             }, .. }, .. } if c == "c" || c == "C" => {
-                // Toggle continuous render mode (for FPS testing)
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static CONTINUOUS: AtomicBool = AtomicBool::new(false);
                 let new_state = !CONTINUOUS.load(Ordering::Relaxed);

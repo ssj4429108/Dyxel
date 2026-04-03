@@ -85,11 +85,15 @@ pub enum RenderMessage {
 // =============== Input Proxy with GestureArena ===============
 
 #[cfg(not(target_arch = "wasm32"))]
-use dyxel_gesture::{GestureRouter, GestureSettings, SpatialHitTester, GestureProvider, GestureType};
+use dyxel_gesture::{GestureRouter, SpatialHitTester, HitTester};
+#[cfg(not(target_arch = "wasm32"))]
+use dyxel_gesture::{GestureConfig as V2GestureConfig, GestureType as V2GestureType};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runtime::get_handler_registry;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::handler_registry::HandlerType;
+use crate::handler_registry::{HandlerType, HandlerRegistry};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
@@ -99,50 +103,35 @@ thread_local! {
     static LOGIC_STATE_PTR: std::cell::Cell<*const LogicState> = std::cell::Cell::new(std::ptr::null());
 }
 
-/// Gesture provider implementation that uses HandlerRegistry
+/// Convert HandlerType to V2 GestureType
 #[cfg(not(target_arch = "wasm32"))]
-struct HandlerRegistryGestureProvider;
-
-#[cfg(not(target_arch = "wasm32"))]
-impl GestureProvider for HandlerRegistryGestureProvider {
-    fn get_node_gestures(&self, node_id: u32) -> Vec<GestureType> {
-        let registry = get_handler_registry().lock().unwrap();
-        let mut gestures = Vec::new();
-        
-        if registry.has_handler(node_id, HandlerType::Tap) {
-            gestures.push(GestureType::Tap);
-        }
-        if registry.has_handler(node_id, HandlerType::DoubleTap) {
-            gestures.push(GestureType::DoubleTap);
-        }
-        if registry.has_handler(node_id, HandlerType::LongPress) {
-            gestures.push(GestureType::LongPress);
-        }
-        if registry.has_handler(node_id, HandlerType::Pan) {
-            gestures.push(GestureType::Pan);
-        }
-        
-        gestures
+fn to_v2_gesture_type(handler_type: HandlerType) -> V2GestureType {
+    match handler_type {
+        // All tap counts unified to Tap type - max_tap_count handles the difference
+        HandlerType::Tap(_) => V2GestureType::Tap,
+        HandlerType::LongPress => V2GestureType::LongPress,
+        HandlerType::Pan => V2GestureType::Pan,
+        HandlerType::Scale => V2GestureType::Scale,
+        HandlerType::Rotation => V2GestureType::Rotation,
     }
-    
-    fn get_parent_node(&self, node_id: u32) -> u32 {
-        // Access LogicState through thread-local pointer to get parent from SharedState
-        LOGIC_STATE_PTR.with(|ptr| {
-            let logic_ptr = ptr.get();
-            if logic_ptr.is_null() {
-                return 0;
-            }
-            
-            unsafe {
-                let logic = &*logic_ptr;
-                if let Ok(state) = logic.shared_state.lock() {
-                    if let Some(node) = state.nodes.get(&node_id) {
-                        return node.parent_id;
-                    }
-                }
-            }
-            0
-        })
+}
+
+/// Build V2 GestureConfig from HandlerRegistry
+#[cfg(not(target_arch = "wasm32"))]
+fn build_v2_config(node_id: u32, registry: &HandlerRegistry) -> V2GestureConfig {
+    let gestures = registry.get_node_gestures(node_id);
+    let registered_types: Vec<V2GestureType> = gestures.into_iter()
+        .map(to_v2_gesture_type)
+        .collect();
+
+    // Determine max_tap_count from registry (supports single/double/triple/etc)
+    let max_tap_count = registry.get_max_tap_count(node_id).max(1);
+
+    V2GestureConfig {
+        node_id,
+        registered_types,
+        max_tap_count,
+        ..Default::default()
     }
 }
 
@@ -156,182 +145,174 @@ fn ensure_gesture_router_initialized(logic: &LogicState) {
             // Get shared buffer pointer for hit testing
             let bptr = *logic.shared_buffer_ptr.lock().unwrap();
             
-            // Create hit tester using shared buffer (with spatial index for O(1) hit testing)
-            let hit_tester: Box<dyn dyxel_gesture::HitTester> = if let Some(bptr) = bptr {
+            // Set shared buffer pointer in SharedState for layout sync
+            if let Some(bptr) = bptr {
                 let mem = unsafe { &mut *logic._rt.memory_mut() };
                 let shared_buffer_ptr = unsafe { 
                     mem.as_mut_ptr().add(bptr as usize) as *const dyxel_shared::SharedBuffer 
                 };
                 
-                // Set shared buffer pointer in SharedState for layout sync (Phase 2/3)
                 if let Ok(mut state) = logic.shared_state.lock() {
                     state.set_shared_buffer_ptr(shared_buffer_ptr as *mut dyxel_shared::SharedBuffer);
                 }
-                
-                unsafe {
-                    let mut tester = SpatialHitTester::new(shared_buffer_ptr);
-                    tester.sync(); // Initial sync
-                    log::info!("SpatialHitTester initialized");
-                    Box::new(tester)
-                }
-            } else {
-                Box::new(dyxel_gesture::NoOpHitTester)
-            };
+            }
 
-            // Get runtime reference for callback
-            let rt_ptr = &logic._rt as *const wasm3::Runtime;
-            let shared_buffer_ptr = bptr;
-
-            // Create gesture router with callback that dispatches to WASM
-            let settings = GestureSettings::default();
-            let gesture_provider: Box<dyn GestureProvider> = Box::new(HandlerRegistryGestureProvider);
-            let new_router = GestureRouter::new(
-                settings,
-                hit_tester,
-                gesture_provider,
-                move |event| {
-                    dispatch_gesture_event(rt_ptr, shared_buffer_ptr, event);
-                },
-            );
+            // Create gesture router
+            let new_router = GestureRouter::new();
 
             *router.borrow_mut() = Some(new_router);
-            log::info!("GestureRouter initialized with direct gesture dispatch");
+            log::info!("GestureRouter initialized");
         }
     });
 }
 
+
+
+/// Ensure node is registered in V2 router
 #[cfg(not(target_arch = "wasm32"))]
-fn dispatch_gesture_event(
-    rt_ptr: *const wasm3::Runtime,
-    shared_buffer_ptr: Option<u32>,
+fn ensure_node_registered_v2(router: &mut GestureRouter, node_id: u32) {
+    let registry = get_handler_registry().lock().unwrap();
+    let gestures = registry.get_node_gestures(node_id);
+    
+    if !gestures.is_empty() {
+        let config = build_v2_config(node_id, &registry);
+        router.register_node_gestures(node_id, config);
+    }
+    drop(registry);
+}
+
+/// V2 Gesture Event Type constants
+const GESTURE_TYPE_TAP: u8 = 0;
+const GESTURE_TYPE_LONG_PRESS: u8 = 1;
+const GESTURE_TYPE_PAN: u8 = 2;
+const GESTURE_TYPE_SCALE: u8 = 3;
+const GESTURE_TYPE_ROTATION: u8 = 4;
+
+/// V2 Gesture Phase constants
+const GESTURE_PHASE_BEGAN: u8 = 0;
+const GESTURE_PHASE_CHANGED: u8 = 1;
+const GESTURE_PHASE_ENDED: u8 = 2;
+const GESTURE_PHASE_CANCELLED: u8 = 3;
+
+#[allow(dead_code)]
+/// Encode f32 to u32 for payload (preserves 16-bit precision for delta values)
+fn encode_f32_to_u32(v: f32) -> u32 {
+    // Scale by 1000 and round to preserve 3 decimal places
+    (v * 1000.0).round() as i32 as u32
+}
+
+#[allow(dead_code)]
+/// Decode u32 to f32
+fn decode_u32_to_f32(v: u32) -> f32 {
+    (v as i32) as f32 / 1000.0
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_gesture_event_v2(
+    logic: &LogicState,
     event: dyxel_gesture::GestureEvent,
 ) {
     use dyxel_shared::push_command;
     use dyxel_gesture::GestureEventType;
     use crate::handler_registry::HandlerType;
 
-    if rt_ptr.is_null() || shared_buffer_ptr.is_none() {
-        return;
-    }
-
-    let bptr = shared_buffer_ptr.unwrap();
+    let bptr = match *logic.shared_buffer_ptr.lock().unwrap() {
+        Some(ptr) => ptr,
+        None => {
+            log::warn!("dispatch_gesture_event_v2: No shared buffer pointer");
+            return;
+        }
+    };
 
     // Build bubble path from target to root using LogicState
-    let bubble_path = LOGIC_STATE_PTR.with(|ptr| {
-        let logic_ptr = ptr.get();
-        if logic_ptr.is_null() {
-            vec![event.target_node_id]
-        } else {
-            build_bubble_path(event.target_node_id, unsafe { &*logic_ptr })
-        }
-    });
-    
-    // Determine handler type from event type and tap_count
+    let bubble_path = build_bubble_path(event.target_node_id, logic);
+
+    // Map event type to V2 encoding
+    let (event_type, phase) = match event.event_type {
+        GestureEventType::Tap => (GESTURE_TYPE_TAP, GESTURE_PHASE_ENDED),
+        GestureEventType::LongPressStart => (GESTURE_TYPE_LONG_PRESS, GESTURE_PHASE_BEGAN),
+        GestureEventType::LongPressEnd => (GESTURE_TYPE_LONG_PRESS, GESTURE_PHASE_ENDED),
+        GestureEventType::PanStart => (GESTURE_TYPE_PAN, GESTURE_PHASE_BEGAN),
+        GestureEventType::PanUpdate => (GESTURE_TYPE_PAN, GESTURE_PHASE_CHANGED),
+        GestureEventType::PanEnd => (GESTURE_TYPE_PAN, GESTURE_PHASE_ENDED),
+        GestureEventType::ScaleStart => (GESTURE_TYPE_SCALE, GESTURE_PHASE_BEGAN),
+        GestureEventType::ScaleUpdate => (GESTURE_TYPE_SCALE, GESTURE_PHASE_CHANGED),
+        GestureEventType::ScaleEnd => (GESTURE_TYPE_SCALE, GESTURE_PHASE_ENDED),
+    };
+
+    // Determine handler type for registry lookup
     let handler_type = match event.event_type {
-        GestureEventType::Tap => {
-            // Use tap_count to determine handler type
-            match event.tap_count {
-                1 => Some(HandlerType::Tap),
-                2 => Some(HandlerType::DoubleTap),
-                _ => Some(HandlerType::Tap), // For triple+ taps, fall back to Tap handler
-            }
-        }
+        GestureEventType::Tap => Some(HandlerType::Tap(event.tap_count.max(1))),
         GestureEventType::LongPressStart | GestureEventType::LongPressEnd => Some(HandlerType::LongPress),
         GestureEventType::PanStart | GestureEventType::PanUpdate | GestureEventType::PanEnd => Some(HandlerType::Pan),
-        _ => None,
+        GestureEventType::ScaleStart | GestureEventType::ScaleUpdate | GestureEventType::ScaleEnd => Some(HandlerType::Scale),
     };
-    
+
     // SAFETY: This is called from the Logic Thread where the runtime is valid
     unsafe {
-        let mem = &mut *(*rt_ptr).memory_mut();
+        let mem = &mut *logic._rt.memory_mut();
         let shared_buffer = &mut *(mem.as_mut_ptr().add(bptr as usize) as *mut dyxel_shared::SharedBuffer);
 
-        if let Some(ht) = handler_type {
-            // Use HandlerRegistry to find the actual handler target
+        // Find target node via HandlerRegistry
+        let target_node = if let Some(ht) = handler_type {
             let registry = get_handler_registry().lock().unwrap();
             let handler_node = registry.find_handler(&bubble_path, ht);
-            let stats = registry.stats();
             drop(registry);
-            
-            log::info!("dispatch_gesture_event: bubble_path={:?}, handler_type={:?}, handler_node={:?}, registry_stats={:?}",
-                bubble_path, ht, handler_node, stats);
-            
-            if let Some(handler_node) = handler_node {
-                // Send direct gesture event (WASM should not bubble)
-                match event.event_type {
-                    GestureEventType::Tap => {
-                        // Use tap_count to determine which command to send
-                        match event.tap_count {
-                            1 => {
-                                push_command!(shared_buffer, DirectGestureTap, handler_node, event.x, event.y);
-                                log::info!("DirectGesture: Tap on node {} (target was {}) at ({:.1},{:.1})", 
-                                    handler_node, event.target_node_id, event.x, event.y);
-                            }
-                            2 => {
-                                push_command!(shared_buffer, DirectGestureDoubleTap, handler_node, event.x, event.y);
-                                log::info!("DirectGesture: DoubleTap on node {} (target was {}) at ({:.1},{:.1})", 
-                                    handler_node, event.target_node_id, event.x, event.y);
-                            }
-                            _ => {
-                                // For triple+ taps, send as Tap for now
-                                push_command!(shared_buffer, DirectGestureTap, handler_node, event.x, event.y);
-                                log::debug!("DirectGesture: Tap({}) on node {} (target was {}) at ({:.1},{:.1})", 
-                                    event.tap_count, handler_node, event.target_node_id, event.x, event.y);
-                            }
-                        }
-                    }
-                    GestureEventType::LongPressStart => {
-                        push_command!(shared_buffer, DirectGestureLongPress, handler_node, event.x, event.y);
-                        log::info!("DirectGesture: LongPress on node {} (target was {}) at ({:.1},{:.1})", 
-                            handler_node, event.target_node_id, event.x, event.y);
-                    }
-                    GestureEventType::PanStart => {
-                        push_command!(shared_buffer, DirectGesturePanStart, handler_node, event.x, event.y);
-                        log::info!("DirectGesture: PanStart on node {} (target was {}) at ({:.1},{:.1})", 
-                            handler_node, event.target_node_id, event.x, event.y);
-                    }
-                    GestureEventType::PanUpdate => {
-                        push_command!(shared_buffer, DirectGesturePanUpdate, handler_node, event.x, event.y, event.delta_x, event.delta_y);
-                    }
-                    GestureEventType::PanEnd => {
-                        push_command!(shared_buffer, DirectGesturePanEnd, handler_node, event.x, event.y);
-                        log::info!("DirectGesture: PanEnd on node {} (target was {}) at ({:.1},{:.1})", 
-                            handler_node, event.target_node_id, event.x, event.y);
-                    }
-                    _ => {}
-                }
-                return; // Handled as direct gesture
+
+            log::debug!("dispatch_gesture_event_v2: bubble_path={:?}, handler_type={:?}, handler_node={:?}",
+                bubble_path, ht, handler_node);
+
+            handler_node.unwrap_or(event.target_node_id)
+        } else {
+            event.target_node_id
+        };
+
+        // Encode payload based on gesture type
+        let payload = match event.event_type {
+            GestureEventType::Tap => event.tap_count as u32,
+            GestureEventType::PanUpdate => {
+                // Pack delta_x and delta_y into single u32 (16 bits each)
+                let dx = ((event.delta_x * 100.0) as i16) as u16;
+                let dy = ((event.delta_y * 100.0) as i16) as u16;
+                ((dx as u32) << 16) | (dy as u32)
             }
+            GestureEventType::ScaleUpdate => {
+                // Pack scale (8-bit integer part) + scale_delta (8-bit signed)
+                let scale_int = event.scale.clamp(0.0, 25.5) as u8;
+                let scale_frac = ((event.scale.fract() * 256.0) as u8) as u32;
+                ((scale_int as u32) << 24) | (scale_frac << 16)
+            }
+            _ => 0u32,
+        };
+
+        // Send unified V2 gesture event
+        // Use V2Ex if payload is non-zero, otherwise use V2
+        if payload != 0 {
+            push_command!(shared_buffer, GestureEventV2Ex, target_node, event_type, phase, event.x, event.y, payload);
+        } else {
+            push_command!(shared_buffer, GestureEventV2, target_node, event_type, phase, event.x, event.y);
         }
 
-        // Fallback to legacy gesture events (WASM will bubble)
-        match event.event_type {
-            GestureEventType::Tap => {
-                // Use tap_count to determine which command to send
-                match event.tap_count {
-                    1 => { push_command!(shared_buffer, GestureTap, event.target_node_id, event.x, event.y); }
-                    2 => { push_command!(shared_buffer, GestureDoubleTap, event.target_node_id, event.x, event.y); }
-                    _ => { push_command!(shared_buffer, GestureTap, event.target_node_id, event.x, event.y); }
-                }
-            }
-            GestureEventType::LongPressStart => {
-                push_command!(shared_buffer, GestureLongPressStart, event.target_node_id, event.x, event.y);
-            }
-            GestureEventType::LongPressEnd => {
-                push_command!(shared_buffer, GestureLongPressEnd, event.target_node_id, event.x, event.y);
-            }
-            GestureEventType::PanStart => {
-                push_command!(shared_buffer, GesturePanStart, event.target_node_id, event.x, event.y);
-            }
-            GestureEventType::PanUpdate => {
-                push_command!(shared_buffer, GesturePanUpdate, event.target_node_id, event.x, event.y, event.delta_x, event.delta_y);
-            }
-            GestureEventType::PanEnd => {
-                push_command!(shared_buffer, GesturePanEnd, event.target_node_id, event.x, event.y, event.delta_x, event.delta_y);
-            }
-            _ => {
-                log::debug!("Unhandled gesture event: {:?}", event.event_type);
-            }
+        // Log for debugging
+        let gesture_name = match event_type {
+            GESTURE_TYPE_TAP => "Tap",
+            GESTURE_TYPE_LONG_PRESS => "LongPress",
+            GESTURE_TYPE_PAN => "Pan",
+            GESTURE_TYPE_SCALE => "Scale",
+            GESTURE_TYPE_ROTATION => "Rotation",
+            _ => "Unknown",
+        };
+        let phase_name = match phase {
+            GESTURE_PHASE_BEGAN => "Began",
+            GESTURE_PHASE_CHANGED => "Changed",
+            GESTURE_PHASE_ENDED => "Ended",
+            GESTURE_PHASE_CANCELLED => "Cancelled",
+            _ => "Unknown",
+        };
+
+        if matches!(phase, GESTURE_PHASE_BEGAN | GESTURE_PHASE_ENDED) || event_type == GESTURE_TYPE_TAP {
+            log::info!("GestureV2: {} {} on node {} at ({:.1},{:.1})",
+                gesture_name, phase_name, target_node, event.x, event.y);
         }
     }
 }
@@ -343,7 +324,7 @@ fn build_bubble_path(target_node: u32, logic: &LogicState) -> Vec<u32> {
     
     // Walk up parent chain using SharedState
     // This queries the Host-side tree structure
-    if let Ok(state) = logic.shared_state.try_lock() {
+    if let Ok(state) = logic.shared_state.lock() {
         let mut current = target_node;
         
         // Traverse parent chain until we reach root (parent_id == 0)
@@ -366,35 +347,36 @@ fn build_bubble_path(target_node: u32, logic: &LogicState) -> Vec<u32> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
-    use dyxel_shared::{InputEventType, RawInputEvent};
+    // InputEventType and RawInputEvent not used in V2
+    use dyxel_gesture::{PointerEvent, PointerEventType};
 
-    log::info!("DyxelInput: process_input_internal event={:?}", event);
+    log::debug!("DyxelInput: process_input_internal event={:?}", event);
 
     // Ensure GestureRouter is initialized
     ensure_gesture_router_initialized(logic);
 
-    // Convert InputEvent to RawInputEvent
+    // Convert InputEvent to V2 PointerEvent
     let (event_type, pointer_id, x, y, pressure) = match event {
         InputEvent::TouchDown { x, y } => {
-            (InputEventType::PointerDown, 0, x, y, 1.0)
+            (PointerEventType::Down, 0, x, y, 1.0)
         }
         InputEvent::TouchMove { x, y } => {
-            (InputEventType::PointerMove, 0, x, y, 1.0)
+            (PointerEventType::Move, 0, x, y, 1.0)
         }
         InputEvent::TouchUp { x, y } => {
-            (InputEventType::PointerUp, 0, x, y, 0.0)
+            (PointerEventType::Up, 0, x, y, 0.0)
         }
         InputEvent::PointerDown { pointer_id, x, y, pressure } => {
-            (InputEventType::PointerDown, pointer_id, x, y, pressure)
+            (PointerEventType::Down, pointer_id, x, y, pressure)
         }
         InputEvent::PointerMove { pointer_id, x, y } => {
-            (InputEventType::PointerMove, pointer_id, x, y, 1.0)
+            (PointerEventType::Move, pointer_id, x, y, 1.0)
         }
         InputEvent::PointerUp { pointer_id, x, y } => {
-            (InputEventType::PointerUp, pointer_id, x, y, 0.0)
+            (PointerEventType::Up, pointer_id, x, y, 0.0)
         }
         InputEvent::PointerCancel => {
-            (InputEventType::PointerCancel, 0, 0.0, 0.0, 0.0)
+            (PointerEventType::Cancel, 0, 0.0, 0.0, 0.0)
         }
     };
 
@@ -404,28 +386,67 @@ fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
         .unwrap_or_default()
         .as_micros() as u64;
 
-    // Create raw event
-    let raw_event = RawInputEvent {
-        timestamp,
+    // Hit test to find target node
+    let target_node_id = GESTURE_ROUTER.with(|_router| {
+        // First, ensure spatial hit tester is synced
+        LOGIC_STATE_PTR.with(|ptr| {
+            let logic_ptr = ptr.get();
+            if !logic_ptr.is_null() {
+                unsafe {
+                    let logic = &*logic_ptr;
+                    let bptr = *logic.shared_buffer_ptr.lock().unwrap();
+                    if let Some(bptr) = bptr {
+                        let mem = &mut *logic._rt.memory_mut();
+                        let shared_buffer_ptr = mem.as_mut_ptr().add(bptr as usize) as *const dyxel_shared::SharedBuffer;
+                        let mut tester = SpatialHitTester::new(shared_buffer_ptr);
+                        tester.sync();
+                        let result = tester.hit_test(x, y);
+                        return result.node_id;
+                    }
+                }
+            }
+            0
+        })
+    });
+
+    // Create V2 PointerEvent
+    let pointer_event = PointerEvent {
+        event_type,
         pointer_id,
-        event_type: event_type as u8,
-        _padding: [0; 3],
+        timestamp_us: timestamp,
         x,
         y,
         pressure,
-        delta_x: 0.0,
-        delta_y: 0.0,
-        target_node_id: 0,
-        flags: 0,
+        target_node_id,
     };
 
-    // Route through GestureRouter
-    GESTURE_ROUTER.with(|router| {
-        if let Some(ref mut router) = *router.borrow_mut() {
-            log::info!("DyxelInput: Routing through GestureRouter ptr={} type={:?}", raw_event.pointer_id, raw_event.event_type);
-            router.sync(); // Sync spatial index before hit testing
-            router.handle_input_event(&raw_event);
-            log::info!("DyxelInput: GestureRouter processed event");
+    // Route through V2 GestureRouter
+    GESTURE_ROUTER.with(|router_cell| {
+        if let Some(ref mut router) = *router_cell.borrow_mut() {
+            let bubble_path = build_bubble_path(target_node_id, logic);
+            
+            // Ensure all nodes in bubble path are registered
+            for &node_id in &bubble_path {
+                if node_id != 0 {
+                    ensure_node_registered_v2(router, node_id);
+                }
+            }
+            
+            log::trace!("DyxelInput: Routing ptr={} type={:?} target={}",
+                pointer_event.pointer_id, pointer_event.event_type, target_node_id);
+
+            // Process timer-based events FIRST (before pointer event)
+            // This ensures recognizers like LongPress can trigger before PointerUp causes them to fail
+            let now = Instant::now();
+            let timer_events = router.tick(now);
+
+            // Process event and get gesture events
+            let gesture_events = router.route_pointer_event_with_path(&pointer_event, bubble_path);
+
+            // Dispatch all events (timer events first, then pointer events)
+            for event in timer_events.into_iter().chain(gesture_events.into_iter()) {
+                dispatch_gesture_event_v2(logic, event);
+            }
         } else {
             log::warn!("DyxelInput: GestureRouter not initialized!");
         }
@@ -600,6 +621,17 @@ impl DyxelHost {
                                             
                                             // Execute WASM tick (produces commands)
                                             log::debug!("LogicThread: acquiring tick_fn lock...");
+                                            
+                                            // Process gesture router timers
+                                            GESTURE_ROUTER.with(|router_cell| {
+                                                if let Some(router) = router_cell.borrow_mut().as_mut() {
+                                                    let timer_events = router.tick(Instant::now());
+                                                    for event in timer_events {
+                                                        dispatch_gesture_event_v2(l, event);
+                                                    }
+                                                }
+                                            });
+
                                             let tick_opt = l.tick_fn.lock().unwrap();
                                             log::debug!("LogicThread: tick_fn lock acquired");
                                             if let Some(tick) = tick_opt.as_ref() {
@@ -680,14 +712,14 @@ impl DyxelHost {
                         };
 
                         // Process received message
-                        log::info!("LogicThread: msg_res={:?}, lifecycle={:?}", msg_res.is_ok(), lifecycle);
+                        log::trace!("LogicThread: msg_res={:?}, lifecycle={:?}", msg_res.is_ok(), lifecycle);
                         if let Ok(msg) = msg_res {
                             match &msg {
-                                LogicMessage::SetReady(_) => log::info!("LogicThread: msg type=SetReady"),
-                                LogicMessage::Input(_) => log::info!("LogicThread: msg type=Input"),
-                                LogicMessage::LoadWasm(_) => log::info!("LogicThread: msg type=LoadWasm"),
-                                LogicMessage::Pause => log::info!("LogicThread: msg type=Pause"),
-                                LogicMessage::Resume => log::info!("LogicThread: msg type=Resume"),
+                                LogicMessage::SetReady(_) => log::debug!("LogicThread: msg type=SetReady"),
+                                LogicMessage::Input(_) => log::trace!("LogicThread: msg type=Input"),
+                                LogicMessage::LoadWasm(_) => log::debug!("LogicThread: msg type=LoadWasm"),
+                                LogicMessage::Pause => log::debug!("LogicThread: msg type=Pause"),
+                                LogicMessage::Resume => log::debug!("LogicThread: msg type=Resume"),
                                 LogicMessage::Shutdown => log::info!("LogicThread: msg type=Shutdown"),
                             }
                             match msg {
@@ -1016,7 +1048,7 @@ impl DyxelHost {
             let host_ptr = format!("{:p}", self);
             let logic_tx_guard = self.logic_tx.lock().unwrap();
             if let Some(tx) = &*logic_tx_guard {
-                log::info!("DyxelInput: on_pointer_down host={} pid={} x={:.1} y={:.1}", host_ptr, pointer_id, x, y);
+                log::debug!("DyxelInput: on_pointer_down pid={} x={:.1} y={:.1}", pointer_id, x, y);
                 match tx.send(LogicMessage::Input(InputEvent::PointerDown {
                     pointer_id,
                     x,
@@ -1036,7 +1068,7 @@ impl DyxelHost {
     pub fn on_pointer_move(&self, pointer_id: u32, x: f32, y: f32) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            log::info!("DyxelInput: on_pointer_move pid={} x={:.1} y={:.1}", pointer_id, x, y);
+            log::trace!("DyxelInput: on_pointer_move pid={} x={:.1} y={:.1}", pointer_id, x, y);
             let _ = tx.send(LogicMessage::Input(InputEvent::PointerMove {
                 pointer_id,
                 x,
@@ -1049,7 +1081,7 @@ impl DyxelHost {
     pub fn on_pointer_up(&self, pointer_id: u32, x: f32, y: f32) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            log::info!("DyxelInput: on_pointer_up pid={} x={:.1} y={:.1}", pointer_id, x, y);
+            log::debug!("DyxelInput: on_pointer_up pid={} x={:.1} y={:.1}", pointer_id, x, y);
             let _ = tx.send(LogicMessage::Input(InputEvent::PointerUp {
                 pointer_id,
                 x,

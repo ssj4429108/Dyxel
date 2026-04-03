@@ -121,11 +121,12 @@ define_protocol! {
     
     // === Gesture Handler Registration (28-31) ===
     // WASM notifies Host which nodes have gesture handlers
-    [28] RegisterTapHandler(id: u32),
+    // Tap handler with configurable count (1=single, 2=double, 3=triple, etc.)
+    [28] RegisterTapHandler(id: u32, count: u32),
     [29] RegisterLongPressHandler(id: u32),
     [30] RegisterPanHandler(id: u32),
-    [31] RegisterDoubleTapHandler(id: u32),
-    // Note: UnregisterGestureHandler moved to 80 to avoid conflict
+    // [31] Reserved - was RegisterDoubleTapHandler, now merged into RegisterTapHandler
+    // Note: UnregisterGestureHandler moved to 90 to avoid conflict
     
     // === Rich Text Operations (32-47) ===
     [32] CreateTextNode(id: u32),
@@ -135,7 +136,17 @@ define_protocol! {
     [36] SetTextColor(id: u32, r: u8, g: u8, b: u8, a: u8),
     [37] SetTextWeight(id: u32, weight: u16),
     [38] SetTextFontFamily(id: u32, len: u32),
-    
+
+    // === Gesture Handler Registration Extended (39-40) ===
+    [39] RegisterScaleHandler(id: u32),
+    [40] RegisterRotationHandler(id: u32),
+    // Note: RegisterMultiTapHandler removed - use RegisterTapHandler with count instead
+
+    // === Unified Gesture Registration (26-27) - Phase 1 ===
+    // Replaces [28,29,30,39,40,90] with unified mask-based registration
+    [26] RegisterGesture(id: u32, mask: u16),  // bitflags: Tap|LongPress|Pan|Scale|Rotation
+    [27] SetGestureConfig(id: u32, config_type: u8, value: u32),  // config_type: 0=tap_count, 1=timeout, etc.
+
     // === Transaction Operations (48-51) ===
     [48] BeginTransaction(seq_id: u32, flags: u16),
     [49] EndTransaction(seq_id: u32),
@@ -167,12 +178,27 @@ define_protocol! {
     [75] DirectGesturePanStart(node_id: u32, x: f32, y: f32),
     [76] DirectGesturePanUpdate(node_id: u32, x: f32, y: f32, delta_x: f32, delta_y: f32),
     [77] DirectGesturePanEnd(node_id: u32, x: f32, y: f32),
-    
+    [78] DirectGestureScaleStart(node_id: u32, x: f32, y: f32, scale: f32),
+    [79] DirectGestureScaleUpdate(node_id: u32, x: f32, y: f32, scale: f32, delta_scale: f32),
+    [80] DirectGestureScaleEnd(node_id: u32, x: f32, y: f32),
+    [81] DirectGestureRotationStart(node_id: u32, x: f32, y: f32, angle: f32),
+    [82] DirectGestureRotationUpdate(node_id: u32, x: f32, y: f32, angle: f32, delta_angle: f32),
+    [83] DirectGestureRotationEnd(node_id: u32, x: f32, y: f32),
+    [84] DirectGestureLongPressEnd(node_id: u32, x: f32, y: f32),
+
     // === Device Info (64) ===
     [64] UpdateDeviceInfo(dpr: f32, text_scale: f32, width: f32, height: f32, safe_top: f32, safe_bottom: f32, platform: u32),
-    
-    // === Gesture Handler Unregistration (80) ===
-    [80] UnregisterGestureHandler(id: u32), // Generic unregister
+
+    // === Gesture Handler Unregistration (90) ===
+    [90] UnregisterGestureHandler(id: u32), // Generic unregister
+
+    // === Unified Gesture Events (85-89) - Phase 2 ===
+    // Replaces [56-63] and [72-84] with 5 unified events
+    // event_type: 0=Tap, 1=LongPress, 2=Pan, 3=Scale, 4=Rotation
+    // phase: 0=Began, 1=Changed, 2=Ended, 3=Cancelled (discrete events use 2=Ended)
+    [85] GestureEventV2(node_id: u32, event_type: u8, phase: u8, x: f32, y: f32),
+    // Extended event with payload (tap_count, scale, delta_x, etc. encoded in payload)
+    [86] GestureEventV2Ex(node_id: u32, event_type: u8, phase: u8, x: f32, y: f32, payload: u32),
 }
 
 #[repr(C)]
