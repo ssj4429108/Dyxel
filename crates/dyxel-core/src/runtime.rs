@@ -677,6 +677,50 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
                 get_handler_registry().lock().unwrap().register(id, HandlerType::Rotation);
             }
         }
+        // === Gesture Handler Registration V2 (41-45) - Custom Config Support ===
+        OpCode::RegisterTapHandlerV2 => {
+            if payload.len() >= 7 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let count = payload[4];
+                let multi_click_gap_ms = u16::from_le_bytes([payload[5], payload[6]]);
+                log::info!("RegisterTapHandlerV2 for node {}: count={}, gap={}ms", id, count, multi_click_gap_ms);
+                get_handler_registry().lock().unwrap().set_tap_config(id, count, multi_click_gap_ms);
+            }
+        }
+        OpCode::RegisterLongPressHandlerV2 => {
+            if payload.len() >= 6 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let timeout_ms = u16::from_le_bytes([payload[4], payload[5]]);
+                let slop = payload.get(6).copied().unwrap_or(18);
+                log::info!("RegisterLongPressHandlerV2 for node {}: timeout={}ms, slop={}", id, timeout_ms, slop);
+                get_handler_registry().lock().unwrap().set_long_press_config(id, timeout_ms, slop);
+            }
+        }
+        OpCode::RegisterPanHandlerV2 => {
+            if payload.len() >= 6 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let slop = payload[4];
+                let direction = payload[5];
+                log::info!("RegisterPanHandlerV2 for node {}: slop={}, direction={}", id, slop, direction);
+                get_handler_registry().lock().unwrap().set_pan_config(id, slop, direction);
+            }
+        }
+        OpCode::RegisterScaleHandlerV2 => {
+            if payload.len() >= 5 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let slop = payload[4];
+                log::info!("RegisterScaleHandlerV2 for node {}: slop={}", id, slop);
+                get_handler_registry().lock().unwrap().set_scale_config(id, slop);
+            }
+        }
+        OpCode::RegisterRotationHandlerV2 => {
+            if payload.len() >= 5 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let slop = payload[4];
+                log::info!("RegisterRotationHandlerV2 for node {}: slop={}", id, slop);
+                get_handler_registry().lock().unwrap().set_rotation_config(id, slop);
+            }
+        }
         // Note: RegisterDoubleTapHandler and RegisterMultiTapHandler removed
         // All tap gestures now use unified RegisterTapHandler with count parameter
         OpCode::UnregisterGestureHandler => {

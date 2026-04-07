@@ -31,6 +31,54 @@ pub const CONFIG_TAP_COUNT: u8 = 0;
 pub const CONFIG_LONG_PRESS_TIMEOUT: u8 = 1;
 pub const CONFIG_PAN_SLOP: u8 = 2;
 
+/// Pan direction constraints for RegisterPanHandlerV2
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanDirection {
+    /// No constraint - pan in any direction
+    Any = 0,
+    /// Horizontal only
+    Horizontal = 1,
+    /// Vertical only
+    Vertical = 2,
+}
+
+impl PanDirection {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Horizontal,
+            2 => Self::Vertical,
+            _ => Self::Any,
+        }
+    }
+}
+
+/// Gesture configuration for a node (V2 API)
+#[derive(Debug, Clone, Copy)]
+pub struct GestureConfig {
+    /// Tap count (1=single, 2=double, 3=triple, etc.)
+    pub tap_count: u32,
+    /// Multi-click gap timeout in milliseconds
+    pub multi_click_gap_ms: u16,
+    /// Long press timeout in milliseconds
+    pub long_press_timeout_ms: u16,
+    /// Touch slop threshold (in logical pixels)
+    pub slop: f32,
+    /// Pan direction constraint
+    pub pan_direction: PanDirection,
+}
+
+impl Default for GestureConfig {
+    fn default() -> Self {
+        Self {
+            tap_count: 1,
+            multi_click_gap_ms: 300,      // Flutter default
+            long_press_timeout_ms: 500,   // Flutter default
+            slop: 18.0,                   // Flutter kTouchSlop
+            pan_direction: PanDirection::Any,
+        }
+    }
+}
+
 impl HandlerType {
     /// Create a single tap handler type (for backward compatibility)
     pub fn single_tap() -> Self {
@@ -56,6 +104,8 @@ pub struct HandlerRegistry {
     rotation_handlers: HashMap<u32, ()>,
     /// Per-node gesture configuration (node_id -> (config_type, value))
     gesture_configs: HashMap<u32, HashMap<u8, u32>>,
+    /// Per-node gesture config (V2 API)
+    node_configs: HashMap<u32, GestureConfig>,
 }
 
 impl HandlerRegistry {
@@ -67,7 +117,62 @@ impl HandlerRegistry {
             scale_handlers: HashMap::new(),
             rotation_handlers: HashMap::new(),
             gesture_configs: HashMap::new(),
+            node_configs: HashMap::new(),
         }
+    }
+
+    /// Get or create default gesture config for a node (V2 API)
+    pub fn get_or_create_config(&mut self, node_id: u32) -> &mut GestureConfig {
+        self.node_configs.entry(node_id).or_default()
+    }
+
+    /// Get gesture config for a node (returns default if not set)
+    pub fn get_config_v2(&self, node_id: u32) -> GestureConfig {
+        self.node_configs.get(&node_id).copied().unwrap_or_default()
+    }
+
+    /// Update tap configuration (V2 API)
+    pub fn set_tap_config(&mut self, node_id: u32, count: u8, multi_click_gap_ms: u16) {
+        // Register the tap handler with max count
+        let count_u32 = count as u32;
+        let current = self.tap_handlers.get(&node_id).copied().unwrap_or(0);
+        if count_u32 > current {
+            self.tap_handlers.insert(node_id, count_u32);
+        }
+        // Store config
+        let config = self.get_or_create_config(node_id);
+        config.tap_count = count_u32;
+        config.multi_click_gap_ms = multi_click_gap_ms;
+    }
+
+    /// Update long press configuration (V2 API)
+    pub fn set_long_press_config(&mut self, node_id: u32, timeout_ms: u16, slop: u8) {
+        self.long_press_handlers.insert(node_id, ());
+        let config = self.get_or_create_config(node_id);
+        config.long_press_timeout_ms = timeout_ms;
+        config.slop = slop as f32;
+    }
+
+    /// Update pan configuration (V2 API)
+    pub fn set_pan_config(&mut self, node_id: u32, slop: u8, direction: u8) {
+        self.pan_handlers.insert(node_id, ());
+        let config = self.get_or_create_config(node_id);
+        config.slop = slop as f32;
+        config.pan_direction = PanDirection::from_u8(direction);
+    }
+
+    /// Update scale configuration (V2 API)
+    pub fn set_scale_config(&mut self, node_id: u32, slop: u8) {
+        self.scale_handlers.insert(node_id, ());
+        let config = self.get_or_create_config(node_id);
+        config.slop = slop as f32;
+    }
+
+    /// Update rotation configuration (V2 API)
+    pub fn set_rotation_config(&mut self, node_id: u32, slop: u8) {
+        self.rotation_handlers.insert(node_id, ());
+        let config = self.get_or_create_config(node_id);
+        config.slop = slop as f32;
     }
 
     /// Register gestures by mask (unified API)
@@ -156,6 +261,7 @@ impl HandlerRegistry {
         self.scale_handlers.remove(&node_id);
         self.rotation_handlers.remove(&node_id);
         self.gesture_configs.remove(&node_id);
+        self.node_configs.remove(&node_id);
     }
 
     /// Check if a node has a specific handler

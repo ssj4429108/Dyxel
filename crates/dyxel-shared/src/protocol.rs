@@ -142,6 +142,14 @@ define_protocol! {
     [40] RegisterRotationHandler(id: u32),
     // Note: RegisterMultiTapHandler removed - use RegisterTapHandler with count instead
 
+    // === Gesture Handler Registration V2 (41-45) - Custom Config Support ===
+    // V2 handlers support custom slop, timeout, and direction parameters
+    [41] RegisterTapHandlerV2(id: u32, count: u8, multi_click_gap_ms: u16),
+    [42] RegisterLongPressHandlerV2(id: u32, timeout_ms: u16, slop: u8),
+    [43] RegisterPanHandlerV2(id: u32, slop: u8, direction: u8), // direction: 0=any, 1=horizontal, 2=vertical
+    [44] RegisterScaleHandlerV2(id: u32, slop: u8),
+    [45] RegisterRotationHandlerV2(id: u32, slop: u8),
+
     // === Unified Gesture Registration (26-27) - Phase 1 ===
     // Replaces [28,29,30,39,40,90] with unified mask-based registration
     [26] RegisterGesture(id: u32, mask: u16),  // bitflags: Tap|LongPress|Pan|Scale|Rotation

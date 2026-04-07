@@ -841,3 +841,103 @@ where
         h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
     });
 }
+
+// =============== V2 Handler Registration with Custom Config ===============
+
+/// Pan direction for V2 registration (simplified, matches Host enum)
+pub enum PanDirectionV2 {
+    /// No constraint - pan in any direction
+    Any = 0,
+    /// Horizontal only
+    Horizontal = 1,
+    /// Vertical only
+    Vertical = 2,
+}
+
+impl From<PanDirection> for PanDirectionV2 {
+    fn from(dir: PanDirection) -> Self {
+        match dir {
+            PanDirection::Horizontal => PanDirectionV2::Horizontal,
+            PanDirection::Vertical => PanDirectionV2::Vertical,
+            _ => PanDirectionV2::Any,
+        }
+    }
+}
+
+/// Register a tap handler with custom configuration (V2 API)
+///
+/// # Arguments
+/// * `node_id` - The node ID to register the handler on
+/// * `count` - Number of taps required (1=single, 2=double, 3=triple)
+/// * `multi_click_gap_ms` - Maximum time between taps in milliseconds
+///
+/// # Example
+/// ```ignore
+/// register_tap_handler_v2(node_id, 2, 300); // Double tap with 300ms gap
+/// ```
+pub fn register_tap_handler_v2(node_id: u32, count: u8, multi_click_gap_ms: u16) {
+    push_command!(SHARED_BUFFER, AttachClick, node_id);
+    push_command!(SHARED_BUFFER, RegisterTapHandlerV2, node_id, count, multi_click_gap_ms);
+}
+
+/// Register a long press handler with custom configuration (V2 API)
+///
+/// # Arguments
+/// * `node_id` - The node ID to register the handler on
+/// * `timeout_ms` - Time in milliseconds before long press is triggered
+/// * `slop` - Touch slop threshold in logical pixels (Flutter default: 18)
+///
+/// # Example
+/// ```ignore
+/// register_long_press_handler_v2(node_id, 500, 18); // 500ms timeout, 18px slop
+/// ```
+pub fn register_long_press_handler_v2(node_id: u32, timeout_ms: u16, slop: u8) {
+    push_command!(SHARED_BUFFER, AttachClick, node_id);
+    push_command!(SHARED_BUFFER, RegisterLongPressHandlerV2, node_id, timeout_ms, slop);
+}
+
+/// Register a pan handler with custom configuration (V2 API)
+///
+/// # Arguments
+/// * `node_id` - The node ID to register the handler on
+/// * `slop` - Touch slop threshold in logical pixels (Flutter default: 18)
+/// * `direction` - Direction constraint (0=Any, 1=Horizontal, 2=Vertical)
+///
+/// # Example
+/// ```ignore
+/// register_pan_handler_v2(node_id, 18, PanDirectionV2::Horizontal as u8);
+/// ```
+pub fn register_pan_handler_v2(node_id: u32, slop: u8, direction: u8) {
+    push_command!(SHARED_BUFFER, AttachClick, node_id);
+    push_command!(SHARED_BUFFER, RegisterPanHandlerV2, node_id, slop, direction);
+}
+
+/// Register a scale handler with custom configuration (V2 API)
+///
+/// # Arguments
+/// * `node_id` - The node ID to register the handler on
+/// * `slop` - Touch slop threshold in logical pixels (Flutter default: 18)
+///
+/// # Example
+/// ```ignore
+/// register_scale_handler_v2(node_id, 18);
+/// ```
+pub fn register_scale_handler_v2(node_id: u32, slop: u8) {
+    push_command!(SHARED_BUFFER, AttachClick, node_id);
+    push_command!(SHARED_BUFFER, RegisterScaleHandlerV2, node_id, slop);
+}
+
+/// Register a rotation handler with custom configuration (V2 API)
+///
+/// # Arguments
+/// * `node_id` - The node ID to register the handler on
+/// * `slop` - Touch slop threshold in logical pixels (Flutter default: 18)
+///
+/// # Example
+/// ```ignore
+/// register_rotation_handler_v2(node_id, 18);
+/// ```
+pub fn register_rotation_handler_v2(node_id: u32, slop: u8) {
+    push_command!(SHARED_BUFFER, AttachClick, node_id);
+    push_command!(SHARED_BUFFER, RegisterRotationHandlerV2, node_id, slop);
+}
