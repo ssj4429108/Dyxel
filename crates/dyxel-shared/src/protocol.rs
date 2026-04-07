@@ -291,6 +291,229 @@ pub enum DirtyField {
     Layout = 1 << 5,    // flex properties changed
 }
 
+// =============================================================================
+// Gesture Event Buffer (Host → WASM)
+// =============================================================================
+
+/// Gesture event types for Host → WASM communication
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GestureEventType {
+    Tap = 0,
+    LongPress = 1,
+    Pan = 2,
+    Scale = 3,
+    Rotation = 4,
+}
+
+impl GestureEventType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Tap),
+            1 => Some(Self::LongPress),
+            2 => Some(Self::Pan),
+            3 => Some(Self::Scale),
+            4 => Some(Self::Rotation),
+            _ => None,
+        }
+    }
+}
+
+/// Gesture phase for continuous gestures
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GesturePhase {
+    Began = 0,
+    Changed = 1,
+    Ended = 2,
+    Cancelled = 3,
+}
+
+impl GesturePhase {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Began),
+            1 => Some(Self::Changed),
+            2 => Some(Self::Ended),
+            3 => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// Host → WASM gesture event
+/// Fixed 32-byte size for predictable memory layout
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct HostGestureEvent {
+    /// Target node ID
+    pub node_id: u32,
+    /// Event type (GestureEventType)
+    pub event_type: u8,
+    /// Phase (GesturePhase)
+    pub phase: u8,
+    /// Padding for alignment
+    pub _padding: [u8; 2],
+    /// X position
+    pub x: f32,
+    /// Y position
+    pub y: f32,
+    /// Delta X (for Pan/Scale/Rotation updates)
+    pub delta_x: f32,
+    /// Delta Y (for Pan updates)
+    pub delta_y: f32,
+    /// Scale value (for Scale events)
+    pub scale: f32,
+    /// Rotation angle in radians (for Rotation events)
+    pub rotation: f32,
+    /// Tap count (for Tap events)
+    pub tap_count: u32,
+    /// Velocity X (for Pan end)
+    pub velocity_x: f32,
+    /// Velocity Y (for Pan end)
+    pub velocity_y: f32,
+}
+
+impl Default for HostGestureEvent {
+    fn default() -> Self {
+        Self {
+            node_id: 0,
+            event_type: 0,
+            phase: 0,
+            _padding: [0; 2],
+            x: 0.0,
+            y: 0.0,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            scale: 1.0,
+            rotation: 0.0,
+            tap_count: 1,
+            velocity_x: 0.0,
+            velocity_y: 0.0,
+        }
+    }
+}
+
+/// Gesture event buffer capacity
+/// At 60 FPS with complex gestures, ~50 events/sec is plenty
+pub const GESTURE_BUFFER_CAPACITY: usize = 64;
+
+/// Host → WASM gesture event ring buffer
+///
+/// Single-producer single-consumer model:
+/// - Producer: Host-side gesture recognizer
+/// - Consumer: WASM logic thread (dyxel_view_tick)
+#[repr(C)]
+pub struct GestureEventBuffer {
+    /// Write position (host-side monotonic increment)
+    pub write_idx: u32,
+    /// Read position (WASM-side monotonic increment)
+    pub read_idx: u32,
+    /// Overflow count (for debugging)
+    pub overflow_count: u32,
+    /// Reserved
+    pub _reserved: u32,
+    /// Event storage array
+    pub events: [HostGestureEvent; GESTURE_BUFFER_CAPACITY],
+}
+
+impl GestureEventBuffer {
+    /// Create empty buffer
+    pub const fn new() -> Self {
+        Self {
+            write_idx: 0,
+            read_idx: 0,
+            overflow_count: 0,
+            _reserved: 0,
+            events: [HostGestureEvent {
+                node_id: 0,
+                event_type: 0,
+                phase: 0,
+                _padding: [0; 2],
+                x: 0.0,
+                y: 0.0,
+                delta_x: 0.0,
+                delta_y: 0.0,
+                scale: 1.0,
+                rotation: 0.0,
+                tap_count: 1,
+                velocity_x: 0.0,
+                velocity_y: 0.0,
+            }; GESTURE_BUFFER_CAPACITY],
+        }
+    }
+
+    /// Check if buffer is empty
+    pub fn is_empty(&self) -> bool {
+        self.read_idx == self.write_idx
+    }
+
+    /// Check if buffer is full
+    pub fn is_full(&self) -> bool {
+        self.write_idx - self.read_idx >= GESTURE_BUFFER_CAPACITY as u32
+    }
+
+    /// Current event count
+    pub fn len(&self) -> usize {
+        (self.write_idx - self.read_idx) as usize
+    }
+
+    /// Push event (called by host)
+    /// Returns true on success, false if buffer full (event dropped)
+    pub fn push(&mut self, event: HostGestureEvent) -> bool {
+        if self.is_full() {
+            self.overflow_count += 1;
+            return false;
+        }
+        let idx = (self.write_idx % GESTURE_BUFFER_CAPACITY as u32) as usize;
+        self.events[idx] = event;
+        self.write_idx += 1;
+        true
+    }
+
+    /// Pop event (called by WASM)
+    /// Returns None if buffer empty
+    pub fn pop(&mut self) -> Option<HostGestureEvent> {
+        if self.is_empty() {
+            return None;
+        }
+        let idx = (self.read_idx % GESTURE_BUFFER_CAPACITY as u32) as usize;
+        let event = self.events[idx];
+        self.read_idx += 1;
+        Some(event)
+    }
+
+    /// Batch read all available events
+    pub fn drain(&mut self) -> GestureEventDrainIterator<'_> {
+        GestureEventDrainIterator { buffer: self }
+    }
+
+    /// Clear buffer
+    pub fn clear(&mut self) {
+        self.read_idx = self.write_idx;
+    }
+}
+
+/// Gesture event buffer batch read iterator
+pub struct GestureEventDrainIterator<'a> {
+    buffer: &'a mut GestureEventBuffer,
+}
+
+impl<'a> Iterator for GestureEventDrainIterator<'a> {
+    type Item = HostGestureEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.buffer.pop()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.buffer.len();
+        (len, Some(len))
+    }
+}
+
+impl<'a> ExactSizeIterator for GestureEventDrainIterator<'a> {}
+
 impl DirtyField {
     pub fn from_bits(bits: u8) -> Self {
         Self::from_bits_truncate(bits)

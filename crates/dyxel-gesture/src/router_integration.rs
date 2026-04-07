@@ -12,7 +12,7 @@ use crate::events::{PointerEvent, PointerEventType, GestureEvent};
 use crate::arena::{GestureArenaManager, GestureArena};
 use crate::recognizer::{
     TapGestureRecognizer, LongPressGestureRecognizer,
-    PanGestureRecognizer, ScaleGestureRecognizer
+    PanGestureRecognizer, ScaleGestureRecognizer, RotationGestureRecognizer
 };
 
 /// Gesture type for configuration
@@ -125,6 +125,18 @@ impl RecognizerFactory {
             let scale_recognizer = ScaleGestureRecognizer::new(rid, node_id);
 
             arena.add_member(Box::new(scale_recognizer));
+            recognizer_ids.push(rid);
+        }
+
+        // Create Rotation recognizer
+        if config.registered_types.contains(&GestureType::Rotation) {
+            let rid = self.next_recognizer_id;
+            self.next_recognizer_id += 1;
+
+            let rotation_recognizer = RotationGestureRecognizer::new(rid, node_id)
+                .with_slop(config.slop); // Use same slop as other gestures
+
+            arena.add_member(Box::new(rotation_recognizer));
             recognizer_ids.push(rid);
         }
 

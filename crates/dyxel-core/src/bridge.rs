@@ -238,6 +238,9 @@ fn dispatch_gesture_event_v2(
         GestureEventType::ScaleStart => (GESTURE_TYPE_SCALE, GESTURE_PHASE_BEGAN),
         GestureEventType::ScaleUpdate => (GESTURE_TYPE_SCALE, GESTURE_PHASE_CHANGED),
         GestureEventType::ScaleEnd => (GESTURE_TYPE_SCALE, GESTURE_PHASE_ENDED),
+        GestureEventType::RotationStart => (GESTURE_TYPE_ROTATION, GESTURE_PHASE_BEGAN),
+        GestureEventType::RotationUpdate => (GESTURE_TYPE_ROTATION, GESTURE_PHASE_CHANGED),
+        GestureEventType::RotationEnd => (GESTURE_TYPE_ROTATION, GESTURE_PHASE_ENDED),
     };
 
     // Determine handler type for registry lookup
@@ -246,6 +249,7 @@ fn dispatch_gesture_event_v2(
         GestureEventType::LongPressStart | GestureEventType::LongPressEnd => Some(HandlerType::LongPress),
         GestureEventType::PanStart | GestureEventType::PanUpdate | GestureEventType::PanEnd => Some(HandlerType::Pan),
         GestureEventType::ScaleStart | GestureEventType::ScaleUpdate | GestureEventType::ScaleEnd => Some(HandlerType::Scale),
+        GestureEventType::RotationStart | GestureEventType::RotationUpdate | GestureEventType::RotationEnd => Some(HandlerType::Rotation),
     };
 
     // SAFETY: This is called from the Logic Thread where the runtime is valid
@@ -281,6 +285,12 @@ fn dispatch_gesture_event_v2(
                 let scale_int = event.scale.clamp(0.0, 25.5) as u8;
                 let scale_frac = ((event.scale.fract() * 256.0) as u8) as u32;
                 ((scale_int as u32) << 24) | (scale_frac << 16)
+            }
+            GestureEventType::RotationUpdate => {
+                // Pack rotation in radians as i16 (scaled by 1000 for precision)
+                // Range: -32.768 to +32.768 radians (~-1875 to +1875 degrees)
+                let rotation_scaled = (event.delta_x * 1000.0) as i16;
+                ((rotation_scaled as u16) as u32) << 16
             }
             _ => 0u32,
         };

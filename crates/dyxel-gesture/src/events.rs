@@ -143,6 +143,12 @@ pub enum GestureEventType {
     ScaleUpdate,
     /// Scale ended
     ScaleEnd,
+    /// Rotation started (two-finger rotation)
+    RotationStart,
+    /// Rotation updated
+    RotationUpdate,
+    /// Rotation ended
+    RotationEnd,
 }
 
 /// High-level gesture event

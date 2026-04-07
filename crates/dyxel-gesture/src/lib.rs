@@ -49,6 +49,8 @@ pub use recognizer::{
     TapGestureRecognizer,
     PanGestureRecognizer,
     LongPressGestureRecognizer,
+    ScaleGestureRecognizer,
+    RotationGestureRecognizer,
     GestureCategoryType,
     PanDirection,
 };

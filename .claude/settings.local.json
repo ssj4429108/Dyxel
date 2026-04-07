@@ -2,7 +2,28 @@
   "permissions": {
     "allow": [
       "Bash(grep:*)",
-      "Bash(ls -la *.sh)"
+      "Bash(ls -la *.sh)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(./build_mac.sh)",
+      "Bash(cargo check:*)",
+      "Bash(rm -f arena_v2.rs recognizer_v2.rs)",
+      "Bash(mv arena_v3.rs arena.rs)",
+      "Bash(mv recognizer_v3.rs recognizer.rs)",
+      "Bash(ls -la *.rs)",
+      "Bash(sed:*)",
+      "Bash(sed -i.bak 's/recognizer_v3/recognizer/g' crates/dyxel-gesture/src/arena.rs)",
+      "Bash(rm crates/dyxel-gesture/src/arena.rs.bak)",
+      "Bash(1)",
+      "Bash(ls -la /Users/skipper/axzo/ai/test/taffy_vello_sync/docs/*.md)",
+      "Bash(git checkout:*)",
+      "Bash(python3:*)",
+      "Bash([ -f /Users/skipper/axzo/ai/test/taffy_vello_sync/docs/gesture_system_design.md.bak ])",
+      "Bash(ls -la /Users/skipper/axzo/ai/test/taffy_vello_sync/docs/gesture_system_design.md*)",
+      "Bash([ ! -s /Users/skipper/axzo/ai/test/taffy_vello_sync/docs/gesture_system_design.md ])",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

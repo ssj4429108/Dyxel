@@ -663,6 +663,20 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
                 get_handler_registry().lock().unwrap().register(id, HandlerType::Pan);
             }
         }
+        OpCode::RegisterScaleHandler => {
+            if payload.len() >= 4 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                log::info!("RegisterScaleHandler for node {}", id);
+                get_handler_registry().lock().unwrap().register(id, HandlerType::Scale);
+            }
+        }
+        OpCode::RegisterRotationHandler => {
+            if payload.len() >= 4 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                log::info!("RegisterRotationHandler for node {}", id);
+                get_handler_registry().lock().unwrap().register(id, HandlerType::Rotation);
+            }
+        }
         // Note: RegisterDoubleTapHandler and RegisterMultiTapHandler removed
         // All tap gestures now use unified RegisterTapHandler with count parameter
         OpCode::UnregisterGestureHandler => {

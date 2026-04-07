@@ -428,6 +428,12 @@ fn decode_v2_payload_scale(payload: u32) -> f32 {
     int_part + frac_part
 }
 
+/// Decode u32 payload to rotation value (radians)
+fn decode_v2_payload_rotation(payload: u32) -> f32 {
+    let rotation_scaled = ((payload >> 16) & 0xFFFF) as i16;
+    rotation_scaled as f32 / 1000.0
+}
+
 /// Dispatch unified V2 gesture event to appropriate handler
 fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y: f32, payload: u32) {
     use crate::gesture::GesturePhase;
@@ -483,9 +489,14 @@ fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y:
             });
         }
         V2_GESTURE_TYPE_ROTATION => {
+            let rotation = if phase == V2_GESTURE_PHASE_CHANGED {
+                decode_v2_payload_rotation(payload)
+            } else {
+                0.0
+            };
             ROTATION_HANDLERS.with(|h| {
                 if let Some(f) = h.borrow_mut().get_mut(&node_id) {
-                    f(GestureEvent::rotation(node_id, x, y, 0.0, 0.0, gesture_phase));
+                    f(GestureEvent::rotation(node_id, x, y, rotation, 0.0, gesture_phase));
                 }
             });
         }

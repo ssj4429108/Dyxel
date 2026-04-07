@@ -1338,6 +1338,313 @@ impl GestureRecognizer for ScaleGestureRecognizer {
 }
 
 // ============================================================================
+// RotationGestureRecognizer
+// ============================================================================
+
+/// Rotation gesture recognizer for two-finger rotation
+pub struct RotationGestureRecognizer {
+    id: u32,
+    node_id: u32,
+    state: RecognizerState,
+
+    // Configuration
+    slop: f32, // Minimum rotation in radians to trigger (default: ~5 degrees)
+
+    // Multi-pointer state
+    pointers: HashMap<u32, (f32, f32)>,
+
+    // Rotation tracking
+    initial_angle: f32,
+    current_rotation: f32,
+    last_rotation: f32,
+
+    // Focal point tracking
+    focal_start: (f32, f32),
+    current_focal: (f32, f32),
+}
+
+impl RotationGestureRecognizer {
+    /// Create a new rotation recognizer
+    pub fn new(id: u32, node_id: u32) -> Self {
+        Self {
+            id,
+            node_id,
+            state: RecognizerState::Ready,
+            slop: 0.087, // ~5 degrees in radians
+            pointers: HashMap::new(),
+            initial_angle: 0.0,
+            current_rotation: 0.0,
+            last_rotation: 0.0,
+            focal_start: (0.0, 0.0),
+            current_focal: (0.0, 0.0),
+        }
+    }
+
+    /// Set slop (minimum rotation in radians)
+    pub fn with_slop(mut self, slop: f32) -> Self {
+        self.slop = slop;
+        self
+    }
+
+    /// Calculate angle between two pointers (in radians)
+    fn calculate_angle(&self) -> f32 {
+        if self.pointers.len() < 2 {
+            return 0.0;
+        }
+
+        let positions: Vec<_> = self.pointers.values().collect();
+        let dx = positions[1].0 - positions[0].0;
+        let dy = positions[1].1 - positions[0].1;
+        dy.atan2(dx)
+    }
+
+    /// Calculate focal point (center of all pointers)
+    fn calculate_focal(&self) -> (f32, f32) {
+        if self.pointers.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        for (x, y) in self.pointers.values() {
+            sum_x += x;
+            sum_y += y;
+        }
+        let count = self.pointers.len() as f32;
+        (sum_x / count, sum_y / count)
+    }
+
+    /// Normalize angle difference to [-PI, PI]
+    fn normalize_angle_diff(&self, diff: f32) -> f32 {
+        let mut diff = diff;
+        while diff > std::f32::consts::PI {
+            diff -= 2.0 * std::f32::consts::PI;
+        }
+        while diff < -std::f32::consts::PI {
+            diff += 2.0 * std::f32::consts::PI;
+        }
+        diff
+    }
+
+    /// Handle pointer down
+    fn handle_down(&mut self, event: &PointerEvent) -> Vec<GestureEvent> {
+        if self.state.is_terminal() {
+            return vec![];
+        }
+
+        // Add pointer
+        self.pointers.insert(event.pointer_id, (event.x, event.y));
+
+        match self.state {
+            RecognizerState::Ready => {
+                if self.pointers.len() == 2 {
+                    // Second pointer - start tracking
+                    self.state = RecognizerState::Possible;
+                    self.initial_angle = self.calculate_angle();
+                    self.focal_start = self.calculate_focal();
+                    self.current_focal = self.focal_start;
+                    self.current_rotation = 0.0;
+                    self.last_rotation = 0.0;
+                }
+                vec![]
+            }
+            RecognizerState::Possible | RecognizerState::Began | RecognizerState::Changed => {
+                // Update tracking
+                if self.pointers.len() >= 2 {
+                    self.current_focal = self.calculate_focal();
+                }
+                vec![]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Handle pointer move
+    fn handle_move(&mut self, event: &PointerEvent) -> Vec<GestureEvent> {
+        // Update pointer position
+        if let Some(pos) = self.pointers.get_mut(&event.pointer_id) {
+            *pos = (event.x, event.y);
+        }
+
+        match self.state {
+            RecognizerState::Possible => {
+                if self.pointers.len() >= 2 {
+                    let angle = self.calculate_angle();
+                    let raw_diff = angle - self.initial_angle;
+                    let rotation = self.normalize_angle_diff(raw_diff);
+
+                    if rotation.abs() > self.slop {
+                        // Rotation started!
+                        self.state = RecognizerState::Began;
+                        self.current_rotation = rotation;
+                        self.last_rotation = rotation;
+                        self.current_focal = self.calculate_focal();
+                        return vec![self.create_event(true, 0.0)];
+                    }
+                }
+                vec![]
+            }
+            RecognizerState::Began | RecognizerState::Changed => {
+                if self.pointers.len() >= 2 {
+                    let angle = self.calculate_angle();
+                    let raw_diff = angle - self.initial_angle;
+                    self.current_rotation = self.normalize_angle_diff(raw_diff);
+                    let delta = self.current_rotation - self.last_rotation;
+                    self.last_rotation = self.current_rotation;
+                    self.current_focal = self.calculate_focal();
+                    self.state = RecognizerState::Changed;
+                    return vec![self.create_event(false, delta)];
+                }
+                vec![]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Handle pointer up
+    fn handle_up(&mut self, event: &PointerEvent) -> Vec<GestureEvent> {
+        // Remove pointer
+        self.pointers.remove(&event.pointer_id);
+
+        match self.state {
+            RecognizerState::Began | RecognizerState::Changed => {
+                if self.pointers.len() < 2 {
+                    // Not enough pointers, end rotation
+                    self.state = RecognizerState::Ended;
+                    vec![self.create_end_event()]
+                } else {
+                    // Still have 2+ pointers, continue tracking
+                    self.current_focal = self.calculate_focal();
+                    vec![]
+                }
+            }
+            _ => {
+                if self.pointers.is_empty() {
+                    self.state = RecognizerState::Failed;
+                }
+                vec![]
+            }
+        }
+    }
+
+    /// Create rotation event
+    fn create_event(&self, is_start: bool, rotation_delta: f32) -> GestureEvent {
+        GestureEvent {
+            event_type: if is_start {
+                GestureEventType::RotationStart
+            } else {
+                GestureEventType::RotationUpdate
+            },
+            target_node_id: self.node_id,
+            primary_pointer_id: 0,
+            pointer_count: self.pointers.len() as u32,
+            x: self.current_focal.0,
+            y: self.current_focal.1,
+            delta_x: self.current_rotation, // Total rotation
+            delta_y: rotation_delta,        // Delta since last event
+            scale: 1.0,
+            scale_delta: 0.0,
+            tap_count: 0,
+            timestamp_us: Self::now_us(),
+            phase: if is_start {
+                Some(crate::events::GesturePhase::Start)
+            } else {
+                Some(crate::events::GesturePhase::Update)
+            },
+        }
+    }
+
+    /// Create rotation end event
+    fn create_end_event(&self) -> GestureEvent {
+        GestureEvent {
+            event_type: GestureEventType::RotationEnd,
+            target_node_id: self.node_id,
+            primary_pointer_id: 0,
+            pointer_count: self.pointers.len() as u32,
+            x: self.current_focal.0,
+            y: self.current_focal.1,
+            delta_x: self.current_rotation, // Final rotation
+            delta_y: 0.0,
+            scale: 1.0,
+            scale_delta: 0.0,
+            tap_count: 0,
+            timestamp_us: Self::now_us(),
+            phase: Some(crate::events::GesturePhase::End),
+        }
+    }
+
+    fn now_us() -> u64 {
+        use std::time::SystemTime;
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64
+    }
+}
+
+impl GestureRecognizer for RotationGestureRecognizer {
+    fn id(&self) -> u32 {
+        self.id
+    }
+
+    fn node_id(&self) -> u32 {
+        self.node_id
+    }
+
+    fn handle_event(&mut self, event: &PointerEvent) -> Vec<GestureEvent> {
+        match event.event_type {
+            PointerEventType::Down => self.handle_down(event),
+            PointerEventType::Up => self.handle_up(event),
+            PointerEventType::Move => self.handle_move(event),
+            PointerEventType::Cancel => {
+                self.state = RecognizerState::Cancelled;
+                vec![]
+            }
+        }
+    }
+
+    fn check_timers(&mut self, _now: Instant) -> Vec<GestureEvent> {
+        // Rotation doesn't use timers
+        vec![]
+    }
+
+    fn accept(&mut self) {
+        // Rotation accepts when slop is exceeded
+    }
+
+    fn reject(&mut self) {
+        self.state = RecognizerState::Failed;
+    }
+
+    fn state(&self) -> RecognizerState {
+        self.state
+    }
+
+    fn reset(&mut self) {
+        self.state = RecognizerState::Ready;
+        self.pointers.clear();
+        self.initial_angle = 0.0;
+        self.current_rotation = 0.0;
+        self.last_rotation = 0.0;
+        self.focal_start = (0.0, 0.0);
+        self.current_focal = (0.0, 0.0);
+    }
+
+    fn category(&self) -> GestureCategoryType {
+        // Rotation is a continuous gesture that can coexist with Scale
+        GestureCategoryType::ContinuousScale
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1878,5 +2185,126 @@ mod tests {
         let focal = recognizer.calculate_focal();
         assert!((focal.0 - 170.0).abs() < 0.1);
         assert!((focal.1 - 170.0).abs() < 0.1);
+    }
+
+    // ===== Rotation Tests =====
+
+    #[test]
+    fn test_rotation_single_pointer_no_trigger() {
+        let mut recognizer = RotationGestureRecognizer::new(1, 1);
+
+        // Single pointer down - should not trigger
+        let down = PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0);
+        let events = recognizer.handle_event(&down);
+        assert!(events.is_empty());
+        assert_eq!(recognizer.state(), RecognizerState::Ready);
+    }
+
+    #[test]
+    fn test_rotation_two_pointer_success() {
+        let mut recognizer = RotationGestureRecognizer::new(1, 1).with_slop(0.05); // Lower slop for testing
+
+        // First pointer at (100, 100)
+        let down1 = PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0);
+        recognizer.handle_event(&down1);
+
+        // Second pointer at (200, 100) - horizontal line
+        let down2 = PointerEventBuilder::new(1).node_id(1).down(200.0, 100.0);
+        let events = recognizer.handle_event(&down2);
+        assert!(events.is_empty()); // Now in Possible state
+        assert_eq!(recognizer.state(), RecognizerState::Possible);
+
+        // Rotate by moving pointers to create 90 degree rotation (PI/2 radians)
+        // New positions: (150, 50) and (150, 150) - vertical line
+        let move1 = PointerEventBuilder::new(0).node_id(1).move_to(150.0, 50.0);
+        let move2 = PointerEventBuilder::new(1).node_id(1).move_to(150.0, 150.0);
+        recognizer.handle_event(&move1);
+        let events = recognizer.handle_event(&move2);
+
+        // Should trigger rotation (either Start or Update)
+        let has_rotation_event = events.iter().any(|e| {
+            matches!(e.event_type, GestureEventType::RotationStart | GestureEventType::RotationUpdate)
+        });
+        assert!(has_rotation_event,
+            "Expected Rotation event. Events: {:?}, Current rotation: {}, state: {:?}",
+            events, recognizer.current_rotation, recognizer.state());
+        // State could be Began or Changed depending on timing
+        assert!(matches!(recognizer.state(), RecognizerState::Began | RecognizerState::Changed));
+    }
+
+    #[test]
+    fn test_rotation_end_on_pointer_up() {
+        let mut recognizer = RotationGestureRecognizer::new(1, 1);
+
+        // Setup: two pointers
+        recognizer.handle_event(&PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0));
+        recognizer.handle_event(&PointerEventBuilder::new(1).node_id(1).down(200.0, 100.0));
+
+        // Rotate to start
+        recognizer.handle_event(&PointerEventBuilder::new(0).node_id(1).move_to(150.0, 50.0));
+        recognizer.handle_event(&PointerEventBuilder::new(1).node_id(1).move_to(150.0, 150.0));
+
+        // Release one pointer
+        let up = PointerEventBuilder::new(0).node_id(1).up_at(150.0, 50.0);
+        let events = recognizer.handle_event(&up);
+
+        // Should trigger rotation end
+        assert!(events.iter().any(|e| matches!(e.event_type, GestureEventType::RotationEnd)));
+        assert!(recognizer.state().is_terminal());
+    }
+
+    #[test]
+    fn test_rotation_focal_point() {
+        let mut recognizer = RotationGestureRecognizer::new(1, 1);
+
+        // Setup: two pointers at (100, 100) and (200, 100)
+        recognizer.handle_event(&PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0));
+        recognizer.handle_event(&PointerEventBuilder::new(1).node_id(1).down(200.0, 100.0));
+
+        // Focal point should be at center
+        assert!((recognizer.current_focal.0 - 150.0).abs() < 0.1);
+        assert!((recognizer.current_focal.1 - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_rotation_below_slop_no_trigger() {
+        let mut recognizer = RotationGestureRecognizer::new(1, 1).with_slop(0.5); // 0.5 radians slop
+
+        // Setup: two pointers
+        recognizer.handle_event(&PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0));
+        recognizer.handle_event(&PointerEventBuilder::new(1).node_id(1).down(200.0, 100.0));
+
+        // Small rotation (within slop) - about 10 degrees
+        let move1 = PointerEventBuilder::new(0).node_id(1).move_to(95.0, 95.0);
+        let move2 = PointerEventBuilder::new(1).node_id(1).move_to(205.0, 95.0);
+        let events1 = recognizer.handle_event(&move1);
+        let events2 = recognizer.handle_event(&move2);
+
+        // Should not trigger yet
+        let all_events: Vec<_> = events1.into_iter().chain(events2).collect();
+        assert!(!all_events.iter().any(|e| matches!(e.event_type, GestureEventType::RotationStart)));
+        assert_eq!(recognizer.state(), RecognizerState::Possible);
+    }
+
+    #[test]
+    fn test_rotation_angle_calculation() {
+        let mut recognizer = RotationGestureRecognizer::new(1, 1);
+
+        // Two pointers: (100, 100) and (200, 100) - pointing right
+        recognizer.handle_event(&PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0));
+        recognizer.handle_event(&PointerEventBuilder::new(1).node_id(1).down(200.0, 100.0));
+
+        // Verify initial angle (should be 0 or PI depending on pointer order)
+        let angle1 = recognizer.calculate_angle();
+
+        // Rotate 90 degrees clockwise: (150, 50) and (150, 150) - pointing down
+        recognizer.handle_event(&PointerEventBuilder::new(0).node_id(1).move_to(150.0, 50.0));
+        recognizer.handle_event(&PointerEventBuilder::new(1).node_id(1).move_to(150.0, 150.0));
+
+        let angle2 = recognizer.calculate_angle();
+
+        // Angle should have changed by approximately PI/2 (90 degrees)
+        let diff = recognizer.normalize_angle_diff(angle2 - angle1);
+        assert!(diff.abs() > 1.5, "Expected significant rotation, got diff={}", diff); // PI/2 ≈ 1.57
     }
 }
