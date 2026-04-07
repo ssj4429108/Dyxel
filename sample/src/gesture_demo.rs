@@ -8,9 +8,9 @@ use dyxel_view::TapGesture;
 /// - LongPress with phase detection
 /// - Pan with phase detection (Began/Changed/Ended)
 /// - Scale (pinch-to-zoom) with phase detection
+/// - Rotation (two-finger rotate) with phase detection
+/// - Simultaneous gestures (Pan + Scale + Rotation)
 /// - Exclusive gesture composition (Tap vs DoubleTap)
-/// - Simultaneous gesture composition (Pan + Scale)
-/// - Sequenced gesture composition (LongPress then Pan)
 #[app]
 pub fn GestureV3Demo() -> impl BaseView {
     // State for tracking gesture events
@@ -26,6 +26,15 @@ pub fn GestureV3Demo() -> impl BaseView {
 
     // Scale tracking
     let current_scale = use_state(|| 1.0f32);
+
+    // Rotation tracking
+    let current_rotation = use_state(|| 0.0f32);
+    let rotation_delta = use_state(|| 0.0f32);
+
+    // Simultaneous gesture tracking
+    let sim_pan_count = use_state(|| 0u32);
+    let sim_scale_count = use_state(|| 0u32);
+    let sim_combined_active = use_state(|| false);
 
     // Event log
     let event_log = use_state(|| "Ready...".to_string());
@@ -364,6 +373,162 @@ pub fn GestureV3Demo() -> impl BaseView {
                 }
             }
 
+            // ===== Rotation (Two-Finger Rotate) =====
+            View {
+                width: "95%",
+                height: 120.0,
+                color: (45u32, 40, 55, 255),
+                borderRadius: 12.0,
+                margin: (0.0, 0.0, 10.0, 0.0),
+                flexDirection: FlexDirection::Column,
+                padding: (10.0, 10.0, 10.0, 10.0),
+
+                Text("Rotation (Two-Finger Rotate) with Phase") {
+                    fontSize: 14.0,
+                    textColor: (200u8, 200, 200, 255),
+                    margin: (0.0, 0.0, 10.0, 0.0),
+                }
+
+                View {
+                    width: "100%",
+                    flexDirection: FlexDirection::Row,
+                    justifyContent: JustifyContent::Center,
+                    alignItems: AlignItems::Center,
+
+                    // Rotation Area using on_rotation
+                    View {
+                        width: 150.0,
+                        height: 80.0,
+                        color: (80u32, 100, 160, 255),
+                        borderRadius: 8.0,
+                        justifyContent: JustifyContent::Center,
+                        alignItems: AlignItems::Center,
+                        on_rotation: {
+                            let rotation = current_rotation.clone();
+                            let rot_delta = rotation_delta.clone();
+                            let log = event_log.clone();
+                            move |event| {
+                                use dyxel_view::gesture::GesturePhase;
+                                match event.phase {
+                                    GesturePhase::Began => {
+                                        log.set(format!("Rotation: Began at {:.1} deg", event.rotation.to_degrees()));
+                                    }
+                                    GesturePhase::Changed => {
+                                        rotation.set(event.rotation);
+                                        rot_delta.set(event.delta_rotation);
+                                        log.set(format!("Rotation: {:.1} deg (delta: {:.1})",
+                                            event.rotation.to_degrees(),
+                                            event.delta_rotation.to_degrees()));
+                                    }
+                                    GesturePhase::Ended => {
+                                        log.set(format!("Rotation: Ended at {:.1} deg", event.rotation.to_degrees()));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        },
+
+                        Text("Rotate Here") {
+                            fontSize: 12.0,
+                            textColor: (255u8, 255, 255, 255),
+                        }
+                        Text("Angle: {current_rotation} rad") {
+                            fontSize: 14.0,
+                            fontWeight: 700,
+                            textColor: (255u8, 255, 255, 255),
+                        }
+                    }
+                }
+            }
+
+            // ===== Simultaneous Gestures (Pan + Scale) =====
+            View {
+                width: "95%",
+                height: 140.0,
+                color: (35u32, 50, 45, 255),
+                borderRadius: 12.0,
+                margin: (0.0, 0.0, 10.0, 0.0),
+                flexDirection: FlexDirection::Column,
+                padding: (10.0, 10.0, 10.0, 10.0),
+
+                Text("Simultaneous Gestures (Pan + Scale)") {
+                    fontSize: 14.0,
+                    textColor: (200u8, 255, 200, 255),
+                    margin: (0.0, 0.0, 5.0, 0.0),
+                }
+
+                Text("Use two fingers to pan AND scale at the same time") {
+                    fontSize: 10.0,
+                    textColor: (150u8, 200, 150, 255),
+                    margin: (0.0, 0.0, 10.0, 0.0),
+                }
+
+                View {
+                    width: "100%",
+                    flexGrow: 1.0,
+                    color: (50u32, 80, 60, 255),
+                    borderRadius: 8.0,
+                    justifyContent: JustifyContent::Center,
+                    alignItems: AlignItems::Center,
+                    on_pan: {
+                        let count = sim_pan_count.clone();
+                        let active = sim_combined_active.clone();
+                        let log = event_log.clone();
+                        move |event| {
+                            use dyxel_view::gesture::GesturePhase;
+                            match event.phase {
+                                GesturePhase::Began => {
+                                    active.set(true);
+                                    log.set("Simultaneous: Pan began".to_string());
+                                }
+                                GesturePhase::Changed => {
+                                    count.set(count.get() + 1);
+                                }
+                                GesturePhase::Ended => {
+                                    active.set(false);
+                                    log.set(format!("Simultaneous: Pan ended ({} updates)", count.get()));
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                    on_scale: {
+                        let count = sim_scale_count.clone();
+                        let active = sim_combined_active.clone();
+                        let log = event_log.clone();
+                        move |event| {
+                            use dyxel_view::gesture::GesturePhase;
+                            match event.phase {
+                                GesturePhase::Began => {
+                                    active.set(true);
+                                    log.set("Simultaneous: Scale began".to_string());
+                                }
+                                GesturePhase::Changed => {
+                                    count.set(count.get() + 1);
+                                    if count.get() % 5 == 0 {
+                                        log.set(format!("Simultaneous: Scale {:.2}x", event.scale));
+                                    }
+                                }
+                                GesturePhase::Ended => {
+                                    active.set(false);
+                                    log.set(format!("Simultaneous: Scale ended ({} updates)", count.get()));
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+
+                    Text(if sim_combined_active.get() { "Active!" } else { "Pan + Scale" }) {
+                        fontSize: 14.0,
+                        textColor: if sim_combined_active.get() {
+                            (100u8, 255, 100, 255)
+                        } else {
+                            (200u8, 255, 200, 255)
+                        },
+                    }
+                }
+            }
+
             // ===== Exclusive Gesture Competition =====
             View {
                 width: "95%",
@@ -440,9 +605,46 @@ pub fn GestureV3Demo() -> impl BaseView {
                 }
             }
 
-            // ===== Gesture Composition Examples =====
-            // TapGesture with custom count via DSL gesture attribute:
-            // gesture: TapGesture::new().count(3).on_gesture_ended(callback).into()
+            // ===== All Gestures Overview =====
+            View {
+                width: "95%",
+                height: 60.0,
+                color: (30u32, 30, 40, 255),
+                borderRadius: 8.0,
+                margin: (0.0, 0.0, 10.0, 0.0),
+                flexDirection: FlexDirection::Row,
+                justifyContent: JustifyContent::SpaceAround,
+                alignItems: AlignItems::Center,
+
+                Text("Tap: {tap_count}") {
+                    fontSize: 11.0,
+                    textColor: (150u8, 255, 150, 255),
+                }
+                Text("Dbl: {double_tap_count}") {
+                    fontSize: 11.0,
+                    textColor: (150u8, 150, 255, 255),
+                }
+                Text("Tri: {triple_tap_count}") {
+                    fontSize: 11.0,
+                    textColor: (255u8, 200, 100, 255),
+                }
+                Text("Long: {long_press_count}") {
+                    fontSize: 11.0,
+                    textColor: (255u8, 150, 150, 255),
+                }
+                Text("Pan: {pan_count}") {
+                    fontSize: 11.0,
+                    textColor: (100u8, 200, 255, 255),
+                }
+                Text("Scale: {current_scale}x") {
+                    fontSize: 11.0,
+                    textColor: (200u8, 150, 255, 255),
+                }
+                Text("Rot: {current_rotation}rad") {
+                    fontSize: 11.0,
+                    textColor: (150u8, 200, 255, 255),
+                }
+            }
 
             // ===== Event Log =====
             View {
