@@ -451,6 +451,12 @@ impl VelloBackend {
 
     /// Initialize blur composite pipeline for drawing blurred textures
     fn init_blur_composite_pipeline(&self, device: &wgpu::Device) {
+        // Default to Rgba8Unorm, will be recreated with correct format if needed
+        self.create_blur_composite_pipeline(device, wgpu::TextureFormat::Rgba8Unorm);
+    }
+
+    /// Create blur composite pipeline with specific format
+    fn create_blur_composite_pipeline(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         // Create bind group layout with uniform buffer for transform
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Blur Composite Bind Group Layout"),
@@ -517,7 +523,7 @@ impl VelloBackend {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -923,6 +929,16 @@ impl VelloBackend {
                     let blurred_textures = self.blurred_textures.lock().unwrap();
                     if !blurred_textures.is_empty() {
                         log::debug!("[Blur] Drawing {} blurred textures", blurred_textures.len());
+
+                        // Check if we need to recreate the pipeline with correct format
+                        let surface_format = v_surface_surface.config.format;
+                        {
+                            let pipeline_opt = self.blur_composite_pipeline.lock().unwrap();
+                            if pipeline_opt.is_none() {
+                                drop(pipeline_opt);
+                                self.create_blur_composite_pipeline(device, surface_format);
+                            }
+                        }
 
                         // Get the blur composite pipeline
                         let blur_pipeline = self.blur_composite_pipeline.lock().unwrap();
