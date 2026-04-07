@@ -22,6 +22,12 @@ pub enum NativeInputType {
     TouchUp,
     TouchCancel,
     MouseWheel { delta_x: f32, delta_y: f32 },
+    /// Pinch gesture (trackpad/magic mouse) - scale factor
+    /// scale > 1.0 = zoom in, scale < 1.0 = zoom out
+    PinchGesture { scale: f32 },
+    /// Rotation gesture (trackpad) - angle in radians
+    /// Positive = clockwise, negative = counterclockwise
+    RotationGesture { angle: f32 },
 }
 
 /// Multi-touch state tracking
@@ -35,6 +41,27 @@ struct PointerState {
     last_y: f32,
     target_node_id: u32,
     is_panning: bool,
+}
+
+/// Gesture state for pinch/rotation simulation
+/// We simulate two-finger touch events from gesture data
+#[derive(Debug, Clone)]
+struct GestureState {
+    /// Center position of the gesture
+    center_x: f32,
+    center_y: f32,
+    /// Current scale factor (1.0 = original)
+    scale: f32,
+    /// Current rotation angle in radians
+    rotation: f32,
+    /// Target node ID under the gesture center
+    target_node_id: u32,
+    /// Simulated finger 1 position
+    finger1_x: f32,
+    finger1_y: f32,
+    /// Simulated finger 2 position
+    finger2_x: f32,
+    finger2_y: f32,
 }
 
 /// Input proxy configuration
@@ -76,6 +103,8 @@ pub struct InputProxy {
     pointer_states: HashMap<u32, PointerState>,
     /// Current timestamp (microseconds)
     current_time: u64,
+    /// Gesture state for pinch/rotation simulation
+    gesture_state: Option<GestureState>,
 }
 
 impl InputProxy {
@@ -86,6 +115,7 @@ impl InputProxy {
             screen_to_world: Affine::IDENTITY,
             pointer_states: HashMap::new(),
             current_time: 0,
+            gesture_state: None,
         }
     }
 
@@ -155,6 +185,22 @@ impl InputProxy {
                     world_pos,
                     delta_x,
                     delta_y,
+                    shared_buffer,
+                    state,
+                );
+            }
+            NativeInputType::PinchGesture { scale } => {
+                self.handle_pinch_gesture(
+                    world_pos,
+                    scale,
+                    shared_buffer,
+                    state,
+                );
+            }
+            NativeInputType::RotationGesture { angle } => {
+                self.handle_rotation_gesture(
+                    world_pos,
+                    angle,
                     shared_buffer,
                     state,
                 );
@@ -446,6 +492,335 @@ impl InputProxy {
     /// 获取活跃指针数量
     pub fn active_pointer_count(&self) -> usize {
         self.pointer_states.len()
+    }
+
+    /// Handle pinch gesture by simulating two-finger touch
+    fn handle_pinch_gesture(
+        &mut self,
+        world_pos: Point,
+        scale: f32,
+        shared_buffer: &mut SharedBuffer,
+        state: &SharedState,
+    ) {
+        let target_node_id = self.hit_test_with_expansion(world_pos, state).unwrap_or(0);
+
+        if scale == 1.0 {
+            // Gesture ended or began with no change - end the simulated touch
+            if let Some(gesture) = self.gesture_state.take() {
+                // Release both simulated fingers
+                let event1 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1000,
+                    event_type: InputEventType::PointerUp as u8,
+                    _padding: [0; 3],
+                    x: gesture.finger1_x,
+                    y: gesture.finger1_y,
+                    pressure: 0.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    target_node_id: gesture.target_node_id,
+                    flags: 0,
+                };
+                let event2 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1001,
+                    event_type: InputEventType::PointerUp as u8,
+                    _padding: [0; 3],
+                    x: gesture.finger2_x,
+                    y: gesture.finger2_y,
+                    pressure: 0.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    target_node_id: gesture.target_node_id,
+                    flags: 0,
+                };
+                self.push_event(shared_buffer, event1);
+                self.push_event(shared_buffer, event2);
+                log::debug!("Pinch gesture ended: releasing simulated fingers");
+            }
+            return;
+        }
+
+        // Calculate finger positions based on scale
+        // We simulate two fingers at fixed distance from center, scaled by the pinch factor
+        let base_distance = 50.0; // Base distance between fingers in pixels
+        let current_distance = base_distance * scale;
+
+        match &mut self.gesture_state {
+            None => {
+                // Start new gesture - simulate two fingers down
+                let finger1_x = world_pos.x as f32 - current_distance / 2.0;
+                let finger1_y = world_pos.y as f32;
+                let finger2_x = world_pos.x as f32 + current_distance / 2.0;
+                let finger2_y = world_pos.y as f32;
+
+                // Send pointer down for both fingers
+                let event1 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1000,
+                    event_type: InputEventType::PointerDown as u8,
+                    _padding: [0; 3],
+                    x: finger1_x,
+                    y: finger1_y,
+                    pressure: 1.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    target_node_id,
+                    flags: 0,
+                };
+                let event2 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1001,
+                    event_type: InputEventType::PointerDown as u8,
+                    _padding: [0; 3],
+                    x: finger2_x,
+                    y: finger2_y,
+                    pressure: 1.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    target_node_id,
+                    flags: 0,
+                };
+                self.push_event(shared_buffer, event1);
+                self.push_event(shared_buffer, event2);
+
+                self.gesture_state = Some(GestureState {
+                    center_x: world_pos.x as f32,
+                    center_y: world_pos.y as f32,
+                    scale,
+                    rotation: 0.0,
+                    target_node_id,
+                    finger1_x,
+                    finger1_y,
+                    finger2_x,
+                    finger2_y,
+                });
+                log::debug!("Pinch gesture began: scale={:.2}", scale);
+            }
+            Some(gesture) => {
+                // Update existing gesture - move fingers based on new scale
+                let old_finger1_x = gesture.finger1_x;
+                let old_finger1_y = gesture.finger1_y;
+                let old_finger2_x = gesture.finger2_x;
+                let old_finger2_y = gesture.finger2_y;
+                let target_id = gesture.target_node_id;
+
+                let new_finger1_x = world_pos.x as f32 - current_distance / 2.0;
+                let new_finger1_y = world_pos.y as f32;
+                let new_finger2_x = world_pos.x as f32 + current_distance / 2.0;
+                let new_finger2_y = world_pos.y as f32;
+
+                // Store new values for later update
+                let center_x = world_pos.x as f32;
+                let center_y = world_pos.y as f32;
+
+                // Send pointer move for both fingers (this borrows self, so do it while we have the data)
+                let event1 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1000,
+                    event_type: InputEventType::PointerMove as u8,
+                    _padding: [0; 3],
+                    x: new_finger1_x,
+                    y: new_finger1_y,
+                    pressure: 1.0,
+                    delta_x: new_finger1_x - old_finger1_x,
+                    delta_y: new_finger1_y - old_finger1_y,
+                    target_node_id: target_id,
+                    flags: 1, // Mark as panning
+                };
+                let event2 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1001,
+                    event_type: InputEventType::PointerMove as u8,
+                    _padding: [0; 3],
+                    x: new_finger2_x,
+                    y: new_finger2_y,
+                    pressure: 1.0,
+                    delta_x: new_finger2_x - old_finger2_x,
+                    delta_y: new_finger2_y - old_finger2_y,
+                    target_node_id: target_id,
+                    flags: 1,
+                };
+                self.push_event(shared_buffer, event1);
+                self.push_event(shared_buffer, event2);
+
+                // Re-borrow to update state
+                if let Some(ref mut g) = self.gesture_state {
+                    g.scale = scale;
+                    g.finger1_x = new_finger1_x;
+                    g.finger1_y = new_finger1_y;
+                    g.finger2_x = new_finger2_x;
+                    g.finger2_y = new_finger2_y;
+                    g.center_x = center_x;
+                    g.center_y = center_y;
+                }
+
+                log::debug!("Pinch gesture changed: scale={:.2}", scale);
+            }
+        }
+    }
+
+    /// Handle rotation gesture by simulating two-finger touch with rotation
+    fn handle_rotation_gesture(
+        &mut self,
+        world_pos: Point,
+        angle: f32,
+        shared_buffer: &mut SharedBuffer,
+        state: &SharedState,
+    ) {
+        let target_node_id = self.hit_test_with_expansion(world_pos, state).unwrap_or(0);
+
+        if angle == 0.0 {
+            // Gesture ended - release simulated fingers
+            if let Some(gesture) = self.gesture_state.take() {
+                let event1 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1000,
+                    event_type: InputEventType::PointerUp as u8,
+                    _padding: [0; 3],
+                    x: gesture.finger1_x,
+                    y: gesture.finger1_y,
+                    pressure: 0.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    target_node_id: gesture.target_node_id,
+                    flags: 0,
+                };
+                let event2 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1001,
+                    event_type: InputEventType::PointerUp as u8,
+                    _padding: [0; 3],
+                    x: gesture.finger2_x,
+                    y: gesture.finger2_y,
+                    pressure: 0.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    target_node_id: gesture.target_node_id,
+                    flags: 0,
+                };
+                self.push_event(shared_buffer, event1);
+                self.push_event(shared_buffer, event2);
+                log::debug!("Rotation gesture ended: releasing simulated fingers");
+            }
+            return;
+        }
+
+        // Calculate finger positions based on rotation angle
+        let base_distance = 50.0; // Base distance between fingers
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+
+        match &mut self.gesture_state {
+            None => {
+                // Start new gesture
+                let finger1_x = world_pos.x as f32 - base_distance * cos_a;
+                let finger1_y = world_pos.y as f32 - base_distance * sin_a;
+                let finger2_x = world_pos.x as f32 + base_distance * cos_a;
+                let finger2_y = world_pos.y as f32 + base_distance * sin_a;
+
+                let event1 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1000,
+                    event_type: InputEventType::PointerDown as u8,
+                    _padding: [0; 3],
+                    x: finger1_x,
+                    y: finger1_y,
+                    pressure: 1.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    target_node_id,
+                    flags: 0,
+                };
+                let event2 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1001,
+                    event_type: InputEventType::PointerDown as u8,
+                    _padding: [0; 3],
+                    x: finger2_x,
+                    y: finger2_y,
+                    pressure: 1.0,
+                    delta_x: 0.0,
+                    delta_y: 0.0,
+                    target_node_id,
+                    flags: 0,
+                };
+                self.push_event(shared_buffer, event1);
+                self.push_event(shared_buffer, event2);
+
+                self.gesture_state = Some(GestureState {
+                    center_x: world_pos.x as f32,
+                    center_y: world_pos.y as f32,
+                    scale: 1.0,
+                    rotation: angle,
+                    target_node_id,
+                    finger1_x,
+                    finger1_y,
+                    finger2_x,
+                    finger2_y,
+                });
+                log::debug!("Rotation gesture began: angle={:.2}rad", angle);
+            }
+            Some(gesture) => {
+                // Update existing gesture
+                let old_finger1_x = gesture.finger1_x;
+                let old_finger1_y = gesture.finger1_y;
+                let old_finger2_x = gesture.finger2_x;
+                let old_finger2_y = gesture.finger2_y;
+                let target_id = gesture.target_node_id;
+
+                let new_finger1_x = world_pos.x as f32 - base_distance * cos_a;
+                let new_finger1_y = world_pos.y as f32 - base_distance * sin_a;
+                let new_finger2_x = world_pos.x as f32 + base_distance * cos_a;
+                let new_finger2_y = world_pos.y as f32 + base_distance * sin_a;
+
+                // Store values for later update
+                let center_x = world_pos.x as f32;
+                let center_y = world_pos.y as f32;
+
+                let event1 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1000,
+                    event_type: InputEventType::PointerMove as u8,
+                    _padding: [0; 3],
+                    x: new_finger1_x,
+                    y: new_finger1_y,
+                    pressure: 1.0,
+                    delta_x: new_finger1_x - old_finger1_x,
+                    delta_y: new_finger1_y - old_finger1_y,
+                    target_node_id: target_id,
+                    flags: 1,
+                };
+                let event2 = RawInputEvent {
+                    timestamp: self.current_time,
+                    pointer_id: 1001,
+                    event_type: InputEventType::PointerMove as u8,
+                    _padding: [0; 3],
+                    x: new_finger2_x,
+                    y: new_finger2_y,
+                    pressure: 1.0,
+                    delta_x: new_finger2_x - old_finger2_x,
+                    delta_y: new_finger2_y - old_finger2_y,
+                    target_node_id: target_id,
+                    flags: 1,
+                };
+                self.push_event(shared_buffer, event1);
+                self.push_event(shared_buffer, event2);
+
+                // Re-borrow to update state
+                if let Some(ref mut g) = self.gesture_state {
+                    g.rotation = angle;
+                    g.finger1_x = new_finger1_x;
+                    g.finger1_y = new_finger1_y;
+                    g.finger2_x = new_finger2_x;
+                    g.finger2_y = new_finger2_y;
+                    g.center_x = center_x;
+                    g.center_y = center_y;
+                }
+
+                log::debug!("Rotation gesture changed: angle={:.2}rad", angle);
+            }
+        }
     }
 }
 

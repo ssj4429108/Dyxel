@@ -25,7 +25,7 @@ pub fn GestureV3Demo() -> impl BaseView {
     let pan_y = use_state(|| 0.0f32);
 
     // Scale tracking
-    let current_scale = use_state(|| 1.0f32);
+    let current_scale: State<f32> = use_state(|| 1.0f32);
 
     // Rotation tracking
     let current_rotation = use_state(|| 0.0f32);
@@ -58,7 +58,23 @@ pub fn GestureV3Demo() -> impl BaseView {
             Text("Unified gesture API with phase detection") {
                 fontSize: 12.0,
                 textColor: (150u8, 150, 150, 255),
+                margin: (0.0, 0.0, 5.0, 0.0),
+            }
+
+            // macOS Trackpad Gesture Help
+            View {
+                width: "95%",
+                height: 50.0,
+                color: (40u32, 40, 50, 255),
+                borderRadius: 8.0,
                 margin: (0.0, 0.0, 10.0, 0.0),
+                justifyContent: JustifyContent::Center,
+                alignItems: AlignItems::Center,
+
+                Text("macOS: Press 'S'+drag to simulate Scale, 'R'+drag for Rotation, 'X' to exit") {
+                    fontSize: 11.0,
+                    textColor: (180u8, 180, 200, 255),
+                }
             }
 
             // ===== Configurable Tap Counts =====
@@ -364,7 +380,179 @@ pub fn GestureV3Demo() -> impl BaseView {
                             fontSize: 12.0,
                             textColor: (255u8, 255, 255, 255),
                         }
-                        Text("Scale: {current_scale}x") {
+                        Text("Scale: {current_scale:.1}x") {
+                            fontSize: 14.0,
+                            fontWeight: 700,
+                            textColor: (255u8, 255, 255, 255),
+                        }
+                    }
+                }
+            }
+
+            // ===== Visual Transform Demo (Scale + Rotation) =====
+            View {
+                width: "95%",
+                height: 160.0,
+                color: (40u32, 45, 55, 255),
+                borderRadius: 12.0,
+                margin: (0.0, 0.0, 10.0, 0.0),
+                flexDirection: FlexDirection::Column,
+                padding: (10.0, 10.0, 10.0, 10.0),
+
+                Text("Visual Transform Demo (Scale + Rotation Applied)") {
+                    fontSize: 14.0,
+                    textColor: (200u8, 200, 200, 255),
+                    margin: (0.0, 0.0, 10.0, 0.0),
+                }
+
+                View {
+                    width: "100%",
+                    flexGrow: 1.0,
+                    flexDirection: FlexDirection::Row,
+                    justifyContent: JustifyContent::SpaceAround,
+                    alignItems: AlignItems::Center,
+
+                    // Transform target - shows current scale and rotation values
+                    View {
+                        width: 100.0,
+                        height: 100.0,
+                        color: (100u32, 60, 180, 255),
+                        borderRadius: 8.0,
+                        justifyContent: JustifyContent::Center,
+                        alignItems: AlignItems::Center,
+                        onScale: {
+                            let scale = current_scale.clone();
+                            let log = event_log.clone();
+                            move |event| {
+                                use dyxel_view::gesture::GesturePhase;
+                                match event.phase {
+                                    GesturePhase::Began => {
+                                        log.set(format!("Visual: Scale began at {:.2}x", event.scale));
+                                    }
+                                    GesturePhase::Changed => {
+                                        scale.set(event.scale);
+                                    }
+                                    GesturePhase::Ended => {
+                                        log.set(format!("Visual: Scale ended at {:.2}x", event.scale));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        },
+                        onRotation: {
+                            let rotation = current_rotation.clone();
+                            let log = event_log.clone();
+                            move |event| {
+                                use dyxel_view::gesture::GesturePhase;
+                                match event.phase {
+                                    GesturePhase::Began => {
+                                        log.set(format!("Visual: Rotation began at {:.1} deg", event.rotation.to_degrees()));
+                                    }
+                                    GesturePhase::Changed => {
+                                        rotation.set(event.rotation);
+                                    }
+                                    GesturePhase::Ended => {
+                                        log.set(format!("Visual: Rotation ended at {:.1} deg", event.rotation.to_degrees()));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        },
+
+                        Text("Transform") {
+                            fontSize: 12.0,
+                            textColor: (255u8, 255, 255, 255),
+                        }
+                        Text("{current_scale:.1}x") {
+                            fontSize: 10.0,
+                            textColor: (200u8, 200, 255, 255),
+                        }
+                    }
+
+                    // Instructions
+                    View {
+                        width: 150.0,
+                        height: 100.0,
+                        color: (30u32, 35, 45, 255),
+                        borderRadius: 6.0,
+                        justifyContent: JustifyContent::Center,
+                        alignItems: AlignItems::Center,
+                        padding: (8.0, 8.0, 8.0, 8.0),
+
+                        Text("Pinch = Scale") {
+                            fontSize: 10.0,
+                            textColor: (180u8, 180, 200, 255),
+                        }
+                        Text("Rotate = Angle") {
+                            fontSize: 10.0,
+                            textColor: (180u8, 180, 200, 255),
+                            margin: (4.0, 0.0, 0.0, 0.0),
+                        }
+                        Text("On macOS: S/R + drag") {
+                            fontSize: 9.0,
+                            textColor: (150u8, 150, 180, 255),
+                            margin: (8.0, 0.0, 0.0, 0.0),
+                        }
+                    }
+                }
+            }
+
+            // ===== Scale (Pinch-to-Zoom) =====
+            View {
+                width: "95%",
+                height: 120.0,
+                color: (40u32, 45, 55, 255),
+                borderRadius: 12.0,
+                margin: (0.0, 0.0, 10.0, 0.0),
+                flexDirection: FlexDirection::Column,
+                padding: (10.0, 10.0, 10.0, 10.0),
+
+                Text("Scale (Pinch-to-Zoom) with Phase") {
+                    fontSize: 14.0,
+                    textColor: (200u8, 200, 200, 255),
+                    margin: (0.0, 0.0, 10.0, 0.0),
+                }
+
+                View {
+                    width: "100%",
+                    flexDirection: FlexDirection::Row,
+                    justifyContent: JustifyContent::Center,
+                    alignItems: AlignItems::Center,
+
+                    // Scale Area using onScale
+                    View {
+                        width: 150.0,
+                        height: 80.0,
+                        color: (100u32, 60, 180, 255),
+                        borderRadius: 8.0,
+                        justifyContent: JustifyContent::Center,
+                        alignItems: AlignItems::Center,
+                        onScale: {
+                            let scale = current_scale.clone();
+                            let log = event_log.clone();
+                            move |event| {
+                                use dyxel_view::gesture::GesturePhase;
+                                match event.phase {
+                                    GesturePhase::Began => {
+                                        log.set(format!("Scale: Began at {:.2}x", event.scale));
+                                    }
+                                    GesturePhase::Changed => {
+                                        scale.set(event.scale);
+                                        log.set(format!("Scale: Changed to {:.2}x", event.scale));
+                                    }
+                                    GesturePhase::Ended => {
+                                        log.set(format!("Scale: Ended at {:.2}x", event.scale));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        },
+
+                        Text("Pinch Here") {
+                            fontSize: 12.0,
+                            textColor: (255u8, 255, 255, 255),
+                        }
+                        Text("Scale: {current_scale:.1}x") {
                             fontSize: 14.0,
                             fontWeight: 700,
                             textColor: (255u8, 255, 255, 255),
@@ -395,7 +583,7 @@ pub fn GestureV3Demo() -> impl BaseView {
                     justifyContent: JustifyContent::Center,
                     alignItems: AlignItems::Center,
 
-                    // Rotation Area using on_rotation
+                    // Rotation Area using onRotation
                     View {
                         width: 150.0,
                         height: 80.0,
@@ -403,7 +591,7 @@ pub fn GestureV3Demo() -> impl BaseView {
                         borderRadius: 8.0,
                         justifyContent: JustifyContent::Center,
                         alignItems: AlignItems::Center,
-                        on_rotation: {
+                        onRotation: {
                             let rotation = current_rotation.clone();
                             let rot_delta = rotation_delta.clone();
                             let log = event_log.clone();
@@ -432,7 +620,7 @@ pub fn GestureV3Demo() -> impl BaseView {
                             fontSize: 12.0,
                             textColor: (255u8, 255, 255, 255),
                         }
-                        Text("Angle: {current_rotation} rad") {
+                        Text("Angle: {current_rotation:.1} rad") {
                             fontSize: 14.0,
                             fontWeight: 700,
                             textColor: (255u8, 255, 255, 255),
@@ -640,7 +828,7 @@ pub fn GestureV3Demo() -> impl BaseView {
                     fontSize: 11.0,
                     textColor: (200u8, 150, 255, 255),
                 }
-                Text("Rot: {current_rotation}rad") {
+                Text("Rot: {current_rotation:.1}rad") {
                     fontSize: 11.0,
                     textColor: (150u8, 200, 255, 255),
                 }

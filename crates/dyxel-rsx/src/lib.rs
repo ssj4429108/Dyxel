@@ -373,9 +373,9 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
     let dynamic_assignments: Vec<_> = dynamic_bindings.iter().map(|(name, value_tokens, name_span)| {
         let lit = tokens_to_stream(value_tokens);
         let lit_str = lit.to_string();
-        
+
         let (format_str, vars) = parse_interpolation(&lit_str);
-        
+
         if vars.is_empty() {
             // No interpolation, treat as static
             let method_name = camel_to_snake(name);
@@ -384,17 +384,26 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
                 .#method_ident(#lit)
             };
         }
-        
+
         // Generate dynamic binding
         let format_lit = Literal::string(&format_str);
-        let var_idents: Vec<_> = vars.iter()
-            .map(|v| proc_macro2::Ident::new(v, Span::call_site()))
-            .collect();
-        
-        // Generate binding code with to_string() conversion
+
+        // Build format arguments with proper type handling based on format spec
+        let format_args: Vec<_> = vars.iter().map(|var| {
+            let var_ident = proc_macro2::Ident::new(&var.name, Span::call_site());
+            if var.format_spec.is_empty() {
+                // No format spec - use to_string() for backward compatibility
+                quote! { #var_ident.get().to_string() }
+            } else {
+                // Has format spec - pass value directly to format!
+                // The format spec (e.g., .1, .2$) is already in the format string
+                quote! { #var_ident.get() }
+            }
+        }).collect();
+
         quote_spanned! { *name_span =>
             .value({
-                let __initial = format!(#format_lit, #(#var_idents.get().to_string()),*);
+                let __initial = format!(#format_lit, #(#format_args),*);
                 __initial
             })
         }
@@ -405,25 +414,24 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
         if name != "value" {
             return None; // Only support text value for now
         }
-        
+
         let lit = tokens_to_stream(value_tokens);
         let lit_str = lit.to_string();
-        let (_, vars) = parse_interpolation(&lit_str);
-        
+        let (_format_str, vars) = parse_interpolation(&lit_str);
+
         if vars.is_empty() {
             return None;
         }
-        
-        let var_idents: Vec<_> = vars.iter()
-            .map(|v| proc_macro2::Ident::new(v, Span::call_site()))
-            .collect();
-        
-        // Generate bind_text calls with to_string conversion
-        let binds = var_idents.iter().map(|var| {
+
+        // Generate bind_text calls - format spec only affects initial value
+        // Updates use to_string for simplicity
+        let binds: Vec<_> = vars.iter().map(|var| {
+            let var_ident = proc_macro2::Ident::new(&var.name, Span::call_site());
             quote! {
-                #var.bind_text(#node_var.node_id(), |v| v.to_string());
+                #var_ident.bind_text(#node_var.node_id(), |v| v.to_string());
             }
-        });
+        }).collect();
+
         Some(quote! { #(#binds)* })
     }).collect();
     
@@ -448,19 +456,27 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
     }
 }
 
+/// Parsed variable with optional format spec
+#[derive(Debug)]
+struct InterpVar {
+    name: String,
+    format_spec: String, // e.g., ".1", ":.2$", etc.
+}
+
 /// Parse "Count: {count}" -> ("Count: {}", ["count"])
-fn parse_interpolation(lit: &str) -> (String, Vec<String>) {
+/// Parse "Scale: {scale:.1}x" -> ("Scale: {:.1}x", [("scale", ".1")])
+fn parse_interpolation(lit: &str) -> (String, Vec<InterpVar>) {
     let mut format_str = String::new();
     let mut vars = Vec::new();
-    
+
     let content = if lit.starts_with('"') && lit.ends_with('"') {
         &lit[1..lit.len()-1]
     } else {
         lit
     };
-    
+
     let mut chars = content.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '{' {
             if chars.peek() == Some(&'{') {
@@ -468,20 +484,41 @@ fn parse_interpolation(lit: &str) -> (String, Vec<String>) {
                 format_str.push('{');
                 continue;
             }
-            
+
             let mut var_name = String::new();
+            let mut format_spec = String::new();
+            let mut in_format_spec = false;
+
             while let Some(&ch) = chars.peek() {
                 if ch == '}' {
                     chars.next();
                     break;
                 }
-                var_name.push(ch);
+                if ch == ':' && !in_format_spec {
+                    in_format_spec = true;
+                    chars.next();
+                    continue;
+                }
+                if in_format_spec {
+                    format_spec.push(ch);
+                } else {
+                    var_name.push(ch);
+                }
                 chars.next();
             }
-            
+
             if !var_name.is_empty() {
-                format_str.push_str("{}");
-                vars.push(var_name);
+                if format_spec.is_empty() {
+                    format_str.push_str("{}");
+                } else {
+                    format_str.push_str("{:");
+                    format_str.push_str(&format_spec);
+                    format_str.push('}');
+                }
+                vars.push(InterpVar {
+                    name: var_name,
+                    format_spec,
+                });
             }
         } else if c == '}' {
             if chars.peek() == Some(&'}') {
@@ -500,7 +537,7 @@ fn parse_interpolation(lit: &str) -> (String, Vec<String>) {
             format_str.push(c);
         }
     }
-    
+
     (format_str, vars)
 }
 

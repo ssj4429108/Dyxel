@@ -43,6 +43,7 @@ type AsyncShared<T> = std::sync::Arc<std::sync::Mutex<T>>;
 
 /// Entry for a blurred texture to be composited
 #[derive(Debug)]
+#[allow(dead_code)]
 struct BlurredTextureEntry {
     /// The blurred texture
     texture: wgpu::Texture,
@@ -961,7 +962,7 @@ fn render_with_blur(
     filter_pipeline: &crate::filter_pipeline::FilterPipeline,
     node_width: f64,
     node_height: f64,
-    needs_layer: bool,
+    _needs_layer: bool,
     blurred_textures: &mut Vec<BlurredTextureEntry>,
 ) -> bool {
     use vello::peniko::{Fill, Color};
@@ -1260,7 +1261,7 @@ fn render_node_recursive_with_transform(
         // === Step 3: Handle Blur Effect ===
         // If blur is enabled, render to offscreen texture and apply blur
         let has_blur = node.blur_radius > 0.0;
-        let blur_applied = if has_blur && filter_pipeline.is_some() {
+        let _blur_applied = if has_blur && filter_pipeline.is_some() {
             render_with_blur(
                 node,
                 id,

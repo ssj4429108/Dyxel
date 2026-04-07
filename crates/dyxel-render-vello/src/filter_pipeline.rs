@@ -51,14 +51,17 @@ pub struct FilterPipeline {
     blur_pipeline: wgpu::ComputePipeline,
     blur_bind_group_layout: wgpu::BindGroupLayout,
 
-    // Composite pipeline (for blending effects)
+    // Composite pipeline (for blending effects) - currently unused but reserved for future
+    #[allow(dead_code)]
     composite_pipeline: wgpu::RenderPipeline,
+    #[allow(dead_code)]
     composite_bind_group_layout: wgpu::BindGroupLayout,
 
     // Uniform buffer
     uniform_buffer: wgpu::Buffer,
 
-    // Sampler for texture sampling
+    // Sampler for texture sampling - currently unused but reserved for future
+    #[allow(dead_code)]
     sampler: wgpu::Sampler,
 }
 
@@ -459,7 +462,7 @@ impl FilterPipeline {
         _shadow: &wgpu::Texture,
         _dx: f32,
         _dy: f32,
-        color: [f32; 4],
+        _color: [f32; 4],
     ) -> Result<(), FilterError> {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Shadow Composite Encoder"),
