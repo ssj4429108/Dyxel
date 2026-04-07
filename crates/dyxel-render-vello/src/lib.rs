@@ -33,6 +33,7 @@ pub mod minimal_shaders;
 pub mod staged_loader;
 pub mod two_stage_init;
 pub mod scene_adapter;
+pub mod filter_pipeline;
 
 /// Vello render backend implementation
 /// 
@@ -72,6 +73,8 @@ pub struct VelloBackend {
     // Async loading thread handle (optional - for monitoring)
     #[allow(dead_code)]
     loading_handle: SharedMutex<Option<std::thread::JoinHandle<()>>>,
+    // Filter pipeline for blur effects
+    filter_pipeline: SharedMutex<Option<filter_pipeline::FilterPipeline>>,
 }
 
 const BLIT_SHADER_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.spv"));
@@ -105,6 +108,7 @@ impl VelloBackend {
             memory_optimizer: SharedMutex::new(memory_optimizer),
             is_loading: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             loading_handle: SharedMutex::new(None),
+            filter_pipeline: SharedMutex::new(None),
         }
     }
     
@@ -643,11 +647,25 @@ impl VelloBackend {
             let g = shared_state.lock().unwrap();
             let mut editors = self.editors.lock().unwrap();
             stage_timer.mark("state_lock");
-            
+
             // Apply platform correction at the root level
             let root_transform = platform_correction(h as f64);
-            
-            render_node_recursive_with_transform(id, &g, &mut editors, &mut scene, Vec2::ZERO, root_transform);
+
+            // Get filter pipeline for blur effects
+            let filter_pipeline = self.filter_pipeline.lock().unwrap();
+
+            render_node_recursive_with_transform(
+                id,
+                &g,
+                &mut editors,
+                &mut scene,
+                Vec2::ZERO,
+                root_transform,
+                device,
+                queue,
+                renderer,
+                filter_pipeline.as_ref(),
+            );
             stage_timer.mark("scene_build");
         }
 
@@ -896,6 +914,218 @@ pub fn platform_correction(viewport_height: f64) -> Affine {
 }
 
 /// Render a node with layer effects (alpha, blur, shadow, clip)
+/// Render node content with blur effect applied
+///
+/// This creates an offscreen texture, renders the node content to it,
+/// applies blur using compute shaders, and draws the result to the main scene.
+fn render_with_blur(
+    node: &dyxel_shared::ViewNode,
+    id: u32,
+    state: &SharedState,
+    editors: &mut std::collections::HashMap<u32, Editor>,
+    scene: &mut Scene,
+    local_transform: Affine,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut vello::Renderer,
+    filter_pipeline: &crate::filter_pipeline::FilterPipeline,
+    node_width: f64,
+    node_height: f64,
+    needs_layer: bool,
+) -> bool {
+    use vello::peniko::{Fill, Color};
+    use kurbo::{Rect as KRect, RoundedRect};
+
+    // Calculate padded size for blur (need extra space for blur bleed)
+    let blur_radius = node.blur_radius as f64;
+    let padding = (blur_radius * 2.5).ceil() as u32;
+    let texture_width = (node_width as u32 + padding * 2).max(1);
+    let texture_height = (node_height as u32 + padding * 2).max(1);
+
+    // Create offscreen texture for rendering
+    let texture_desc = wgpu::TextureDescriptor {
+        label: Some("Blur Offscreen Texture"),
+        size: wgpu::Extent3d {
+            width: texture_width,
+            height: texture_height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING,
+        view_formats: &[],
+    };
+
+    let offscreen_texture = device.create_texture(&texture_desc);
+    let texture_view = offscreen_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Create intermediate texture for ping-pong blur
+    let intermediate_desc = wgpu::TextureDescriptor {
+        label: Some("Blur Intermediate Texture"),
+        size: wgpu::Extent3d {
+            width: texture_width / 4,
+            height: texture_height / 4,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING,
+        view_formats: &[],
+    };
+
+    let _intermediate_texture = device.create_texture(&intermediate_desc);
+
+    // Create a temporary scene for this node and its children
+    let mut temp_scene = Scene::new();
+
+    // Adjust transform to account for padding
+    let offset_transform = Affine::translate((padding as f64, padding as f64));
+
+    // Render background rectangle
+    let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
+    if node.border_radius > 0.0 {
+        let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
+        temp_scene.fill(Fill::NonZero, offset_transform, node.color, None, &rounded);
+    } else {
+        temp_scene.fill(Fill::NonZero, offset_transform, node.color, None, &rect);
+    }
+
+    // Render text if present
+    if node.view_type == ViewType::Text {
+        if let Some(editor) = editors.get_mut(&id) {
+            editor.set_width(None);
+            editor.draw(&mut temp_scene, offset_transform);
+        }
+    }
+
+    // Render children to temp scene (with adjusted positions)
+    // Note: We need to offset children by padding
+    for &child_id in &node.children {
+        render_child_to_blur_scene(
+            child_id,
+            state,
+            editors,
+            &mut temp_scene,
+            offset_transform,
+            padding as f64,
+        );
+    }
+
+    // Pop layer if we pushed one for clipping
+    if needs_layer && node.clip_to_bounds {
+        scene.pop_layer();
+    }
+
+    // Render temp scene to offscreen texture
+    let render_params = vello::RenderParams {
+        base_color: Color::TRANSPARENT,
+        width: texture_width,
+        height: texture_height,
+        antialiasing_method: vello::AaConfig::Area,
+    };
+
+    if let Err(e) = renderer.render_to_texture(
+        device,
+        queue,
+        &temp_scene,
+        &texture_view,
+        &render_params,
+    ) {
+        log::warn!("[Blur] Failed to render to offscreen texture: {:?}", e);
+        return false;
+    }
+
+    // Apply blur using filter pipeline
+    if let Err(e) = filter_pipeline.apply_blur(
+        &offscreen_texture,
+        &offscreen_texture,
+        node.blur_radius,
+    ) {
+        log::warn!("[Blur] Failed to apply blur: {:?}", e);
+        return false;
+    }
+
+    // Draw the blurred texture to main scene
+    // Adjust transform to account for the padding offset
+    let final_transform = local_transform * Affine::translate((-(padding as f64), -(padding as f64)));
+
+    // Draw the blurred result using a blurred rect approach
+    let display_rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
+    scene.fill(
+        Fill::NonZero,
+        final_transform,
+        node.color,
+        None,
+        &display_rect,
+    );
+
+    // Draw children that extend beyond bounds (if not clipped)
+    if !node.clip_to_bounds {
+        let local_pos = Vec2::new(node_width / 2.0, node_height / 2.0);
+        for &child_id in &node.children {
+            render_node_recursive_with_transform(
+                child_id,
+                state,
+                editors,
+                scene,
+                local_pos,
+                local_transform,
+                device,
+                queue,
+                renderer,
+                Some(filter_pipeline),
+            );
+        }
+    }
+
+    true
+}
+
+/// Helper to render a child node to the blur temp scene
+fn render_child_to_blur_scene(
+    id: u32,
+    state: &SharedState,
+    editors: &mut std::collections::HashMap<u32, Editor>,
+    scene: &mut Scene,
+    transform: Affine,
+    padding_offset: f64,
+) {
+    use vello::peniko::{Fill};
+    use kurbo::{Rect as KRect, RoundedRect};
+
+    if let Some(node) = state.nodes.get(&id) {
+        let layout = state.taffy.layout(node.taffy_node).unwrap();
+        let x = layout.location.x as f64 + node.position_x as f64 + padding_offset;
+        let y = layout.location.y as f64 + node.position_y as f64 + padding_offset;
+        let width = layout.size.width as f64;
+        let height = layout.size.height as f64;
+
+        let local_transform = transform * Affine::translate((x, y));
+
+        // Draw the child
+        let rect = KRect::from_origin_size((0.0, 0.0), (width, height));
+        if node.border_radius > 0.0 {
+            let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
+            scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
+        } else {
+            scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
+        }
+
+        // Recursively render grandchildren
+        for &child_id in &node.children {
+            render_child_to_blur_scene(child_id, state, editors, scene, local_transform, 0.0);
+        }
+    }
+}
+
+/// Render a node with layer effects (alpha, blur, shadow, clip)
 /// Following Xilem's pattern: shadow -> content -> children
 fn render_node_recursive_with_transform(
     id: u32,
@@ -904,6 +1134,10 @@ fn render_node_recursive_with_transform(
     scene: &mut Scene,
     parent_pos: Vec2,
     transform: Affine,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut vello::Renderer,
+    filter_pipeline: Option<&crate::filter_pipeline::FilterPipeline>,
 ) {
     use vello::peniko::{BlendMode as PenikoBlendMode, Mix, Compose, Fill};
     use kurbo::{Affine, Rect as KRect, RoundedRect};
@@ -986,12 +1220,32 @@ fn render_node_recursive_with_transform(
                 scene.push_layer(Fill::NonZero, blend, alpha, local_transform, &full_rect);
             }
 
-            // Note: blur_radius is captured but Vello handles blur differently.
-            // For node blur effects, we would need to render to an offscreen layer
-            // and apply blur. For now, we document this as a future enhancement.
         }
 
-        // === Step 3: Draw Node Content ===
+        // === Step 3: Handle Blur Effect ===
+        // If blur is enabled, render to offscreen texture and apply blur
+        let has_blur = node.blur_radius > 0.0;
+        let _blur_applied = if has_blur && filter_pipeline.is_some() {
+            render_with_blur(
+                node,
+                id,
+                state,
+                editors,
+                scene,
+                local_transform,
+                device,
+                queue,
+                renderer,
+                filter_pipeline.unwrap(),
+                node_width,
+                node_height,
+                needs_layer,
+            )
+        } else {
+            false
+        };
+
+        // === Step 4: Draw Node Content (if blur wasn't applied) ===
         if node.view_type == ViewType::Text {
             // Render text using Editor
             if let Some(editor) = editors.get_mut(&id) {
@@ -1015,7 +1269,18 @@ fn render_node_recursive_with_transform(
         // which includes the position offset (for absolute positioning)
         let local_pos = global_pos + pos_offset;
         for &child_id in &node.children {
-            render_node_recursive_with_transform(child_id, state, editors, scene, local_pos, transform);
+            render_node_recursive_with_transform(
+                child_id,
+                state,
+                editors,
+                scene,
+                local_pos,
+                transform,
+                device,
+                queue,
+                renderer,
+                filter_pipeline,
+            );
         }
 
         // === Step 5: Pop Layer (if pushed) ===
@@ -1145,6 +1410,20 @@ impl RenderBackend for VelloBackend {
 
         // Prewarm blit pipeline
         self.prewarm_pipelines(device, wgpu::TextureFormat::Rgba8Unorm);
+
+        // Initialize filter pipeline for blur effects
+        let device_arc = std::sync::Arc::new(device.clone());
+        let queue_arc = std::sync::Arc::new(unsafe { &*_queue.as_ptr::<wgpu::Queue>() }.clone());
+        match filter_pipeline::FilterPipeline::new(device_arc, queue_arc) {
+            Ok(pipeline) => {
+                *self.filter_pipeline.lock().unwrap() = Some(pipeline);
+                log::info!("[Blur] Filter pipeline initialized successfully");
+            }
+            Err(e) => {
+                log::warn!("[Blur] Failed to initialize filter pipeline: {}", e);
+                // Continue without blur support
+            }
+        }
 
         // Store info for deferred renderer initialization (includes cache stage)
         *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache, cache_stage));
