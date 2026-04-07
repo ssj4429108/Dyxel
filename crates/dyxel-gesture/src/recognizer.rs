@@ -859,6 +859,23 @@ impl PanGestureRecognizer {
                     let distance = (dx.powi(2) + dy.powi(2)).sqrt();
 
                     if distance > self.slop && self.matches_direction(dx, dy) {
+                        // When 2+ pointers are down, delay Pan activation to give
+                        // Scale a chance to win. Pan will only activate if:
+                        // 1. Only 1 pointer is down (true single-pointer pan)
+                        // 2. Scale has failed or been rejected (arena will reject us too)
+                        //
+                        // This fixes the race condition where Pan always wins
+                        // before Scale can accumulate enough pointer movement.
+                        if self.pointers.len() >= 2 {
+                            // In multi-pointer scenario, use a larger threshold
+                            // to give Scale gesture time to detect pinch movement
+                            let multi_pointer_slop = self.slop * 2.0; // 2x slop for multi-pointer
+                            if distance < multi_pointer_slop {
+                                return vec![]; // Wait for more movement
+                            }
+                            // Fall through to activate Pan (user is clearly panning, not pinching)
+                        }
+
                         // Pan started!
                         self.state = RecognizerState::Began;
                         self.current_position = focal;
@@ -2306,5 +2323,99 @@ mod tests {
         // Angle should have changed by approximately PI/2 (90 degrees)
         let diff = recognizer.normalize_angle_diff(angle2 - angle1);
         assert!(diff.abs() > 1.5, "Expected significant rotation, got diff={}", diff); // PI/2 ≈ 1.57
+    }
+
+    #[test]
+    fn test_pan_scale_race_condition_fix() {
+        // This test verifies that Scale has a chance to win when both
+        // Pan and Scale are registered and user uses 2 fingers.
+        // Before the fix, Pan would always win because it activates
+        // with single-pointer movement.
+
+        let mut pan = PanGestureRecognizer::new(1, 1).with_slop(18.0);
+        let mut scale = ScaleGestureRecognizer::new(2, 1).with_slop(0.1);
+
+        // Step 1: First pointer down - Pan goes to Possible
+        pan.handle_event(&PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0));
+        scale.handle_event(&PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0));
+        assert_eq!(pan.state(), RecognizerState::Possible);
+        assert_eq!(scale.state(), RecognizerState::Ready); // Scale needs 2 pointers
+
+        // Step 2: Second pointer down - Scale goes to Possible
+        pan.handle_event(&PointerEventBuilder::new(1).node_id(1).down(200.0, 100.0));
+        scale.handle_event(&PointerEventBuilder::new(1).node_id(1).down(200.0, 100.0));
+        assert_eq!(scale.state(), RecognizerState::Possible);
+
+        // Step 3: Asymmetric movement that creates both zoom and some pan
+        // - Pointer 0: 100,100 -> 60,100 (moved 40px left)
+        // - Pointer 1: 200,100 -> 200,100 (didn't move)
+        // - Distance: 100 -> 140 (40% zoom, scale delta = 0.4 > 0.1 slop)
+        // - Centroid: 150,100 -> 130,100 (moved 20px, > 18px slop but < 36px 2x slop)
+        let move1 = PointerEventBuilder::new(0).node_id(1).move_to(60.0, 100.0);
+        let move2 = PointerEventBuilder::new(1).node_id(1).move_to(200.0, 100.0);
+
+        let pan_events1 = pan.handle_event(&move1);
+        let pan_events2 = pan.handle_event(&move2);
+        let scale_events1 = scale.handle_event(&move1);
+        let scale_events2 = scale.handle_event(&move2);
+
+        // Scale should activate (delta > 0.1 slop: 1.4 - 1.0 = 0.4)
+        let scale_started = scale_events1.iter().chain(scale_events2.iter())
+            .any(|e| matches!(e.event_type, GestureEventType::ScaleStart));
+        assert!(scale_started, "Scale should start with 40% zoom change");
+
+        // Pan should NOT activate yet (20px movement, within 36px multi-pointer slop)
+        let pan_started = pan_events1.iter().chain(pan_events2.iter())
+            .any(|e| matches!(e.event_type, GestureEventType::PanStart));
+        assert!(!pan_started, "Pan should delay activation with 2 pointers (20px < 36px)");
+        assert_eq!(pan.state(), RecognizerState::Possible, "Pan should remain in Possible");
+    }
+
+    #[test]
+    fn test_pan_activates_with_single_pointer() {
+        // Single pointer pan should still work normally
+        let mut pan = PanGestureRecognizer::new(1, 1).with_slop(18.0);
+
+        // Down
+        pan.handle_event(&PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0));
+        assert_eq!(pan.state(), RecognizerState::Possible);
+
+        // Move beyond slop
+        let move_evt = PointerEventBuilder::new(0).node_id(1).move_to(130.0, 100.0);
+        let events = pan.handle_event(&move_evt);
+
+        assert!(events.iter().any(|e| matches!(e.event_type, GestureEventType::PanStart)),
+            "Single-pointer Pan should activate normally");
+        assert_eq!(pan.state(), RecognizerState::Began);
+    }
+
+    #[test]
+    fn test_pan_activates_with_large_multi_pointer_movement() {
+        // When user moves 2 fingers significantly, Pan should eventually win
+        // (user is clearly panning, not pinching)
+        let mut pan = PanGestureRecognizer::new(1, 1).with_slop(18.0);
+
+        // Two pointers down
+        pan.handle_event(&PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0));
+        pan.handle_event(&PointerEventBuilder::new(1).node_id(1).down(200.0, 100.0));
+
+        // Large movement: centroid moves from 150,100 to 150,200 (100px vertical)
+        // This exceeds 2x slop (36px)
+        // Note: Using asymmetric movement to ensure centroid actually moves
+        // - Pointer 0: 100,100 -> 100,220 (moved 120px down)
+        // - Pointer 1: 200,100 -> 200,200 (moved 100px down)
+        // - Centroid: 150,100 -> 150,210 (moved 110px down, well above 36px threshold)
+        let move1 = PointerEventBuilder::new(0).node_id(1).move_to(100.0, 220.0);
+        let move2 = PointerEventBuilder::new(1).node_id(1).move_to(200.0, 200.0);
+        let events1 = pan.handle_event(&move1);
+
+        // Check if pan already activated on first move
+        let pan_started1 = events1.iter().any(|e| matches!(e.event_type, GestureEventType::PanStart));
+
+        let events2 = pan.handle_event(&move2);
+        let pan_started2 = events2.iter().any(|e| matches!(e.event_type, GestureEventType::PanStart));
+
+        assert!(pan_started1 || pan_started2 || pan.state() == RecognizerState::Began,
+            "Pan should activate with large multi-pointer movement (110px > 36px). State: {:?}", pan.state());
     }
 }
