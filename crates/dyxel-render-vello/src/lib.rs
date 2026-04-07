@@ -90,6 +90,10 @@ pub struct VelloBackend {
     loading_handle: SharedMutex<Option<std::thread::JoinHandle<()>>>,
     // Filter pipeline for blur effects
     filter_pipeline: SharedMutex<Option<filter_pipeline::FilterPipeline>>,
+    // Blur composite pipeline for drawing blurred textures
+    blur_composite_pipeline: SharedMutex<Option<wgpu::RenderPipeline>>,
+    blur_composite_bind_group_layout: SharedMutex<Option<wgpu::BindGroupLayout>>,
+    blur_composite_uniforms: SharedMutex<Option<wgpu::Buffer>>,
     // Blurred textures to composite (cleared each frame)
     blurred_textures: SharedMutex<Vec<BlurredTextureEntry>>,
 }
@@ -126,6 +130,9 @@ impl VelloBackend {
             is_loading: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             loading_handle: SharedMutex::new(None),
             filter_pipeline: SharedMutex::new(None),
+            blur_composite_pipeline: SharedMutex::new(None),
+            blur_composite_bind_group_layout: SharedMutex::new(None),
+            blur_composite_uniforms: SharedMutex::new(None),
             blurred_textures: SharedMutex::new(Vec::new()),
         }
     }
@@ -440,6 +447,97 @@ impl VelloBackend {
             *self.blit_pipeline.lock().unwrap() = Some(pipeline);
         }
         log::info!("VelloBackend: Pipeline prewarming complete.");
+    }
+
+    /// Initialize blur composite pipeline for drawing blurred textures
+    fn init_blur_composite_pipeline(&self, device: &wgpu::Device) {
+        // Create bind group layout with uniform buffer for transform
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Blur Composite Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Create uniform buffer (3 rows of vec4 = 48 bytes)
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Blur Composite Uniform Buffer"),
+            size: 48, // 3 * 16 bytes (aligned vec4s)
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Load shader
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Blur Composite Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("blur_composite.wgsl").into()),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Blur Composite Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Blur Composite Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        *self.blur_composite_pipeline.lock().unwrap() = Some(pipeline);
+        *self.blur_composite_bind_group_layout.lock().unwrap() = Some(bind_group_layout);
+        *self.blur_composite_uniforms.lock().unwrap() = Some(uniform_buffer);
+
+        log::info!("[Blur] Composite pipeline initialized");
     }
 
     /// Clear surface with a simple color (fallback when renderer is loading)
@@ -821,11 +919,91 @@ impl VelloBackend {
                     rp.set_bind_group(0, blit_bg, &[]);
                     rp.draw(0..3, 0..1);
 
-                    // Draw blurred textures - TEMPORARILY DISABLED for debugging
+                    // Draw blurred textures using composite pipeline
                     let blurred_textures = self.blurred_textures.lock().unwrap();
                     if !blurred_textures.is_empty() {
-                        log::debug!("[Blur] Have {} blurred textures to draw (disabled for debugging)", blurred_textures.len());
-                        // TODO: Re-enable blur texture drawing after fixing black screen
+                        log::debug!("[Blur] Drawing {} blurred textures", blurred_textures.len());
+
+                        // Get the blur composite pipeline
+                        let blur_pipeline = self.blur_composite_pipeline.lock().unwrap();
+                        let blur_bg_layout = self.blur_composite_bind_group_layout.lock().unwrap();
+                        let uniform_buffer = self.blur_composite_uniforms.lock().unwrap();
+
+                        if let (Some(pipeline), Some(layout), Some(uniforms)) =
+                            (blur_pipeline.as_ref(), blur_bg_layout.as_ref(), uniform_buffer.as_ref()) {
+
+                            // Create sampler
+                            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                                mag_filter: wgpu::FilterMode::Linear,
+                                min_filter: wgpu::FilterMode::Linear,
+                                ..Default::default()
+                            });
+
+                            // Draw each blurred texture
+                            for entry in blurred_textures.iter() {
+                                // Convert transform to matrix
+                                // Vello uses [xx, yx, xy, yy, x0, y0] order
+                                // We need to convert to clip space (-1 to 1)
+                                let affine = entry.transform;
+                                let mat = affine.as_coeffs();
+                                // mat = [xx, yx, xy, yy, x0, y0]
+
+                                // Screen space to clip space conversion
+                                // clip_x = (screen_x / width) * 2 - 1
+                                // clip_y = 1 - (screen_y / height) * 2
+                                let scale_x = 2.0 / w as f32;
+                                let scale_y = -2.0 / h as f32;
+                                let offset_x = -1.0;
+                                let offset_y = 1.0;
+
+                                // Transform matrix components
+                                // We want to transform from (0,0)-(1,1) UV space to clip space
+                                // But also apply the affine transform from Vello
+                                // Simplified: just pass the transform that converts from
+                                // texture-local space to clip space
+
+                                let uniform_data: [f32; 12] = [
+                                    // Row 0: m00, m01, pad, pad
+                                    mat[0] as f32 * scale_x, mat[2] as f32 * scale_x, 0.0, 0.0,
+                                    // Row 1: m10, m11, pad, pad
+                                    mat[1] as f32 * scale_y, mat[3] as f32 * scale_y, 0.0, 0.0,
+                                    // Row 2: tx, ty, opacity, pad
+                                    mat[4] as f32 * scale_x + offset_x,
+                                    mat[5] as f32 * scale_y + offset_y,
+                                    entry.opacity,
+                                    0.0,
+                                ];
+
+                                queue.write_buffer(uniforms, 0, bytemuck::cast_slice(&uniform_data));
+
+                                let texture_view = entry.texture.create_view(
+                                    &wgpu::TextureViewDescriptor::default());
+
+                                let bind_group = device.create_bind_group(
+                                    &wgpu::BindGroupDescriptor {
+                                        label: Some("Blur Composite Bind Group"),
+                                        layout,
+                                        entries: &[
+                                            wgpu::BindGroupEntry {
+                                                binding: 0,
+                                                resource: wgpu::BindingResource::TextureView(&texture_view),
+                                            },
+                                            wgpu::BindGroupEntry {
+                                                binding: 1,
+                                                resource: wgpu::BindingResource::Sampler(&sampler),
+                                            },
+                                            wgpu::BindGroupEntry {
+                                                binding: 2,
+                                                resource: uniforms.as_entire_binding(),
+                                            },
+                                        ],
+                                    });
+
+                                rp.set_pipeline(pipeline);
+                                rp.set_bind_group(0, &bind_group, &[]);
+                                rp.draw(0..4, 0..1); // 4 vertices for quad
+                            }
+                        }
                     }
                     // Clear blurred textures after drawing
                     drop(blurred_textures);
@@ -1049,12 +1227,11 @@ fn render_with_blur(
         );
     }
 
-    // Note: Layer popping is now handled in the main render function
-    // since blur texture compositing is disabled
-    // TODO: Re-enable this after fixing blur compositing
-    // if needs_layer {
-    //     scene.pop_layer();
-    // }
+    // Pop layer if one was pushed in the main render function
+    // The layer is always pushed when needs_layer is true (before blur check)
+    if needs_layer {
+        scene.pop_layer();
+    }
 
     // Render temp scene to offscreen texture
     let render_params = vello::RenderParams {
@@ -1282,9 +1459,8 @@ fn render_node_recursive_with_transform(
         };
 
         // === Step 4: Draw Node Content ===
-        // Note: Always draw content for now since blur texture compositing is disabled
-        // TODO: Re-enable !blur_applied check after fixing blur compositing
-        if true {
+        // Skip normal drawing if blur was applied (blur texture will be drawn in blit pass)
+        if !blur_applied {
             if node.view_type == ViewType::Text {
                 // Render text using Editor
                 if let Some(editor) = editors.get_mut(&id) {
@@ -1305,9 +1481,8 @@ fn render_node_recursive_with_transform(
         }
 
         // === Step 5: Recursively render children ===
-        // Note: Always render children for now since blur texture compositing is disabled
-        // TODO: Re-enable !blur_applied check after fixing blur compositing
-        if true {
+        // Skip children if blur was applied (they're rendered into the blur texture)
+        if !blur_applied {
             let local_pos = global_pos + pos_offset;
             for &child_id in &node.children {
                 render_node_recursive_with_transform(
@@ -1326,10 +1501,9 @@ fn render_node_recursive_with_transform(
             }
         }
 
-        // === Step 6: Pop Layer (if pushed) ===
-        // Note: Always pop layer for now since blur texture compositing is disabled
-        // TODO: Re-enable !blur_applied check after fixing blur compositing
-        if needs_layer {
+        // === Step 6: Pop Layer (if pushed and blur wasn't applied) ===
+        // If blur was applied, the layer was already popped in render_with_blur
+        if needs_layer && !blur_applied {
             scene.pop_layer();
         }
     }
@@ -1469,6 +1643,9 @@ impl RenderBackend for VelloBackend {
                 // Continue without blur support
             }
         }
+
+        // Initialize blur composite pipeline
+        self.init_blur_composite_pipeline(device);
 
         // Store info for deferred renderer initialization (includes cache stage)
         *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache, cache_stage));
