@@ -225,153 +225,7 @@ fn process_gesture_commands() {
         };
         
         match op {
-            OpCode::GestureTap => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    dispatch_tap_with_bubble(node_id, x, y);
-                    GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-            // Note: GestureDoubleTap removed - unified with GestureTap using tap_count
-            OpCode::GestureLongPressStart => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    LONG_PRESS_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press(node_id, x, y, GesturePhase::Began)); }
-                    });
-                }
-            }
-            OpCode::GestureLongPressEnd => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    LONG_PRESS_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press(node_id, x, y, GesturePhase::Ended)); }
-                    });
-                }
-            }
-            OpCode::GesturePanStart => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    PAN_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Began)); }
-                    });
-                }
-            }
-            OpCode::GesturePanUpdate => {
-                if offset + 20 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    let dx = f32::from_le_bytes([data[offset+12], data[offset+13], data[offset+14], data[offset+15]]);
-                    let dy = f32::from_le_bytes([data[offset+16], data[offset+17], data[offset+18], data[offset+19]]);
-                    offset += 20;
-                    PAN_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan(node_id, x, y, dx, dy, GesturePhase::Changed)); }
-                    });
-                }
-            }
-            OpCode::GesturePanEnd => {
-                if offset + 20 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 20;
-                    PAN_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) {
-                            f(GestureEvent::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Ended));
-                        }
-                    });
-                }
-            }
-            // === Direct Gesture Events (Host has already resolved bubbling) ===
-            OpCode::DirectGestureTap => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    // Direct call - no bubbling needed
-                    TAP_HANDLERS.with(|h| {
-                        if let Some(entry) = h.borrow_mut().get_mut(&node_id) {
-                            entry.dispatch(GestureEvent::tap(node_id, x, y, 1));
-                        }
-                    });
-                    GESTURE_COUNT.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-            // Note: DirectGestureDoubleTap removed - unified with DirectGestureTap using tap_count
-            OpCode::DirectGestureLongPress => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    LONG_PRESS_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press(node_id, x, y, GesturePhase::Began)); }
-                    });
-                }
-            }
-            OpCode::DirectGestureLongPressEnd => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    LONG_PRESS_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::long_press(node_id, x, y, GesturePhase::Ended)); }
-                    });
-                }
-            }
-            OpCode::DirectGesturePanStart => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    PAN_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Began)); }
-                    });
-                }
-            }
-            OpCode::DirectGesturePanUpdate => {
-                if offset + 20 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    let dx = f32::from_le_bytes([data[offset+12], data[offset+13], data[offset+14], data[offset+15]]);
-                    let dy = f32::from_le_bytes([data[offset+16], data[offset+17], data[offset+18], data[offset+19]]);
-                    offset += 20;
-                    PAN_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) { f(GestureEvent::pan(node_id, x, y, dx, dy, GesturePhase::Changed)); }
-                    });
-                }
-            }
-            OpCode::DirectGesturePanEnd => {
-                if offset + 12 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let x = f32::from_le_bytes([data[offset+4], data[offset+5], data[offset+6], data[offset+7]]);
-                    let y = f32::from_le_bytes([data[offset+8], data[offset+9], data[offset+10], data[offset+11]]);
-                    offset += 12;
-                    PAN_HANDLERS.with(|h| {
-                        if let Some(f) = h.borrow_mut().get_mut(&node_id) {
-                            f(GestureEvent::pan(node_id, x, y, 0.0, 0.0, GesturePhase::Ended));
-                        }
-                    });
-                }
-            }
-            // === Unified V2 Gesture Events (replaces all legacy/direct events) ===
+            // === Unified V2 Gesture Events ===
             OpCode::GestureEventV2 => {
                 if offset + 14 <= data.len() {
                     let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
@@ -400,8 +254,6 @@ fn process_gesture_commands() {
     }
 }
 
-// Legacy tap dispatch with bubbling - kept for backward compatibility with GestureTap commands
-// New code uses DirectGestureTap which doesn't require bubbling
 /// V2 Gesture Event Type constants (must match bridge.rs)
 const V2_GESTURE_TYPE_TAP: u8 = 0;
 const V2_GESTURE_TYPE_LONG_PRESS: u8 = 1;
@@ -502,15 +354,6 @@ fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y:
         }
         _ => {}
     }
-}
-
-fn dispatch_tap_with_bubble(node_id: u32, x: f32, y: f32) {
-    // Simple direct dispatch - no bubbling since Host now handles it via HandlerRegistry
-    TAP_HANDLERS.with(|h| {
-        if let Some(entry) = h.borrow_mut().get_mut(&node_id) {
-            entry.dispatch(GestureEvent::tap(node_id, x, y, 1));
-        }
-    });
 }
 
 #[unsafe(no_mangle)]

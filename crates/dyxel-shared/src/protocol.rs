@@ -161,38 +161,11 @@ define_protocol! {
     [50] AbortTransaction(seq_id: u32),
     [51] SetNodeDirty(id: u32, fields: u8),
     
-    // === LayoutRegistry Operations (52-55) - NEW! ===
+    // === LayoutRegistry Operations (52-55) ===
     [52] GetLayout(id: u32),
     [53] IsLayoutDirty(id: u32),
     [54] ClearLayoutDirty(id: u32),
     [55] GetLayoutBatch(start_id: u32, count: u32),
-    
-    // === Gesture Events (56-63) - Legacy, bubble in WASM ===
-    [56] GestureTap(node_id: u32, x: f32, y: f32),
-    [57] GestureDoubleTap(node_id: u32, x: f32, y: f32),
-    [58] GestureLongPressStart(node_id: u32, x: f32, y: f32),
-    [59] GestureLongPressEnd(node_id: u32, x: f32, y: f32),
-    [60] GesturePanStart(node_id: u32, x: f32, y: f32),
-    [61] GesturePanUpdate(node_id: u32, x: f32, y: f32, delta_x: f32, delta_y: f32),
-    [62] GesturePanEnd(node_id: u32, x: f32, y: f32, velocity_x: f32, velocity_y: f32),
-    [63] GestureCancel(node_id: u32),
-    
-    // === Direct Gesture Events (72-79) - Host resolves bubbling ===
-    // These events have already been resolved by Host using HandlerRegistry
-    // WASM should call the handler directly without bubbling
-    [72] DirectGestureTap(node_id: u32, x: f32, y: f32),
-    [73] DirectGestureDoubleTap(node_id: u32, x: f32, y: f32),
-    [74] DirectGestureLongPress(node_id: u32, x: f32, y: f32),
-    [75] DirectGesturePanStart(node_id: u32, x: f32, y: f32),
-    [76] DirectGesturePanUpdate(node_id: u32, x: f32, y: f32, delta_x: f32, delta_y: f32),
-    [77] DirectGesturePanEnd(node_id: u32, x: f32, y: f32),
-    [78] DirectGestureScaleStart(node_id: u32, x: f32, y: f32, scale: f32),
-    [79] DirectGestureScaleUpdate(node_id: u32, x: f32, y: f32, scale: f32, delta_scale: f32),
-    [80] DirectGestureScaleEnd(node_id: u32, x: f32, y: f32),
-    [81] DirectGestureRotationStart(node_id: u32, x: f32, y: f32, angle: f32),
-    [82] DirectGestureRotationUpdate(node_id: u32, x: f32, y: f32, angle: f32, delta_angle: f32),
-    [83] DirectGestureRotationEnd(node_id: u32, x: f32, y: f32),
-    [84] DirectGestureLongPressEnd(node_id: u32, x: f32, y: f32),
 
     // === Device Info (64) ===
     [64] UpdateDeviceInfo(dpr: f32, text_scale: f32, width: f32, height: f32, safe_top: f32, safe_bottom: f32, platform: u32),
@@ -200,8 +173,8 @@ define_protocol! {
     // === Gesture Handler Unregistration (90) ===
     [90] UnregisterGestureHandler(id: u32), // Generic unregister
 
-    // === Unified Gesture Events (85-89) - Phase 2 ===
-    // Replaces [56-63] and [72-84] with 5 unified events
+    // === Unified Gesture Events (85-86) ===
+    // Host -> WASM gesture events
     // event_type: 0=Tap, 1=LongPress, 2=Pan, 3=Scale, 4=Rotation
     // phase: 0=Began, 1=Changed, 2=Ended, 3=Cancelled (discrete events use 2=Ended)
     [85] GestureEventV2(node_id: u32, event_type: u8, phase: u8, x: f32, y: f32),
