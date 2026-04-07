@@ -1018,8 +1018,9 @@ fn render_with_blur(
         );
     }
 
-    // Pop layer if we pushed one for clipping
-    if needs_layer && node.clip_to_bounds {
+    // Pop layer if one was pushed in the main render function
+    // The layer is always pushed when needs_layer is true (before blur check)
+    if needs_layer {
         scene.pop_layer();
     }
 
@@ -1225,7 +1226,7 @@ fn render_node_recursive_with_transform(
         // === Step 3: Handle Blur Effect ===
         // If blur is enabled, render to offscreen texture and apply blur
         let has_blur = node.blur_radius > 0.0;
-        let _blur_applied = if has_blur && filter_pipeline.is_some() {
+        let blur_applied = if has_blur && filter_pipeline.is_some() {
             render_with_blur(
                 node,
                 id,
@@ -1245,46 +1246,51 @@ fn render_node_recursive_with_transform(
             false
         };
 
-        // === Step 4: Draw Node Content (if blur wasn't applied) ===
-        if node.view_type == ViewType::Text {
-            // Render text using Editor
-            if let Some(editor) = editors.get_mut(&id) {
-                editor.set_width(None);
-                editor.draw(scene, local_transform);
-            }
-        } else {
-            // Render rectangle at local position
-            let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
-
-            if node.border_radius > 0.0 {
-                let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
-                scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
+        // === Step 4: Draw Node Content (skip if blur was applied) ===
+        if !blur_applied {
+            if node.view_type == ViewType::Text {
+                // Render text using Editor
+                if let Some(editor) = editors.get_mut(&id) {
+                    editor.set_width(None);
+                    editor.draw(scene, local_transform);
+                }
             } else {
-                scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
+                // Render rectangle at local position
+                let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
+
+                if node.border_radius > 0.0 {
+                    let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
+                    scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
+                } else {
+                    scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
+                }
             }
         }
 
-        // === Step 4: Recursively render children ===
+        // === Step 5: Recursively render children (skip if blur was applied) ===
         // Children should be positioned relative to this node's actual rendered position
         // which includes the position offset (for absolute positioning)
-        let local_pos = global_pos + pos_offset;
-        for &child_id in &node.children {
-            render_node_recursive_with_transform(
-                child_id,
-                state,
-                editors,
-                scene,
-                local_pos,
-                transform,
-                device,
-                queue,
-                renderer,
-                filter_pipeline,
-            );
+        if !blur_applied {
+            let local_pos = global_pos + pos_offset;
+            for &child_id in &node.children {
+                render_node_recursive_with_transform(
+                    child_id,
+                    state,
+                    editors,
+                    scene,
+                    local_pos,
+                    transform,
+                    device,
+                    queue,
+                    renderer,
+                    filter_pipeline,
+                );
+            }
         }
 
-        // === Step 5: Pop Layer (if pushed) ===
-        if needs_layer {
+        // === Step 6: Pop Layer (if pushed and blur wasn't applied) ===
+        // If blur was applied, the layer was already popped in render_with_blur
+        if needs_layer && !blur_applied {
             scene.pop_layer();
         }
     }
