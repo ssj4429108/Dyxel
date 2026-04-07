@@ -1216,7 +1216,22 @@ fn render_with_blur(
     // Adjust transform to account for padding
     let offset_transform = Affine::translate((padding as f64, padding as f64));
 
-    // Render background rectangle
+    // For frosted glass effect, we want to blur what's BEHIND the view
+    // Current architecture limitation: single-pass top-down rendering
+    // The background hasn't been rendered yet when we process this view
+    //
+    // Current approach:
+    // 1. Render view's own content (color + children) to temp scene
+    // 2. Apply blur to this content
+    // 3. Result: the view content itself is blurred, NOT the background
+    //
+    // For TRUE frosted glass (blur background), we need:
+    // - Two-pass rendering, OR
+    // - Sample from already-rendered scene texture (backdrop blur)
+    //
+    // For now, we keep current behavior but note the limitation
+
+    // Render view's background
     let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
     if node.border_radius > 0.0 {
         let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
@@ -1233,8 +1248,7 @@ fn render_with_blur(
         }
     }
 
-    // Render children to temp scene (with adjusted positions)
-    // Note: We need to offset children by padding
+    // Render children to temp scene
     for &child_id in &node.children {
         render_child_to_blur_scene(
             child_id,
