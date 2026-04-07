@@ -821,65 +821,11 @@ impl VelloBackend {
                     rp.set_bind_group(0, blit_bg, &[]);
                     rp.draw(0..3, 0..1);
 
-                    // Draw blurred textures
+                    // Draw blurred textures - TEMPORARILY DISABLED for debugging
                     let blurred_textures = self.blurred_textures.lock().unwrap();
                     if !blurred_textures.is_empty() {
-                        // Create bind group layout for blurred textures if not exists
-                        let blur_bg_layout = device.create_bind_group_layout(
-                            &wgpu::BindGroupLayoutDescriptor {
-                                label: Some("Blur Texture Bind Group Layout"),
-                                entries: &[
-                                    wgpu::BindGroupLayoutEntry {
-                                        binding: 0,
-                                        visibility: wgpu::ShaderStages::FRAGMENT,
-                                        ty: wgpu::BindingType::Texture {
-                                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                            view_dimension: wgpu::TextureViewDimension::D2,
-                                            multisampled: false,
-                                        },
-                                        count: None,
-                                    },
-                                    wgpu::BindGroupLayoutEntry {
-                                        binding: 1,
-                                        visibility: wgpu::ShaderStages::FRAGMENT,
-                                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                                        count: None,
-                                    },
-                                ],
-                            });
-
-                        let sampler = device.create_sampler(
-                            &wgpu::SamplerDescriptor {
-                                mag_filter: wgpu::FilterMode::Linear,
-                                min_filter: wgpu::FilterMode::Linear,
-                                ..Default::default()
-                            });
-
-                        // Draw each blurred texture
-                        for entry in blurred_textures.iter() {
-                            let texture_view = entry.texture.create_view(
-                                &wgpu::TextureViewDescriptor::default());
-                            let blur_bg = device.create_bind_group(
-                                &wgpu::BindGroupDescriptor {
-                                    label: Some("Blur Texture Bind Group"),
-                                    layout: &blur_bg_layout,
-                                    entries: &[
-                                        wgpu::BindGroupEntry {
-                                            binding: 0,
-                                            resource: wgpu::BindingResource::TextureView(
-                                                &texture_view),
-                                        },
-                                        wgpu::BindGroupEntry {
-                                            binding: 1,
-                                            resource: wgpu::BindingResource::Sampler(
-                                                &sampler),
-                                        },
-                                    ],
-                                });
-
-                            rp.set_bind_group(0, &blur_bg, &[]);
-                            rp.draw(0..3, 0..1);
-                        }
+                        log::debug!("[Blur] Have {} blurred textures to draw (disabled for debugging)", blurred_textures.len());
+                        // TODO: Re-enable blur texture drawing after fixing black screen
                     }
                     // Clear blurred textures after drawing
                     drop(blurred_textures);
@@ -1103,11 +1049,12 @@ fn render_with_blur(
         );
     }
 
-    // Pop layer if one was pushed in the main render function
-    // The layer is always pushed when needs_layer is true (before blur check)
-    if needs_layer {
-        scene.pop_layer();
-    }
+    // Note: Layer popping is now handled in the main render function
+    // since blur texture compositing is disabled
+    // TODO: Re-enable this after fixing blur compositing
+    // if needs_layer {
+    //     scene.pop_layer();
+    // }
 
     // Render temp scene to offscreen texture
     let render_params = vello::RenderParams {
@@ -1117,6 +1064,7 @@ fn render_with_blur(
         antialiasing_method: vello::AaConfig::Area,
     };
 
+    log::debug!("[Blur] Rendering to offscreen texture {}x{}", texture_width, texture_height);
     if let Err(e) = renderer.render_to_texture(
         device,
         queue,
@@ -1127,6 +1075,7 @@ fn render_with_blur(
         log::warn!("[Blur] Failed to render to offscreen texture: {:?}", e);
         return false;
     }
+    log::debug!("[Blur] Offscreen render complete");
 
     // Apply blur using filter pipeline
     if let Err(e) = filter_pipeline.apply_blur(
@@ -1332,8 +1281,10 @@ fn render_node_recursive_with_transform(
             false
         };
 
-        // === Step 4: Draw Node Content (skip if blur was applied) ===
-        if !blur_applied {
+        // === Step 4: Draw Node Content ===
+        // Note: Always draw content for now since blur texture compositing is disabled
+        // TODO: Re-enable !blur_applied check after fixing blur compositing
+        if true {
             if node.view_type == ViewType::Text {
                 // Render text using Editor
                 if let Some(editor) = editors.get_mut(&id) {
@@ -1353,10 +1304,10 @@ fn render_node_recursive_with_transform(
             }
         }
 
-        // === Step 5: Recursively render children (skip if blur was applied) ===
-        // Children should be positioned relative to this node's actual rendered position
-        // which includes the position offset (for absolute positioning)
-        if !blur_applied {
+        // === Step 5: Recursively render children ===
+        // Note: Always render children for now since blur texture compositing is disabled
+        // TODO: Re-enable !blur_applied check after fixing blur compositing
+        if true {
             let local_pos = global_pos + pos_offset;
             for &child_id in &node.children {
                 render_node_recursive_with_transform(
@@ -1375,9 +1326,10 @@ fn render_node_recursive_with_transform(
             }
         }
 
-        // === Step 6: Pop Layer (if pushed and blur wasn't applied) ===
-        // If blur was applied, the layer was already popped in render_with_blur
-        if needs_layer && !blur_applied {
+        // === Step 6: Pop Layer (if pushed) ===
+        // Note: Always pop layer for now since blur texture compositing is disabled
+        // TODO: Re-enable !blur_applied check after fixing blur compositing
+        if needs_layer {
             scene.pop_layer();
         }
     }
