@@ -930,12 +930,15 @@ impl VelloBackend {
                     if !blurred_textures.is_empty() {
                         log::debug!("[Blur] Drawing {} blurred textures", blurred_textures.len());
 
-                        // Check if we need to recreate the pipeline with correct format
+                        // Create pipeline with correct surface format if needed
+                        // Must match the render pass format (Bgra8Unorm on macOS)
                         let surface_format = v_surface_surface.config.format;
                         {
                             let pipeline_opt = self.blur_composite_pipeline.lock().unwrap();
-                            if pipeline_opt.is_none() {
-                                drop(pipeline_opt);
+                            let needs_creation = pipeline_opt.is_none();
+                            drop(pipeline_opt);
+                            if needs_creation {
+                                log::info!("[Blur] Creating composite pipeline with format {:?}", surface_format);
                                 self.create_blur_composite_pipeline(device, surface_format);
                             }
                         }
@@ -1660,8 +1663,8 @@ impl RenderBackend for VelloBackend {
             }
         }
 
-        // Initialize blur composite pipeline
-        self.init_blur_composite_pipeline(device);
+        // Note: Blur composite pipeline is created lazily on first use
+        // with the correct surface format to avoid format mismatch
 
         // Store info for deferred renderer initialization (includes cache stage)
         *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache, cache_stage));
