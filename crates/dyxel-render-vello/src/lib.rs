@@ -12,7 +12,7 @@ use dyxel_render_api::{
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
 use vello::wgpu;
-use kurbo::{Affine, Rect as KRect, RoundedRect, Vec2};
+use kurbo::{Affine, Rect as KRect, Vec2};
 use taffy::style::AvailableSpace;
 use dyxel_shared::{SharedState, ViewType};
 use dyxel_perf::{PerformanceMonitor, SharedPerfMonitor, PerfConfig, PerformanceDiagnostics};
@@ -32,6 +32,7 @@ pub mod shader_cache;
 pub mod minimal_shaders;
 pub mod staged_loader;
 pub mod two_stage_init;
+pub mod scene_adapter;
 
 /// Vello render backend implementation
 /// 
@@ -894,14 +895,19 @@ pub fn platform_correction(viewport_height: f64) -> Affine {
     }
 }
 
+/// Render a node with layer effects (alpha, blur, shadow, clip)
+/// Following Xilem's pattern: shadow -> content -> children
 fn render_node_recursive_with_transform(
-    id: u32, 
-    state: &SharedState, 
+    id: u32,
+    state: &SharedState,
     editors: &mut std::collections::HashMap<u32, Editor>,
-    scene: &mut Scene, 
-    parent_pos: Vec2, 
+    scene: &mut Scene,
+    parent_pos: Vec2,
     transform: Affine,
 ) {
+    use vello::peniko::{BlendMode as PenikoBlendMode, Mix, Compose, Fill};
+    use kurbo::{Affine, Rect as KRect, RoundedRect};
+
     if let Some(node) = state.nodes.get(&id) {
         let layout = state.taffy.layout(node.taffy_node).unwrap();
         let taffy_x = layout.location.x as f64;
@@ -909,10 +915,83 @@ fn render_node_recursive_with_transform(
         let node_width = layout.size.width as f64;
         let node_height = layout.size.height as f64;
         let global_pos = parent_pos + Vec2::new(taffy_x, taffy_y);
-        
+
         // Build local transform for this node
-        let local_transform = transform * Affine::translate((global_pos.x, global_pos.y));
-        
+        // Apply position offset if set (for absolute positioning within parent)
+        let pos_offset = Vec2::new(node.position_x as f64, node.position_y as f64);
+        let local_transform = transform * Affine::translate((global_pos.x + pos_offset.x, global_pos.y + pos_offset.y));
+
+        // Determine if we need layer effects
+        let needs_layer = node.opacity < 1.0 || node.clip_to_bounds || node.blur_radius > 0.0;
+        let has_shadow = node.shadow_blur > 0.0 && (node.shadow_offset_x != 0.0 || node.shadow_offset_y != 0.0 || node.shadow_blur > 0.0);
+
+        // === Step 1: Draw Shadow (if any, using blur) ===
+        // Xilem pattern: Draw shadow first, then content on top
+        if has_shadow {
+            let shadow_x = node.shadow_offset_x as f64;
+            let shadow_y = node.shadow_offset_y as f64;
+            let blur_radius = node.shadow_blur as f64;
+
+            // Extract shadow color components
+            let r = ((node.shadow_color >> 16) & 0xFF) as u8;
+            let g = ((node.shadow_color >> 8) & 0xFF) as u8;
+            let b = (node.shadow_color & 0xFF) as u8;
+            let a = ((node.shadow_color >> 24) & 0xFF) as u8;
+            let shadow_color = vello::peniko::Color::from_rgba8(r, g, b, a);
+
+            // Draw blurred shadow using Vello's draw_blurred_rounded_rect
+            let rect = KRect::from_origin_size((shadow_x, shadow_y), (node_width, node_height));
+
+            if node.border_radius > 0.0 {
+                scene.draw_blurred_rounded_rect(
+                    local_transform,
+                    rect,
+                    shadow_color,
+                    node.border_radius as f64,
+                    blur_radius,
+                );
+            } else {
+                scene.draw_blurred_rounded_rect(
+                    local_transform,
+                    rect,
+                    shadow_color,
+                    0.0,
+                    blur_radius,
+                );
+            }
+        }
+
+        // === Step 2: Push Layer (if needed for alpha/blur/clip) ===
+        if needs_layer {
+            // Convert opacity to layer alpha
+            let alpha = node.opacity.clamp(0.0, 1.0);
+
+            // Default blend mode (Normal)
+            let blend = PenikoBlendMode::new(Mix::Normal, Compose::SrcOver);
+
+            // Create clip shape if clip_to_bounds is enabled
+            if node.clip_to_bounds {
+                // Use rounded rect clip if border_radius is set
+                if node.border_radius > 0.0 {
+                    let clip_rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
+                    let rounded_clip = RoundedRect::from_rect(clip_rect, node.border_radius as f64);
+                    scene.push_layer(Fill::NonZero, blend, alpha, local_transform, &rounded_clip);
+                } else {
+                    let clip_rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
+                    scene.push_layer(Fill::NonZero, blend, alpha, local_transform, &clip_rect);
+                }
+            } else {
+                // No clipping - use large rect
+                let full_rect = KRect::from_origin_size((-1e6, -1e6), (2e6, 2e6));
+                scene.push_layer(Fill::NonZero, blend, alpha, local_transform, &full_rect);
+            }
+
+            // Note: blur_radius is captured but Vello handles blur differently.
+            // For node blur effects, we would need to render to an offscreen layer
+            // and apply blur. For now, we document this as a future enhancement.
+        }
+
+        // === Step 3: Draw Node Content ===
         if node.view_type == ViewType::Text {
             // Render text using Editor
             if let Some(editor) = editors.get_mut(&id) {
@@ -922,7 +1001,7 @@ fn render_node_recursive_with_transform(
         } else {
             // Render rectangle at local position
             let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
-            
+
             if node.border_radius > 0.0 {
                 let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
                 scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
@@ -930,10 +1009,18 @@ fn render_node_recursive_with_transform(
                 scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
             }
         }
-        
-        // Recursively render children
+
+        // === Step 4: Recursively render children ===
+        // Children should be positioned relative to this node's actual rendered position
+        // which includes the position offset (for absolute positioning)
+        let local_pos = global_pos + pos_offset;
         for &child_id in &node.children {
-            render_node_recursive_with_transform(child_id, state, editors, scene, global_pos, transform);
+            render_node_recursive_with_transform(child_id, state, editors, scene, local_pos, transform);
+        }
+
+        // === Step 5: Pop Layer (if pushed) ===
+        if needs_layer {
+            scene.pop_layer();
         }
     }
 }

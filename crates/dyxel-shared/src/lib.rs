@@ -8,6 +8,7 @@ pub mod dual_track;
 pub mod input;
 pub mod device;
 pub mod layout_sync;
+pub mod filters;
 
 #[macro_use]
 pub mod utils;

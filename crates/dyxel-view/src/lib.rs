@@ -146,6 +146,8 @@ thread_local! {
     static SCALE_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     // Rotation gesture handlers
     static ROTATION_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    // Shadow configuration storage (for partial shadow config via separate methods)
+    static SHADOW_CONFIG: RefCell<HashMap<u32, ShadowConfig>> = RefCell::new(HashMap::new());
     // Note: PARENT_MAP removed - Host now handles event bubbling via HandlerRegistry
 }
 
@@ -157,6 +159,15 @@ struct TapHandlerEntry {
     double_tap: Option<Box<dyn FnMut(GestureEvent)>>,
     /// Handler for triple+ taps (count >= 3)
     multi_tap: Option<Box<dyn FnMut(GestureEvent)>>,
+}
+
+/// Shadow configuration for layer effects
+#[derive(Clone, Copy, Debug, Default)]
+struct ShadowConfig {
+    offset_x: f32,
+    offset_y: f32,
+    blur: f32,
+    color: u32, // RGBA
 }
 
 impl TapHandlerEntry {
@@ -545,10 +556,13 @@ impl From<&String> for Prop<String> { fn from(v: &String) -> Self { Prop::Static
 impl From<f32> for Prop<f32> { fn from(v: f32) -> Self { Prop::Static(v) } }
 impl From<i32> for Prop<i32> { fn from(v: i32) -> Self { Prop::Static(v) } }
 impl From<u16> for Prop<u16> { fn from(v: u16) -> Self { Prop::Static(v) } }
+impl From<bool> for Prop<bool> { fn from(v: bool) -> Self { Prop::Static(v) } }
 impl From<(u32,u32,u32)> for Prop<(u32,u32,u32)> { fn from(v: (u32,u32,u32)) -> Self { Prop::Static(v) } }
 impl From<(u32,u32,u32,u32)> for Prop<(u32,u32,u32,u32)> { fn from(v: (u32,u32,u32,u32)) -> Self { Prop::Static(v) } }
 impl From<(u8,u8,u8,u8)> for Prop<(u8,u8,u8,u8)> { fn from(v: (u8,u8,u8,u8)) -> Self { Prop::Static(v) } }
 impl From<(f32,f32,f32,f32)> for Prop<(f32,f32,f32,f32)> { fn from(v: (f32,f32,f32,f32)) -> Self { Prop::Static(v) } }
+impl From<(f32,f32,f32,u32)> for Prop<(f32,f32,f32,u32)> { fn from(v: (f32,f32,f32,u32)) -> Self { Prop::Static(v) } }
+impl From<(f32,f32)> for Prop<(f32,f32)> { fn from(v: (f32,f32)) -> Self { Prop::Static(v) } }
 // SizeUnit support
 impl From<SizeUnit> for Prop<SizeUnit> { fn from(v: SizeUnit) -> Self { Prop::Static(v) } }
 impl From<Dimension> for Prop<SizeUnit> { 
@@ -759,6 +773,75 @@ pub trait BaseView {
         push_command!(SHARED_BUFFER, RegisterRotationHandler, id); // Notify Host
         ROTATION_HANDLERS.with(|h| {
             h.borrow_mut().insert(id, Box::new(handler));
+        });
+        self
+    }
+
+    // === Layer Effects (Vello Native) ===
+    fn opacity(self, p: impl Into<Prop<f32>>) -> Self where Self: Sized {
+        apply_prop(self.node_id(), p.into(), |id, opacity| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetOpacity, id, opacity.clamp(0.0, 1.0));
+        }); self
+    }
+    fn shadow_offset(self, x: f32, y: f32) -> Self where Self: Sized {
+        let id = self.node_id();
+        select_node(id);
+        // Store partial shadow config - full shadow set via shadow() method
+        SHADOW_CONFIG.with(|c| {
+            let mut config = c.borrow_mut();
+            config.entry(id).or_insert_with(ShadowConfig::default).offset_x = x;
+            config.entry(id).or_insert_with(ShadowConfig::default).offset_y = y;
+        });
+        self
+    }
+    fn shadow_blur(self, blur: f32) -> Self where Self: Sized {
+        let id = self.node_id();
+        select_node(id);
+        SHADOW_CONFIG.with(|c| {
+            let mut config = c.borrow_mut();
+            config.entry(id).or_insert_with(ShadowConfig::default).blur = blur;
+        });
+        self
+    }
+    fn shadow_color(self, color: impl Into<Prop<u32>>) -> Self where Self: Sized {
+        let id = self.node_id();
+        select_node(id);
+        apply_prop(id, color.into(), |node_id, color_val| {
+            SHADOW_CONFIG.with(|c| {
+                let mut config = c.borrow_mut();
+                config.entry(node_id).or_insert_with(ShadowConfig::default).color = color_val;
+            });
+        });
+        self
+    }
+    fn shadow(self, params: impl Into<Prop<(f32, f32, f32, u32)>>) -> Self where Self: Sized {
+        let id = self.node_id();
+        apply_prop(id, params.into(), |node_id, (offset_x, offset_y, blur, color)| {
+            select_node(node_id);
+            push_command!(SHARED_BUFFER, SetShadow, node_id, offset_x, offset_y, blur, color);
+        });
+        self
+    }
+    fn blur(self, p: impl Into<Prop<f32>>) -> Self where Self: Sized {
+        apply_prop(self.node_id(), p.into(), |id, radius| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetBlur, id, radius.max(0.0));
+        }); self
+    }
+    fn clip_to_bounds(self, clip: impl Into<Prop<bool>>) -> Self where Self: Sized {
+        let id = self.node_id();
+        apply_prop(id, clip.into(), |node_id, clip_val| {
+            select_node(node_id);
+            push_command!(SHARED_BUFFER, SetClipToBounds, node_id, if clip_val { 1u8 } else { 0u8 });
+        });
+        self
+    }
+    fn position(self, pos: impl Into<Prop<(f32, f32)>>) -> Self where Self: Sized {
+        let id = self.node_id();
+        apply_prop(id, pos.into(), |node_id, (x, y)| {
+            select_node(node_id);
+            push_command!(SHARED_BUFFER, SetPosition, node_id, x, y);
         });
         self
     }

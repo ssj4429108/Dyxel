@@ -199,6 +199,13 @@ define_protocol! {
     [85] GestureEventV2(node_id: u32, event_type: u8, phase: u8, x: f32, y: f32),
     // Extended event with payload (tap_count, scale, delta_x, etc. encoded in payload)
     [86] GestureEventV2Ex(node_id: u32, event_type: u8, phase: u8, x: f32, y: f32, payload: u32),
+
+    // === Layer Effects (92-96) - Vello Native Layer Rendering ===
+    [92] SetOpacity(id: u32, opacity: f32),           // 0.0 - 1.0
+    [93] SetShadow(id: u32, offset_x: f32, offset_y: f32, blur: f32, color: u32), // color: RGBA
+    [94] SetBlur(id: u32, radius: f32),               // Gaussian blur radius
+    [95] SetClipToBounds(id: u32, clip: u8),          // 0=false, 1=true
+    [96] SetPosition(id: u32, x: f32, y: f32),        // Absolute position offset
 }
 
 #[repr(C)]

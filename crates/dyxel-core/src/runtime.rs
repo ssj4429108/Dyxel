@@ -698,8 +698,48 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
                 let _safe_top = f32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
                 let _safe_bottom = f32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
                 let platform = u32::from_le_bytes([payload[24], payload[25], payload[26], payload[27]]);
-                log::info!("Host: UpdateDeviceInfo dpr={:.2}, text_scale={:.2}, size={:.0}x{:.0}, platform={}", 
+                log::info!("Host: UpdateDeviceInfo dpr={:.2}, text_scale={:.2}, size={:.0}x{:.0}, platform={}",
                     dpr, text_scale, width, height, platform);
+            }
+        }
+        // === Layer Effects (92-96) - Vello Native Layer Rendering ===
+        OpCode::SetOpacity => {
+            if payload.len() >= 8 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let opacity = f32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                state.set_opacity(id, opacity);
+            }
+        }
+        OpCode::SetShadow => {
+            if payload.len() >= 20 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let offset_x = f32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                let offset_y = f32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+                let blur = f32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+                let color = u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+                state.set_shadow(id, offset_x, offset_y, blur, color);
+            }
+        }
+        OpCode::SetBlur => {
+            if payload.len() >= 8 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let radius = f32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                state.set_blur(id, radius);
+            }
+        }
+        OpCode::SetClipToBounds => {
+            if payload.len() >= 5 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let clip = payload[4] != 0;
+                state.set_clip_to_bounds(id, clip);
+            }
+        }
+        OpCode::SetPosition => {
+            if payload.len() >= 12 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let x = f32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                let y = f32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+                state.set_position(id, x, y);
             }
         }
         _ => {

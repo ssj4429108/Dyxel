@@ -11,7 +11,7 @@
 //! - dyxel-render-impeller: Impeller implementation (future)
 
 use std::any::Any;
-use dyxel_shared::SharedState;
+use dyxel_shared::{SharedState, filters::{BlendMode, Filter, Rect}};
 
 /// Callback type for marking nodes as dirty after layout computation
 /// Render backend calls this after compute_layout to notify core
@@ -300,24 +300,49 @@ pub trait RenderBackendFactory: Send + Sync {
 }
 
 /// Scene interface for drawing - abstracted from vello::Scene
-/// 
+///
 /// This provides a minimal interface for drawing primitives.
 /// Concrete backends implement this for their scene types.
 pub trait Scene {
     /// Fill a rectangle with a color
     fn fill_rect(&mut self, x: f64, y: f64, width: f64, height: f64, color: [u8; 4]);
-    
+
     /// Fill a rounded rectangle
     fn fill_rounded_rect(&mut self, x: f64, y: f64, width: f64, height: f64, radius: f64, color: [u8; 4]);
-    
+
     /// Apply a transform to subsequent drawing operations
     fn push_transform(&mut self, transform: Transform);
-    
+
     /// Pop the last transform
     fn pop_transform(&mut self);
-    
+
     /// Clear the scene
     fn clear(&mut self);
+
+    /// Push a new layer for compositing effects (alpha, blend, filter, clip)
+    ///
+    /// All subsequent drawing operations will be captured in this layer
+    /// until `pop_layer` is called. The layer will be composited with the
+    /// specified effects applied.
+    ///
+    /// # Arguments
+    /// * `alpha` - Layer opacity (0.0 to 1.0)
+    /// * `blend` - Blend mode for compositing with parent
+    /// * `filter` - Optional filter effect to apply
+    /// * `clip` - Optional clip rectangle (in local coordinates)
+    fn push_layer(
+        &mut self,
+        alpha: f32,
+        blend: BlendMode,
+        filter: Option<&Filter>,
+        clip: Option<Rect>,
+    );
+
+    /// Pop the current layer and composite it
+    ///
+    /// This ends the layer scope started by `push_layer` and composites
+    /// the captured content with the effects specified in push_layer.
+    fn pop_layer(&mut self);
 }
 
 /// 2D Transform (affine transformation)

@@ -273,8 +273,9 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
             matches!(tokens_to_check.get(3), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis);
         
         // Pattern: single identifier (e.g., box_width) - treat as State
+        // Exclude boolean keywords (true, false) which are Idents but not State variables
         let is_single_ident = tokens_to_check.len() == 1 &&
-            matches!(tokens_to_check.get(0), Some(TokenTree::Ident(_)));
+            matches!(tokens_to_check.get(0), Some(TokenTree::Ident(i)) if i.to_string() != "true" && i.to_string() != "false");
         
         if is_simple_state_get || is_single_ident {
             let state_ident = if is_simple_state_get {

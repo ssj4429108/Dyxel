@@ -19,8 +19,25 @@ pub struct ViewNode {
     pub font_size: f32,
     pub font_family: String,
     pub font_weight: u16,
-    pub border_radius: f32, 
-    pub role: Role, 
+    pub border_radius: f32,
+    /// Opacity (0.0 - 1.0, 1.0 = fully opaque)
+    pub opacity: f32,
+    /// Clip children to bounds
+    pub clip_to_bounds: bool,
+    /// Shadow offset X
+    pub shadow_offset_x: f32,
+    /// Shadow offset Y
+    pub shadow_offset_y: f32,
+    /// Shadow blur radius
+    pub shadow_blur: f32,
+    /// Shadow color (RGBA)
+    pub shadow_color: u32,
+    /// Blur radius for the node itself
+    pub blur_radius: f32,
+    /// Position offset for absolute positioning
+    pub position_x: f32,
+    pub position_y: f32,
+    pub role: Role,
     pub view_type: ViewType, 
     pub has_click: bool, 
     pub padding: (f32, f32, f32, f32),
@@ -199,10 +216,19 @@ impl SharedState {
             font_size: 16.0,
             font_family: String::new(),
             font_weight: 400,
-            border_radius: 0.0, 
-            role: Role::None, 
-            view_type: ViewType::Container, 
-            has_click: false, 
+            border_radius: 0.0,
+            opacity: 1.0,
+            clip_to_bounds: false,
+            shadow_offset_x: 0.0,
+            shadow_offset_y: 0.0,
+            shadow_blur: 0.0,
+            shadow_color: 0xFF000000, // Black shadow default
+            blur_radius: 0.0,
+            position_x: 0.0,
+            position_y: 0.0,
+            role: Role::None,
+            view_type: ViewType::Container,
+            has_click: false,
             padding: (0.0, 0.0, 0.0, 0.0),
             dirty_fields: 0,
             last_measured_size: (0.0, 0.0),
@@ -363,11 +389,44 @@ impl SharedState {
         if let Some(node) = self.nodes.get_mut(&id) { node.z_index = z; } 
     }
     
-    pub fn set_border_radius(&mut self, wasm_id: u32, r: f32) { 
+    pub fn set_border_radius(&mut self, wasm_id: u32, r: f32) {
         let id = self.resolve_id(wasm_id);
-        if let Some(node) = self.nodes.get_mut(&id) { node.border_radius = r; } 
+        if let Some(node) = self.nodes.get_mut(&id) { node.border_radius = r; }
     }
-    
+
+    pub fn set_opacity(&mut self, wasm_id: u32, opacity: f32) {
+        let id = self.resolve_id(wasm_id);
+        if let Some(node) = self.nodes.get_mut(&id) { node.opacity = opacity.clamp(0.0, 1.0); }
+    }
+
+    pub fn set_clip_to_bounds(&mut self, wasm_id: u32, clip: bool) {
+        let id = self.resolve_id(wasm_id);
+        if let Some(node) = self.nodes.get_mut(&id) { node.clip_to_bounds = clip; }
+    }
+
+    pub fn set_shadow(&mut self, wasm_id: u32, offset_x: f32, offset_y: f32, blur: f32, color: u32) {
+        let id = self.resolve_id(wasm_id);
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.shadow_offset_x = offset_x;
+            node.shadow_offset_y = offset_y;
+            node.shadow_blur = blur;
+            node.shadow_color = color;
+        }
+    }
+
+    pub fn set_blur(&mut self, wasm_id: u32, radius: f32) {
+        let id = self.resolve_id(wasm_id);
+        if let Some(node) = self.nodes.get_mut(&id) { node.blur_radius = radius; }
+    }
+
+    pub fn set_position(&mut self, wasm_id: u32, x: f32, y: f32) {
+        let id = self.resolve_id(wasm_id);
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.position_x = x;
+            node.position_y = y;
+        }
+    }
+
     pub fn set_padding(&mut self, wasm_id: u32, t: f32, r: f32, b: f32, l: f32) { 
         let id = self.resolve_id(wasm_id);
         if let Some(node) = self.nodes.get(&id) { 
@@ -540,6 +599,15 @@ impl SharedState {
             font_family: String::new(),
             font_weight: 400,
             border_radius: 0.0,
+            opacity: 1.0,
+            clip_to_bounds: false,
+            shadow_offset_x: 0.0,
+            shadow_offset_y: 0.0,
+            shadow_blur: 0.0,
+            shadow_color: 0xFF000000,
+            blur_radius: 0.0,
+            position_x: 0.0,
+            position_y: 0.0,
             role: Role::None,
             view_type: ViewType::Container,
             has_click: false,
@@ -547,7 +615,7 @@ impl SharedState {
             dirty_fields: 0,
             last_measured_size: (0.0, 0.0),
         });
-        
+
         // 记录映射
         self.id_map.insert(wasm_id, slot);
         self.active_handles.insert(wasm_id, handle);
