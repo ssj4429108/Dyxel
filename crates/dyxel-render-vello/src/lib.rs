@@ -41,6 +41,21 @@ pub mod filter_pipeline;
 // Type aliases for shared data used in async context
 type AsyncShared<T> = std::sync::Arc<std::sync::Mutex<T>>;
 
+/// Entry for a blurred texture to be composited
+#[derive(Debug)]
+struct BlurredTextureEntry {
+    /// The blurred texture
+    texture: wgpu::Texture,
+    /// Width of the texture
+    width: u32,
+    /// Height of the texture
+    height: u32,
+    /// Position to draw at (with padding offset already applied)
+    transform: Affine,
+    /// Opacity of the blurred content
+    opacity: f32,
+}
+
 /// Vello render backend implementation
 /// 
 /// This is the concrete implementation of RenderBackend using Vello + wgpu
@@ -75,6 +90,8 @@ pub struct VelloBackend {
     loading_handle: SharedMutex<Option<std::thread::JoinHandle<()>>>,
     // Filter pipeline for blur effects
     filter_pipeline: SharedMutex<Option<filter_pipeline::FilterPipeline>>,
+    // Blurred textures to composite (cleared each frame)
+    blurred_textures: SharedMutex<Vec<BlurredTextureEntry>>,
 }
 
 const BLIT_SHADER_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.spv"));
@@ -109,6 +126,7 @@ impl VelloBackend {
             is_loading: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             loading_handle: SharedMutex::new(None),
             filter_pipeline: SharedMutex::new(None),
+            blurred_textures: SharedMutex::new(Vec::new()),
         }
     }
     
@@ -653,6 +671,7 @@ impl VelloBackend {
 
             // Get filter pipeline for blur effects
             let filter_pipeline = self.filter_pipeline.lock().unwrap();
+            let mut blurred_textures = self.blurred_textures.lock().unwrap();
 
             render_node_recursive_with_transform(
                 id,
@@ -665,6 +684,7 @@ impl VelloBackend {
                 queue,
                 renderer,
                 filter_pipeline.as_ref(),
+                &mut blurred_textures,
             );
             stage_timer.mark("scene_build");
         }
@@ -781,25 +801,89 @@ impl VelloBackend {
         match v_surface_surface.surface.get_current_texture() {
             Ok(st) => {
                 let mut enc = device.create_command_encoder(&Default::default());
-                { 
-                    let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor { 
-                        label: Some("Vello Blit Pass"), 
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
-                            view: &st.texture.create_view(&Default::default()), 
-                            resolve_target: None, 
-                            ops: wgpu::Operations { 
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 
-                                store: wgpu::StoreOp::Store 
-                            }, 
-                            depth_slice: None 
-                        })], 
-                        depth_stencil_attachment: None, 
-                        timestamp_writes: None, 
-                        occlusion_query_set: None 
-                    }); 
-                    rp.set_pipeline(blit_pipeline); 
-                    rp.set_bind_group(0, blit_bg, &[]); 
-                    rp.draw(0..3, 0..1); 
+                {
+                    let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Vello Blit Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &st.texture.create_view(&Default::default()),
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store
+                            },
+                            depth_slice: None
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None
+                    });
+                    rp.set_pipeline(blit_pipeline);
+                    rp.set_bind_group(0, blit_bg, &[]);
+                    rp.draw(0..3, 0..1);
+
+                    // Draw blurred textures
+                    let blurred_textures = self.blurred_textures.lock().unwrap();
+                    if !blurred_textures.is_empty() {
+                        // Create bind group layout for blurred textures if not exists
+                        let blur_bg_layout = device.create_bind_group_layout(
+                            &wgpu::BindGroupLayoutDescriptor {
+                                label: Some("Blur Texture Bind Group Layout"),
+                                entries: &[
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 0,
+                                        visibility: wgpu::ShaderStages::FRAGMENT,
+                                        ty: wgpu::BindingType::Texture {
+                                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                            view_dimension: wgpu::TextureViewDimension::D2,
+                                            multisampled: false,
+                                        },
+                                        count: None,
+                                    },
+                                    wgpu::BindGroupLayoutEntry {
+                                        binding: 1,
+                                        visibility: wgpu::ShaderStages::FRAGMENT,
+                                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                                        count: None,
+                                    },
+                                ],
+                            });
+
+                        let sampler = device.create_sampler(
+                            &wgpu::SamplerDescriptor {
+                                mag_filter: wgpu::FilterMode::Linear,
+                                min_filter: wgpu::FilterMode::Linear,
+                                ..Default::default()
+                            });
+
+                        // Draw each blurred texture
+                        for entry in blurred_textures.iter() {
+                            let texture_view = entry.texture.create_view(
+                                &wgpu::TextureViewDescriptor::default());
+                            let blur_bg = device.create_bind_group(
+                                &wgpu::BindGroupDescriptor {
+                                    label: Some("Blur Texture Bind Group"),
+                                    layout: &blur_bg_layout,
+                                    entries: &[
+                                        wgpu::BindGroupEntry {
+                                            binding: 0,
+                                            resource: wgpu::BindingResource::TextureView(
+                                                &texture_view),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 1,
+                                            resource: wgpu::BindingResource::Sampler(
+                                                &sampler),
+                                        },
+                                    ],
+                                });
+
+                            rp.set_bind_group(0, &blur_bg, &[]);
+                            rp.draw(0..3, 0..1);
+                        }
+                    }
+                    // Clear blurred textures after drawing
+                    drop(blurred_textures);
+                    self.blurred_textures.lock().unwrap().clear();
                 }
                 queue.submit(Some(enc.finish())); 
                 stage_timer.mark("blit_submit");
@@ -932,6 +1016,7 @@ fn render_with_blur(
     node_width: f64,
     node_height: f64,
     needs_layer: bool,
+    blurred_textures: &mut Vec<BlurredTextureEntry>,
 ) -> bool {
     use vello::peniko::{Fill, Color};
     use kurbo::{Rect as KRect, RoundedRect};
@@ -1053,19 +1138,17 @@ fn render_with_blur(
         return false;
     }
 
-    // Draw the blurred texture to main scene
+    // Store the blurred texture for compositing in the final blit pass
     // Adjust transform to account for the padding offset
     let final_transform = local_transform * Affine::translate((-(padding as f64), -(padding as f64)));
 
-    // Draw the blurred result using a blurred rect approach
-    let display_rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
-    scene.fill(
-        Fill::NonZero,
-        final_transform,
-        node.color,
-        None,
-        &display_rect,
-    );
+    blurred_textures.push(BlurredTextureEntry {
+        texture: offscreen_texture,
+        width: texture_width,
+        height: texture_height,
+        transform: final_transform,
+        opacity: node.opacity,
+    });
 
     // Draw children that extend beyond bounds (if not clipped)
     if !node.clip_to_bounds {
@@ -1082,6 +1165,7 @@ fn render_with_blur(
                 queue,
                 renderer,
                 Some(filter_pipeline),
+                blurred_textures,
             );
         }
     }
@@ -1139,6 +1223,7 @@ fn render_node_recursive_with_transform(
     queue: &wgpu::Queue,
     renderer: &mut vello::Renderer,
     filter_pipeline: Option<&crate::filter_pipeline::FilterPipeline>,
+    blurred_textures: &mut Vec<BlurredTextureEntry>,
 ) {
     use vello::peniko::{BlendMode as PenikoBlendMode, Mix, Compose, Fill};
     use kurbo::{Affine, Rect as KRect, RoundedRect};
@@ -1241,6 +1326,7 @@ fn render_node_recursive_with_transform(
                 node_width,
                 node_height,
                 needs_layer,
+                blurred_textures,
             )
         } else {
             false
@@ -1284,6 +1370,7 @@ fn render_node_recursive_with_transform(
                     queue,
                     renderer,
                     filter_pipeline,
+                    blurred_textures,
                 );
             }
         }
