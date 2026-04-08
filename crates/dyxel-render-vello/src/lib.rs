@@ -923,6 +923,7 @@ impl VelloBackend {
         };
         
         // Single render: main scene + overlay (if enabled) to offscreen texture
+        log::info!("[Blur] Rendering scene to texture {}x{}", w, h);
         renderer.render_to_texture(
             device,
             queue,
@@ -953,6 +954,9 @@ impl VelloBackend {
                         // The source rectangle is in screen coordinates
                         let (src_x, src_y, src_w, src_h) = entry.source_rect;
 
+                        log::info!("[Blur] Copying region: src=({:.0},{:.0}) size={:.0}x{:.0} to blur texture {}x{}",
+                            src_x, src_y, src_w, src_h, entry.width, entry.height);
+
                         // Create a command encoder for copy and blur operations
                         let mut enc = device.create_command_encoder(
                             &wgpu::CommandEncoderDescriptor {
@@ -961,7 +965,11 @@ impl VelloBackend {
 
                         // Copy region from scene texture to blur texture
                         // Note: We need to account for padding in the blur texture
+                        // Also need to flip Y coordinate because Vello uses Y-up but wgpu uses Y-down
                         let padding = ((entry.width as f32 - src_w) / 2.0) as u32;
+
+                        // Flip Y coordinate: Vello Y=0 is bottom, wgpu Y=0 is top
+                        let flipped_y = (h as f32 - src_y - src_h).max(0.0) as u32;
 
                         enc.copy_texture_to_texture(
                             wgpu::TexelCopyTextureInfo {
@@ -969,7 +977,7 @@ impl VelloBackend {
                                 mip_level: 0,
                                 origin: wgpu::Origin3d {
                                     x: src_x.max(0.0) as u32,
-                                    y: src_y.max(0.0) as u32,
+                                    y: flipped_y,
                                     z: 0,
                                 },
                                 aspect: wgpu::TextureAspect::All,
@@ -1541,6 +1549,10 @@ fn render_deferred_child(
         let local_transform = Affine::translate((parent_pos.x + x, parent_pos.y + y));
 
         // Draw the child
+        // Note: Opacity is handled by the layer system in normal rendering,
+        // but for deferred rendering we may need to adjust the color
+        // For now, we use the color as-is since the child texture uses alpha blending
+
         if node.view_type == ViewType::Text {
             if let Some(editor) = editors.get_mut(&id) {
                 editor.set_width(None);
