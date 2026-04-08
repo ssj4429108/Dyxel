@@ -1536,7 +1536,7 @@ fn render_deferred_child(
     scene: &mut Scene,
     parent_pos: Vec2,
 ) {
-    use vello::peniko::{Fill};
+    use vello::peniko::{Fill, BlendMode as PenikoBlendMode, Mix, Compose};
     use kurbo::{Rect as KRect, RoundedRect};
 
     if let Some(node) = state.nodes.get(&id) {
@@ -1548,11 +1548,16 @@ fn render_deferred_child(
 
         let local_transform = Affine::translate((parent_pos.x + x, parent_pos.y + y));
 
-        // Draw the child
-        // Note: Opacity is handled by the layer system in normal rendering,
-        // but for deferred rendering we may need to adjust the color
-        // For now, we use the color as-is since the child texture uses alpha blending
+        // Apply opacity using layer if needed
+        let needs_layer = node.opacity < 1.0;
+        if needs_layer {
+            let alpha = node.opacity.clamp(0.0, 1.0);
+            let blend = PenikoBlendMode::new(Mix::Normal, Compose::SrcOver);
+            let rect = KRect::from_origin_size((0.0, 0.0), (width, height));
+            scene.push_layer(Fill::NonZero, blend, alpha, local_transform, &rect);
+        }
 
+        // Draw the child
         if node.view_type == ViewType::Text {
             if let Some(editor) = editors.get_mut(&id) {
                 editor.set_width(None);
@@ -1566,6 +1571,11 @@ fn render_deferred_child(
             } else {
                 scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
             }
+        }
+
+        // Pop layer if pushed
+        if needs_layer {
+            scene.pop_layer();
         }
 
         // Recursively render grandchildren
