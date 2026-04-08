@@ -1009,14 +1009,81 @@ impl VelloBackend {
         }
 
         // === PASS 3: Render deferred children ===
-        // DISABLED: Rendering deferred children to scene texture causes them to be
-        // covered by blur textures in blit pass. Need to render children AFTER
-        // blur textures are drawn.
-        //
-        // TODO: Implement proper layering:
-        // 1. Blit: draw scene texture (background only)
-        // 2. Blit: draw blur textures (frosted glass background)
-        // 3. Vello render: draw deferred children on top of blur
+        // === PASS 3: Render deferred children to separate texture ===
+        // Create a texture for children that will be drawn AFTER blur textures
+        // This ensures children appear sharp on top of the blurred background
+        let mut children_scene = Scene::new();
+        let mut has_children = false;
+
+        {
+            let blurred_textures = self.blurred_textures.lock().unwrap();
+
+            for entry in blurred_textures.iter() {
+                if entry.deferred_children.is_empty() {
+                    continue;
+                }
+                has_children = true;
+
+                let g = shared_state.lock().unwrap();
+                let mut editors = self.editors.lock().unwrap();
+
+                // Calculate global position from transform
+                let affine = entry.transform;
+                let mat = affine.as_coeffs();
+                let global_x = mat[4];
+                let global_y = mat[5];
+
+                // Render each deferred child
+                for &child_id in &entry.deferred_children {
+                    render_deferred_child(
+                        child_id,
+                        &g,
+                        &mut editors,
+                        &mut children_scene,
+                        Vec2::new(global_x, global_y),
+                    );
+                }
+            }
+        }
+
+        // Create or update children texture
+        let children_texture = if has_children {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Children Texture"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Render children scene to texture
+            if let Err(e) = renderer.render_to_texture(
+                device,
+                queue,
+                &children_scene,
+                &view,
+                &vello::RenderParams {
+                    base_color: Color::TRANSPARENT,
+                    width: w,
+                    height: h,
+                    antialiasing_method: aa_config,
+                }
+            ) {
+                log::warn!("[Blur] Failed to render children texture: {:?}", e);
+                None
+            } else {
+                Some((texture, view))
+            }
+        } else {
+            None
+        };
 
         // Single present: blit the combined result (main scene + optional overlay) to screen
         match v_surface_surface.surface.get_current_texture() {
@@ -1166,21 +1233,35 @@ impl VelloBackend {
                     // Clear blurred textures after drawing
                     drop(blurred_textures);
                     self.blurred_textures.lock().unwrap().clear();
-                }
 
-                // === Render deferred children (for frosted glass effect) ===
-                // Children of blur views were not rendered in Pass 1 to avoid being blurred.
-                // Now we render them on top of the blurred background.
-                // Note: This is done using Vello by rendering to a temporary texture,
-                // then compositing in the blit pass.
-                //
-                // For simplicity, we skip this step for now. The children will not be visible
-                // on top of the blurred background until this is implemented.
-                //
-                // TODO: Implement deferred children rendering:
-                // 1. Create a new Vello scene with deferred children
-                // 2. Render to a temporary texture
-                // 3. Draw the texture in the blit pass
+                    // === Draw children texture on top of blur ===
+                    // This ensures children appear sharp on top of the blurred background
+                    if let Some((_, ref children_view)) = children_texture {
+                        // Create bind group for children texture using the same layout as blit
+                        let children_bind_group = device.create_bind_group(
+                            &wgpu::BindGroupDescriptor {
+                                label: Some("Children Blit Bind Group"),
+                                layout: self.blit_bind_group_layout.lock().unwrap().as_ref().unwrap(),
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(children_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(
+                                            self.sampler.lock().unwrap().as_ref().unwrap()
+                                        ),
+                                    },
+                                ],
+                            });
+
+                        // Draw children texture with alpha blending on top of everything
+                        rp.set_pipeline(blit_pipeline);
+                        rp.set_bind_group(0, &children_bind_group, &[]);
+                        rp.draw(0..3, 0..1);
+                    }
+                }
 
                 queue.submit(Some(enc.finish())); 
                 stage_timer.mark("blit_submit");
@@ -1619,24 +1700,26 @@ fn render_node_recursive_with_transform(
         }
 
         // === Step 5: Recursively render children ===
-        // NOTE: Temporarily render children even for blur views.
-        // They will be covered by the blur texture in the blit pass.
-        // Proper layering (children on top of blur) requires additional render pass.
-        let local_pos = global_pos + pos_offset;
-        for &child_id in &node.children {
-            render_node_recursive_with_transform(
-                child_id,
-                state,
-                editors,
-                scene,
-                local_pos,
-                transform,
-                device,
-                queue,
-                renderer,
-                filter_pipeline,
-                blurred_textures,
-            );
+        // For blur views: skip children in Pass 1, they will be rendered to
+        // a separate texture in Pass 3 and composited on top of blur in blit pass.
+        // For non-blur views: render children normally.
+        if !blur_applied {
+            let local_pos = global_pos + pos_offset;
+            for &child_id in &node.children {
+                render_node_recursive_with_transform(
+                    child_id,
+                    state,
+                    editors,
+                    scene,
+                    local_pos,
+                    transform,
+                    device,
+                    queue,
+                    renderer,
+                    filter_pipeline,
+                    blurred_textures,
+                );
+            }
         }
 
         // === Step 6: Pop Layer (if pushed) ===
