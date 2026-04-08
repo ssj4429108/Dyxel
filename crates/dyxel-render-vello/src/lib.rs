@@ -44,7 +44,7 @@ type AsyncShared<T> = std::sync::Arc<std::sync::Mutex<T>>;
 /// Entry for a blurred texture to be composited
 #[derive(Debug)]
 struct BlurredTextureEntry {
-    /// The blurred texture
+    /// The blurred texture (contains blurred background for frosted glass)
     texture: wgpu::Texture,
     /// Width of the texture
     width: u32,
@@ -54,6 +54,18 @@ struct BlurredTextureEntry {
     transform: Affine,
     /// Opacity of the blurred content
     opacity: f32,
+    /// View color to overlay (for frosted glass effect)
+    overlay_color: vello::peniko::Color,
+    /// Border radius
+    border_radius: f64,
+    /// Source rectangle in scene texture (for two-pass rendering)
+    source_rect: (f32, f32, f32, f32), // (x, y, width, height) in scene coordinates
+    /// Deferred children to render on top of blurred background
+    deferred_children: Vec<u32>,
+    /// View ID for deferred rendering
+    view_id: u32,
+    /// Blur radius
+    blur_radius: f32,
 }
 
 /// Vello render backend implementation
@@ -94,6 +106,7 @@ pub struct VelloBackend {
     blur_composite_pipeline: SharedMutex<Option<wgpu::RenderPipeline>>,
     blur_composite_bind_group_layout: SharedMutex<Option<wgpu::BindGroupLayout>>,
     blur_composite_uniforms: SharedMutex<Option<wgpu::Buffer>>,
+    blur_composite_overlay_uniforms: SharedMutex<Option<wgpu::Buffer>>,
     // Blurred textures to composite (cleared each frame)
     blurred_textures: SharedMutex<Vec<BlurredTextureEntry>>,
 }
@@ -133,6 +146,7 @@ impl VelloBackend {
             blur_composite_pipeline: SharedMutex::new(None),
             blur_composite_bind_group_layout: SharedMutex::new(None),
             blur_composite_uniforms: SharedMutex::new(None),
+            blur_composite_overlay_uniforms: SharedMutex::new(None),
             blurred_textures: SharedMutex::new(Vec::new()),
         }
     }
@@ -457,7 +471,7 @@ impl VelloBackend {
 
     /// Create blur composite pipeline with specific format
     fn create_blur_composite_pipeline(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        // Create bind group layout with uniform buffer for transform
+        // Create bind group layout with uniform buffer for transform and overlay
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Blur Composite Bind Group Layout"),
             entries: &[
@@ -487,6 +501,16 @@ impl VelloBackend {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -494,6 +518,14 @@ impl VelloBackend {
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Blur Composite Uniform Buffer"),
             size: 48, // 3 * 16 bytes (aligned vec4s)
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create overlay uniform buffer (color + radius + size = 32 bytes)
+        let overlay_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Blur Overlay Uniform Buffer"),
+            size: 32, // 2 * 16 bytes (aligned vec4s)
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -542,6 +574,7 @@ impl VelloBackend {
         *self.blur_composite_pipeline.lock().unwrap() = Some(pipeline);
         *self.blur_composite_bind_group_layout.lock().unwrap() = Some(bind_group_layout);
         *self.blur_composite_uniforms.lock().unwrap() = Some(uniform_buffer);
+        *self.blur_composite_overlay_uniforms.lock().unwrap() = Some(overlay_uniform_buffer);
 
         log::info!("[Blur] Composite pipeline initialized");
     }
@@ -900,7 +933,81 @@ impl VelloBackend {
             }
         ).map_err(|e| anyhow::anyhow!("Vello render error: {:?}", e))?;
         stage_timer.mark("gpu_render");
-        
+
+        // === PASS 2: Process blur textures from scene ===
+        // For each blur view, sample from scene texture and apply blur
+        {
+            let blurred_textures = self.blurred_textures.lock().unwrap();
+            let filter_pipeline = self.filter_pipeline.lock().unwrap();
+
+            if !blurred_textures.is_empty() {
+                if let Some(pipeline) = filter_pipeline.as_ref() {
+                    let scene_texture = offscreen_texture.as_ref().map(|(t, _, _)| t)
+                        .expect("Scene texture should exist");
+
+                    for entry in blurred_textures.iter() {
+                        // Copy the region from scene texture to blur texture
+                        // The source rectangle is in screen coordinates
+                        let (src_x, src_y, src_w, src_h) = entry.source_rect;
+
+                        // Create a command encoder for copy and blur operations
+                        let mut enc = device.create_command_encoder(
+                            &wgpu::CommandEncoderDescriptor {
+                                label: Some("Blur Pass 2 Encoder"),
+                            });
+
+                        // Copy region from scene texture to blur texture
+                        // Note: We need to account for padding in the blur texture
+                        let padding = ((entry.width as f32 - src_w) / 2.0) as u32;
+
+                        enc.copy_texture_to_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: scene_texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d {
+                                    x: src_x.max(0.0) as u32,
+                                    y: src_y.max(0.0) as u32,
+                                    z: 0,
+                                },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &entry.texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d {
+                                    x: padding,
+                                    y: padding,
+                                    z: 0,
+                                },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::Extent3d {
+                                width: src_w.min(src_x.max(0.0) + src_w).max(0.0) as u32,
+                                height: src_h.min(src_y.max(0.0) + src_h).max(0.0) as u32,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+
+                        queue.submit(Some(enc.finish()));
+
+                        // Now apply blur to the copied content
+                        // Use the blur radius from the view
+                        let blur_radius = entry.blur_radius;
+
+                        if blur_radius > 0.0 {
+                            if let Err(e) = pipeline.apply_blur(
+                                &entry.texture,
+                                &entry.texture,
+                                blur_radius,
+                            ) {
+                                log::warn!("[Blur] Failed to apply blur in pass 2: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Single present: blit the combined result (main scene + optional overlay) to screen
         match v_surface_surface.surface.get_current_texture() {
             Ok(st) => {
@@ -947,9 +1054,10 @@ impl VelloBackend {
                         let blur_pipeline = self.blur_composite_pipeline.lock().unwrap();
                         let blur_bg_layout = self.blur_composite_bind_group_layout.lock().unwrap();
                         let uniform_buffer = self.blur_composite_uniforms.lock().unwrap();
+                        let overlay_uniform_buffer = self.blur_composite_overlay_uniforms.lock().unwrap();
 
-                        if let (Some(pipeline), Some(layout), Some(uniforms)) =
-                            (blur_pipeline.as_ref(), blur_bg_layout.as_ref(), uniform_buffer.as_ref()) {
+                        if let (Some(pipeline), Some(layout), Some(uniforms), Some(overlay_uniforms)) =
+                            (blur_pipeline.as_ref(), blur_bg_layout.as_ref(), uniform_buffer.as_ref(), overlay_uniform_buffer.as_ref()) {
 
                             // Create sampler
                             let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -995,6 +1103,23 @@ impl VelloBackend {
 
                                 queue.write_buffer(uniforms, 0, bytemuck::cast_slice(&uniform_data));
 
+                                // Write overlay uniform data
+                                // Convert color to premultiplied linear RGB
+                                let color = entry.overlay_color;
+                                let [r, g, b, a] = color.components;
+
+                                let overlay_data: [f32; 8] = [
+                                    // Row 0: color_r, color_g, color_b, color_a (premultiplied)
+                                    r * a, g * a, b * a, a,
+                                    // Row 1: border_radius, view_width, view_height, pad
+                                    entry.border_radius as f32,
+                                    entry.width as f32,
+                                    entry.height as f32,
+                                    0.0,
+                                ];
+
+                                queue.write_buffer(overlay_uniforms, 0, bytemuck::cast_slice(&overlay_data));
+
                                 let texture_view = entry.texture.create_view(
                                     &wgpu::TextureViewDescriptor::default());
 
@@ -1014,6 +1139,10 @@ impl VelloBackend {
                                             wgpu::BindGroupEntry {
                                                 binding: 2,
                                                 resource: uniforms.as_entire_binding(),
+                                            },
+                                            wgpu::BindGroupEntry {
+                                                binding: 3,
+                                                resource: overlay_uniforms.as_entire_binding(),
                                             },
                                         ],
                                     });
@@ -1140,17 +1269,19 @@ pub fn platform_correction(viewport_height: f64) -> Affine {
     }
 }
 
-/// Render a node with layer effects (alpha, blur, shadow, clip)
-/// Render node content with blur effect applied
+/// Render node content with blur effect applied (Two-pass frosted glass)
 ///
-/// This creates an offscreen texture, renders the node content to it,
-/// applies blur using compute shaders, and draws the result to the main scene.
+/// In the two-pass approach:
+/// 1. First pass: Render all content to scene texture (done by caller)
+/// 2. Second pass: Sample from scene texture, apply blur, overlay color
+///
+/// This function prepares the blur entry for the second pass.
 fn render_with_blur(
     node: &dyxel_shared::ViewNode,
     id: u32,
-    state: &SharedState,
-    editors: &mut std::collections::HashMap<u32, Editor>,
-    scene: &mut Scene,
+    _state: &SharedState,
+    _editors: &mut std::collections::HashMap<u32, Editor>,
+    _scene: &mut Scene,
     local_transform: Affine,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1161,8 +1292,9 @@ fn render_with_blur(
     needs_layer: bool,
     blurred_textures: &mut Vec<BlurredTextureEntry>,
 ) -> bool {
-    use vello::peniko::{Fill, Color};
-    use kurbo::{Rect as KRect, RoundedRect};
+    // Unused imports - kept for reference but not needed in two-pass approach
+    // use vello::peniko::{Fill, Color};
+    // use kurbo::{Rect as KRect, RoundedRect};
 
     // Calculate padded size for blur (need extra space for blur bleed)
     let blur_radius = node.blur_radius as f64;
@@ -1170,7 +1302,7 @@ fn render_with_blur(
     let texture_width = (node_width as u32 + padding * 2).max(1);
     let texture_height = (node_height as u32 + padding * 2).max(1);
 
-    // Create offscreen texture for rendering
+    // Create offscreen texture for the blurred result
     let texture_desc = wgpu::TextureDescriptor {
         label: Some("Blur Offscreen Texture"),
         size: wgpu::Extent3d {
@@ -1189,117 +1321,30 @@ fn render_with_blur(
     };
 
     let offscreen_texture = device.create_texture(&texture_desc);
-    let texture_view = offscreen_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Create intermediate texture for ping-pong blur
-    let intermediate_desc = wgpu::TextureDescriptor {
-        label: Some("Blur Intermediate Texture"),
-        size: wgpu::Extent3d {
-            width: texture_width / 4,
-            height: texture_height / 4,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::STORAGE_BINDING,
-        view_formats: &[],
-    };
-
-    let _intermediate_texture = device.create_texture(&intermediate_desc);
-
-    // Create a temporary scene for this node and its children
-    let mut temp_scene = Scene::new();
-
-    // Adjust transform to account for padding
-    let offset_transform = Affine::translate((padding as f64, padding as f64));
-
-    // For frosted glass effect, we want to blur what's BEHIND the view
-    // Current architecture limitation: single-pass top-down rendering
-    // The background hasn't been rendered yet when we process this view
+    // NOTE: For true two-pass frosted glass, we don't render anything here.
+    // The blur texture will be created AFTER the main scene is rendered,
+    // by sampling from the scene texture and applying blur.
     //
-    // Current approach:
-    // 1. Render view's own content (color + children) to temp scene
-    // 2. Apply blur to this content
-    // 3. Result: the view content itself is blurred, NOT the background
+    // This ensures we blur the actual background content, not a temp scene.
     //
-    // For TRUE frosted glass (blur background), we need:
-    // - Two-pass rendering, OR
-    // - Sample from already-rendered scene texture (backdrop blur)
-    //
-    // For now, we keep current behavior but note the limitation
-
-    // Render view's background
-    let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
-    if node.border_radius > 0.0 {
-        let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
-        temp_scene.fill(Fill::NonZero, offset_transform, node.color, None, &rounded);
-    } else {
-        temp_scene.fill(Fill::NonZero, offset_transform, node.color, None, &rect);
-    }
-
-    // Render text if present
-    if node.view_type == ViewType::Text {
-        if let Some(editor) = editors.get_mut(&id) {
-            editor.set_width(None);
-            editor.draw(&mut temp_scene, offset_transform);
-        }
-    }
-
-    // Render children to temp scene
-    for &child_id in &node.children {
-        render_child_to_blur_scene(
-            child_id,
-            state,
-            editors,
-            &mut temp_scene,
-            offset_transform,
-            padding as f64,
-        );
-    }
-
-    // Pop layer if one was pushed in the main render function
-    // The layer is always pushed when needs_layer is true (before blur check)
-    if needs_layer {
-        scene.pop_layer();
-    }
-
-    // Render temp scene to offscreen texture
-    let render_params = vello::RenderParams {
-        base_color: Color::TRANSPARENT,
-        width: texture_width,
-        height: texture_height,
-        antialiasing_method: vello::AaConfig::Area,
-    };
-
-    log::debug!("[Blur] Rendering to offscreen texture {}x{}", texture_width, texture_height);
-    if let Err(e) = renderer.render_to_texture(
-        device,
-        queue,
-        &temp_scene,
-        &texture_view,
-        &render_params,
-    ) {
-        log::warn!("[Blur] Failed to render to offscreen texture: {:?}", e);
-        return false;
-    }
-    log::debug!("[Blur] Offscreen render complete");
-
-    // Apply blur using filter pipeline
-    if let Err(e) = filter_pipeline.apply_blur(
-        &offscreen_texture,
-        &offscreen_texture,
-        node.blur_radius,
-    ) {
-        log::warn!("[Blur] Failed to apply blur: {:?}", e);
-        return false;
-    }
+    // Flow:
+    // 1. Scene building: record blur view info (position, size, etc.)
+    // 2. render_to_texture: render main scene
+    // 3. Post-process: for each blur view, sample from scene texture, blur it
+    // 4. Blit: draw scene, then blurred textures, then deferred children
 
     // Store the blurred texture for compositing in the final blit pass
     // Adjust transform to account for the padding offset
     let final_transform = local_transform * Affine::translate((-(padding as f64), -(padding as f64)));
+
+    // Calculate source rectangle in scene coordinates for two-pass rendering
+    // This will be used in the second pass to sample from the scene texture
+    let source_x = local_transform.as_coeffs()[4] as f32;  // translation x
+    let source_y = local_transform.as_coeffs()[5] as f32;  // translation y
+
+    // Collect deferred children - they will be rendered after the blurred background
+    let deferred_children: Vec<u32> = node.children.clone();
 
     blurred_textures.push(BlurredTextureEntry {
         texture: offscreen_texture,
@@ -1307,27 +1352,16 @@ fn render_with_blur(
         height: texture_height,
         transform: final_transform,
         opacity: node.opacity,
+        overlay_color: node.color,
+        border_radius: node.border_radius as f64,
+        source_rect: (source_x, source_y, node_width as f32, node_height as f32),
+        deferred_children,
+        view_id: id,
+        blur_radius: node.blur_radius,
     });
 
-    // Draw children that extend beyond bounds (if not clipped)
-    if !node.clip_to_bounds {
-        let local_pos = Vec2::new(node_width / 2.0, node_height / 2.0);
-        for &child_id in &node.children {
-            render_node_recursive_with_transform(
-                child_id,
-                state,
-                editors,
-                scene,
-                local_pos,
-                local_transform,
-                device,
-                queue,
-                renderer,
-                Some(filter_pipeline),
-                blurred_textures,
-            );
-        }
-    }
+    // Children are deferred - don't render them here
+    // They will be rendered after the blurred background is composited
 
     true
 }
@@ -1514,29 +1548,33 @@ fn render_node_recursive_with_transform(
         }
 
         // === Step 5: Recursively render children ===
-        // Skip children if blur was applied (they're rendered into the blur texture)
-        if !blur_applied {
-            let local_pos = global_pos + pos_offset;
-            for &child_id in &node.children {
-                render_node_recursive_with_transform(
-                    child_id,
-                    state,
-                    editors,
-                    scene,
-                    local_pos,
-                    transform,
-                    device,
-                    queue,
-                    renderer,
-                    filter_pipeline,
-                    blurred_textures,
-                );
-            }
+        // For frosted glass effect, children are rendered on top of the blurred background
+        // The blurred background is composited in the blit pass, then children are rendered
+        // in the main scene on top of it.
+        //
+        // Note: Previously we skipped children here when blur was applied (they were rendered
+        // into the blur texture). Now we always render children in the main scene so they
+        // appear sharp on top of the blurred background.
+        let local_pos = global_pos + pos_offset;
+        for &child_id in &node.children {
+            render_node_recursive_with_transform(
+                child_id,
+                state,
+                editors,
+                scene,
+                local_pos,
+                transform,
+                device,
+                queue,
+                renderer,
+                filter_pipeline,
+                blurred_textures,
+            );
         }
 
-        // === Step 6: Pop Layer (if pushed and blur wasn't applied) ===
-        // If blur was applied, the layer was already popped in render_with_blur
-        if needs_layer && !blur_applied {
+        // === Step 6: Pop Layer (if pushed) ===
+        // Layer is always popped here, regardless of blur (blur doesn't pop layer anymore)
+        if needs_layer {
             scene.pop_layer();
         }
     }
