@@ -77,6 +77,8 @@ pub struct VelloBackend {
     pub sampler: SharedMutex<Option<wgpu::Sampler>>,
     pub blit_shader: SharedMutex<Option<wgpu::ShaderModule>>,
     pub blit_pipeline: SharedMutex<Option<wgpu::RenderPipeline>>,
+    // Pipeline for rendering children texture with alpha blending
+    children_blit_pipeline: SharedMutex<Option<wgpu::RenderPipeline>>,
     pub pipeline_cache: AsyncShared<Option<wgpu::PipelineCache>>,
     pub cache_path: AsyncShared<Option<String>>,
     pub cache_saved: AtomicBool,
@@ -129,6 +131,7 @@ impl VelloBackend {
             sampler: SharedMutex::new(None),
             blit_shader: SharedMutex::new(None),
             blit_pipeline: SharedMutex::new(None),
+            children_blit_pipeline: SharedMutex::new(None),
             pipeline_cache: AsyncShared::new(std::sync::Mutex::new(None)),
             cache_path: AsyncShared::new(std::sync::Mutex::new(None)),
             cache_saved: AtomicBool::new(false),
@@ -1257,7 +1260,13 @@ impl VelloBackend {
                             });
 
                         // Draw children texture with alpha blending on top of everything
-                        rp.set_pipeline(blit_pipeline);
+                        // Use children_blit_pipeline which has ALPHA_BLENDING
+                        if let Some(ref children_pipeline) = *self.children_blit_pipeline.lock().unwrap() {
+                            rp.set_pipeline(children_pipeline);
+                        } else {
+                            // Fallback to blit_pipeline if children pipeline not ready
+                            rp.set_pipeline(blit_pipeline);
+                        }
                         rp.set_bind_group(0, &children_bind_group, &[]);
                         rp.draw(0..3, 0..1);
                     }
@@ -1967,7 +1976,35 @@ impl RenderBackend for VelloBackend {
         });
 
         log::info!("VelloBackend: Blit pipeline created successfully");
-        
+
+        // Create children blit pipeline with alpha blending
+        let children_blit_p = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Children Blit Pipeline"),
+            layout: Some(&bl),
+            vertex: wgpu::VertexState {
+                module: blit_shader_lock.as_ref().unwrap(),
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default()
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: blit_shader_lock.as_ref().unwrap(),
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: v_surface.config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL
+                })],
+                compilation_options: Default::default()
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: self.pipeline_cache.lock().unwrap().as_ref()
+        });
+        *self.children_blit_pipeline.lock().unwrap() = Some(children_blit_p);
+
         #[cfg(target_os = "macos")]
         {
             log::info!("VelloBackend: Creating MacVelloSurfaceState");
