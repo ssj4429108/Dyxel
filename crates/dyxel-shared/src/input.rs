@@ -6,10 +6,27 @@
 //! Defines standardized input event format and ring buffer for high-frequency
 //! input interaction between host environment and WASM.
 
+// Compile-time assertions for memory layout safety
+const _: () = {
+    assert!(
+        std::mem::align_of::<KeyEventData>() <= std::mem::align_of::<RawInputEvent>(),
+        "KeyEventData alignment must not exceed RawInputEvent alignment"
+    );
+    assert!(
+        std::mem::align_of::<TextInputData>() <= std::mem::align_of::<RawInputEvent>(),
+        "TextInputData alignment must not exceed RawInputEvent alignment"
+    );
+    assert!(
+        std::mem::size_of::<RawInputEvent>() == 72,
+        "RawInputEvent size must be 72 bytes for FFI compatibility"
+    );
+};
+
 /// Input event types
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputEventType {
+    #[default]
     /// Pointer pressed
     PointerDown = 0,
     /// Pointer moved
@@ -83,9 +100,15 @@ pub struct TextInputData {
     pub _padding: [u8; 6],
 }
 
-/// Raw input event
+/// Raw input event from Host to WASM
 ///
-/// Fixed 64-byte size for predictable memory layout and efficient transfer.
+/// Design notes:
+/// - For pointer events: x, y, pressure contain meaningful values
+/// - For keyboard events: x, y, pressure are reused for quick access to key_code, char_code, modifiers
+///   (payload contains the full structured data)
+/// - The dual storage allows quick access without parsing payload for common fields
+///
+/// Fixed 72-byte size for predictable memory layout and efficient transfer.
 /// Fields are ordered to minimize padding while maintaining alignment.
 ///
 /// NOTE: event_type is stored as u8 for guaranteed cross-platform compatibility
@@ -133,7 +156,7 @@ impl RawInputEvent {
     pub fn as_key_event(&self) -> Option<KeyEventData> {
         if matches!(self.event_type, 5 | 6) {
             // KeyDown = 5, KeyUp = 6
-            unsafe { Some(std::ptr::read(self.payload.as_ptr() as *const _)) }
+            unsafe { Some(std::mem::transmute_copy(&self.payload)) }
         } else {
             None
         }
@@ -143,7 +166,7 @@ impl RawInputEvent {
     pub fn as_text_input(&self) -> Option<TextInputData> {
         if matches!(self.event_type, 7 | 8 | 9) {
             // TextInput = 7, ImeComposition = 8, ImeCommit = 9
-            unsafe { Some(std::ptr::read(self.payload.as_ptr() as *const _)) }
+            unsafe { Some(std::mem::transmute_copy(&self.payload)) }
         } else {
             None
         }
