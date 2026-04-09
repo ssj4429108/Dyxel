@@ -1,24 +1,38 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::sync::Arc;
-use winit::{event::*, event_loop::{ControlFlow, EventLoop}, window::WindowBuilder};
 use dyxel_core::DyxelHost;
 use kurbo::Vec2;
+use std::sync::Arc;
 use std::thread;
+use winit::{
+    event::*,
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
 
+mod context_menu;
 mod touch;
+use context_menu::MacContextMenu;
+use dyxel_core::text_input::TextInputManager;
 use touch::TouchTracker;
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new()?;
-    let window = Arc::new(WindowBuilder::new()
-        .with_title("Dyxel Native (macOS)")
-        .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0))
-        .build(&event_loop)?);
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("Dyxel Native (macOS)")
+            .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0))
+            .build(&event_loop)?,
+    );
 
     let host = DyxelHost::new();
+
+    // Initialize TextInput context menu integration
+    TextInputManager::with(|manager| {
+        manager.set_context_menu_integration(Box::new(MacContextMenu::new()));
+    });
 
     // Start preparing engine in background thread
     let h_init = host.clone();
@@ -36,8 +50,8 @@ fn main() -> anyhow::Result<()> {
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum GestureMode {
         None,
-        Scale,      // Two fingers horizontal, distance changes with mouse x
-        Rotation,   // Two fingers rotate around center with mouse movement
+        Scale,    // Two fingers horizontal, distance changes with mouse x
+        Rotation, // Two fingers rotate around center with mouse movement
     }
     let mut gesture_mode = GestureMode::None;
     let mut gesture_center = Vec2::ZERO;
@@ -170,10 +184,11 @@ fn main() -> anyhow::Result<()> {
                 last_mouse_pos = mouse_pos;
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
+                eprintln!("[MACOS] Mouse Left Pressed at ({}, {})", mouse_pos.x, mouse_pos.y);
                 mouse_pressed = true;
-                if !touch_tracker.has_active_touches() {
-                    host.on_pointer_down(0, mouse_pos.x as f32, mouse_pos.y as f32, 1.0);
-                }
+                // Always process mouse events for now (ignore touch_tracker state)
+                eprintln!("[MACOS] Calling host.on_pointer_down({}, {}, {})", 0, mouse_pos.x, mouse_pos.y);
+                host.on_pointer_down(0, mouse_pos.x as f32, mouse_pos.y as f32, 1.0);
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. }, .. } => {
                 mouse_pressed = false;
@@ -182,12 +197,110 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
-            Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                logical_key: winit::keyboard::Key::Character(c),
+            // Keyboard input handling - TextInput takes priority over global shortcuts
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput {
+                    event: KeyEvent {
+                        state: ElementState::Pressed,
+                        logical_key,
+                        text,
+                        repeat,
+                        ..
+                    },
+                    ..
+                },
                 ..
-            }, .. }, .. } if c == "p" || c == "P" => {
-                host.toggle_perf_overlay();
+            } => {
+                // Ignore repeat key events (long press)
+                if repeat {
+                    return;
+                }
+
+                // Check if there's a focused text input
+                let focused = dyxel_core::text_input::focused_id();
+                if focused != 0 {
+                    // There is a focused text input - send text input events
+                    if let Some(t) = text {
+                        dyxel_core::handle_text_input(&t);
+                    } else {
+                        // Handle special keys (Backspace, Enter, Delete, etc.)
+                        match logical_key {
+                            winit::keyboard::Key::Named(named) => {
+                                match named {
+                                    winit::keyboard::NamedKey::Backspace => {
+                                        dyxel_core::handle_text_input("\u{8}"); // Backspace char
+                                    }
+                                    winit::keyboard::NamedKey::Enter => {
+                                        dyxel_core::handle_text_input("\n");
+                                    }
+                                    winit::keyboard::NamedKey::Delete => {
+                                        dyxel_core::handle_text_input("\u{7F}"); // Delete char
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+
+                // No focused text input - handle global shortcuts
+                match logical_key {
+                    winit::keyboard::Key::Character(c) => match c.as_str() {
+                        "p" | "P" => {
+                            host.toggle_perf_overlay();
+                        }
+                        // Key 's' + drag to simulate scale gesture
+                        "s" | "S" => {
+                            if gesture_mode == GestureMode::None {
+                                let pos = mouse_pos;
+                                gesture_finger1_pos = Vec2::new(pos.x - 50.0, pos.y);
+                                gesture_finger2_pos = Vec2::new(pos.x + 50.0, pos.y);
+                                gesture_center = pos;
+                                gesture_mode = GestureMode::Scale;
+                                last_mouse_pos = pos;
+                                host.on_pointer_down(1000, gesture_finger1_pos.x as f32, gesture_finger1_pos.y as f32, 1.0);
+                                host.on_pointer_down(1001, gesture_finger2_pos.x as f32, gesture_finger2_pos.y as f32, 1.0);
+                                log::info!("Scale simulation mode ACTIVE: Move mouse horizontally to change finger distance, 'x' to exit");
+                            }
+                        }
+                        // Key 'r' + drag to simulate rotation gesture
+                        "r" | "R" => {
+                            if gesture_mode == GestureMode::None {
+                                let pos = mouse_pos;
+                                gesture_finger1_pos = Vec2::new(pos.x, pos.y - 50.0);
+                                gesture_finger2_pos = Vec2::new(pos.x, pos.y + 50.0);
+                                gesture_center = pos;
+                                gesture_mode = GestureMode::Rotation;
+                                last_mouse_pos = pos;
+                                host.on_pointer_down(1000, gesture_finger1_pos.x as f32, gesture_finger1_pos.y as f32, 1.0);
+                                host.on_pointer_down(1001, gesture_finger2_pos.x as f32, gesture_finger2_pos.y as f32, 1.0);
+                                log::info!("Rotation simulation mode ACTIVE: Move mouse to rotate fingers, 'x' to exit");
+                            }
+                        }
+                        // Key 'x' to exit gesture simulation
+                        "x" | "X" => {
+                            if gesture_mode != GestureMode::None {
+                                host.on_pointer_up(1000, gesture_finger1_pos.x as f32, gesture_finger1_pos.y as f32);
+                                host.on_pointer_up(1001, gesture_finger2_pos.x as f32, gesture_finger2_pos.y as f32);
+                                gesture_mode = GestureMode::None;
+                                log::info!("Gesture simulation ended");
+                            }
+                        }
+                        // Key 'c' to toggle continuous render mode
+                        "c" | "C" => {
+                            use std::sync::atomic::{AtomicBool, Ordering};
+                            static CONTINUOUS: AtomicBool = AtomicBool::new(false);
+                            let new_state = !CONTINUOUS.load(Ordering::Relaxed);
+                            CONTINUOUS.store(new_state, Ordering::Relaxed);
+                            host.set_continuous_render(new_state);
+                            println!("Continuous render mode: {}", if new_state { "ON" } else { "OFF" });
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
             }
             // Mouse wheel with Option key to simulate pinch gesture
             // This is a workaround for winit 0.29 which doesn't support PinchGesture on macOS
@@ -245,68 +358,6 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-            }
-
-            // Key 's' + drag to simulate scale gesture
-            // Key 'r' + drag to simulate rotation gesture
-            Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                logical_key: winit::keyboard::Key::Character(c),
-                ..
-            }, .. }, .. } if c == "s" || c == "S" => {
-                if gesture_mode == GestureMode::None {
-                    let pos = mouse_pos;
-                    gesture_finger1_pos = Vec2::new(pos.x - 50.0, pos.y);
-                    gesture_finger2_pos = Vec2::new(pos.x + 50.0, pos.y);
-                    gesture_center = pos;
-                    gesture_mode = GestureMode::Scale;
-                    last_mouse_pos = pos;
-                    host.on_pointer_down(1000, gesture_finger1_pos.x as f32, gesture_finger1_pos.y as f32, 1.0);
-                    host.on_pointer_down(1001, gesture_finger2_pos.x as f32, gesture_finger2_pos.y as f32, 1.0);
-                    log::info!("Scale simulation mode ACTIVE: Move mouse horizontally to change finger distance, 'x' to exit");
-                }
-            }
-            Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                logical_key: winit::keyboard::Key::Character(c),
-                ..
-            }, .. }, .. } if c == "r" || c == "R" => {
-                if gesture_mode == GestureMode::None {
-                    let pos = mouse_pos;
-                    gesture_finger1_pos = Vec2::new(pos.x, pos.y - 50.0);
-                    gesture_finger2_pos = Vec2::new(pos.x, pos.y + 50.0);
-                    gesture_center = pos;
-                    gesture_mode = GestureMode::Rotation;
-                    last_mouse_pos = pos;
-                    host.on_pointer_down(1000, gesture_finger1_pos.x as f32, gesture_finger1_pos.y as f32, 1.0);
-                    host.on_pointer_down(1001, gesture_finger2_pos.x as f32, gesture_finger2_pos.y as f32, 1.0);
-                    log::info!("Rotation simulation mode ACTIVE: Move mouse to rotate fingers, 'x' to exit");
-                }
-            }
-            Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                logical_key: winit::keyboard::Key::Character(c),
-                ..
-            }, .. }, .. } if c == "x" || c == "X" => {
-                if gesture_mode != GestureMode::None {
-                    host.on_pointer_up(1000, gesture_finger1_pos.x as f32, gesture_finger1_pos.y as f32);
-                    host.on_pointer_up(1001, gesture_finger2_pos.x as f32, gesture_finger2_pos.y as f32);
-                    gesture_mode = GestureMode::None;
-                    log::info!("Gesture simulation ended");
-                }
-            }
-
-            Event::WindowEvent { event: WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                logical_key: winit::keyboard::Key::Character(c),
-                ..
-            }, .. }, .. } if c == "c" || c == "C" => {
-                use std::sync::atomic::{AtomicBool, Ordering};
-                static CONTINUOUS: AtomicBool = AtomicBool::new(false);
-                let new_state = !CONTINUOUS.load(Ordering::Relaxed);
-                CONTINUOUS.store(new_state, Ordering::Relaxed);
-                host.set_continuous_render(new_state);
-                println!("Continuous render mode: {}", if new_state { "ON" } else { "OFF" });
             }
             _ => {}
         }
