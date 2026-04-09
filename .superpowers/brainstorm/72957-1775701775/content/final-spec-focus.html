@@ -1,0 +1,63 @@
+<h2>TextInput 深度设计：响应式、事务与焦点系统</h2>
+<p class="subtitle">融合 Xilem 响应式理念与 Flutter 解耦合架构的完整设计</p>
+
+<div class="cards" data-multiselect>
+  <div class="card">
+    <div class="card-body">
+      <h3>1. 混合事务架构 (The Hybrid Engine)</h3>
+      <p>采用解耦合模型。Native (Host) 仅作为 IME 代理，WASM (Guest) 作为状态真相。二者通过 <code>TextTransaction</code> 异步同步。</p>
+      <ul style="font-size: 11px;">
+        <li><b>Native:</b> 处理按键、联想词、选区手势，发送 Delta。</li>
+        <li><b>WASM:</b> 校验 Delta，更新 Signal，计算 Vello 渲染参数。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>2. 响应式值 API (Reactive Value)</h3>
+      <p>放弃简单的 String 信号，引入打包的 <code>TextState</code>。支持光标、选区、组合状态的完整响应式追踪。</p>
+      <pre style="font-size: 10px; background: #f4f4f4;"><code>let state = create_signal(TextState::new(""));
+TextInput {
+  value: state,
+  on_change: |val| state.set(val),
+}</code></pre>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body" style="border-left: 4px solid var(--primary);">
+      <h3>3. 焦点抢占系统 (Focus Preemption)</h3>
+      <p><b>核心改进：</b> 引入全局 FocusManager，支持声明式焦点切换与抢占。</p>
+      <ul style="font-size: 11px;">
+        <li><b>自动抢占：</b> 点击新节点自动触发旧节点 Blur 事务同步。</li>
+        <li><b>FocusScope：</b> 支持局部焦点隔离（如弹窗内）。</li>
+        <li><b>Native 同步：</b> 焦点切换即时同步键盘类型（数字/文本）。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h3>4. WASM 像素级渲染 (Vello Render)</h3>
+      <p>Native 仅负责输入，不负责显示。Vello 渲染所有视觉元素，保证全平台一致性。</p>
+      <ul style="font-size: 11px;">
+        <li>自定义闪烁光标（支持平滑呼吸动画）。</li>
+        <li>高性能选区高亮（半透明遮罩）。</li>
+        <li>IME 组合区下划线渲染。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">焦点抢占时序图</div>
+  <div class="mockup-body" style="padding: 10px; font-size: 11px; font-family: monospace;">
+    User Click B:<br>
+    [WASM] -> Bridge: node_target = B<br>
+    [WASM] -> FocusManager: request_focus(B)<br>
+    [WASM] -> Current(A): blur() -> send FinalTransaction(A)<br>
+    [WASM] -> New(B): focus() -> send SetIMEOptions(B)<br>
+    [Native] -> Show/Update Keyboard for B
+  </div>
+</div>

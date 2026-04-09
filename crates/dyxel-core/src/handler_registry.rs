@@ -17,6 +17,10 @@ pub enum HandlerType {
     Pan,
     Scale,
     Rotation,
+    /// Pointer down (for press effects)
+    PointerDown,
+    /// Pointer up (for press effects)
+    PointerUp,
 }
 
 /// Gesture type bitflags for RegisterGesture
@@ -71,9 +75,9 @@ impl Default for GestureConfig {
     fn default() -> Self {
         Self {
             tap_count: 1,
-            multi_click_gap_ms: 300,      // Flutter default
-            long_press_timeout_ms: 500,   // Flutter default
-            slop: 18.0,                   // Flutter kTouchSlop
+            multi_click_gap_ms: 300,    // Flutter default
+            long_press_timeout_ms: 500, // Flutter default
+            slop: 18.0,                 // Flutter kTouchSlop
             pan_direction: PanDirection::Any,
         }
     }
@@ -102,6 +106,10 @@ pub struct HandlerRegistry {
     pan_handlers: HashMap<u32, ()>,
     scale_handlers: HashMap<u32, ()>,
     rotation_handlers: HashMap<u32, ()>,
+    /// Pointer down handlers (for press effects)
+    pointer_down_handlers: HashMap<u32, ()>,
+    /// Pointer up handlers (for press effects)
+    pointer_up_handlers: HashMap<u32, ()>,
     /// Per-node gesture configuration (node_id -> (config_type, value))
     gesture_configs: HashMap<u32, HashMap<u8, u32>>,
     /// Per-node gesture config (V2 API)
@@ -116,6 +124,8 @@ impl HandlerRegistry {
             pan_handlers: HashMap::new(),
             scale_handlers: HashMap::new(),
             rotation_handlers: HashMap::new(),
+            pointer_down_handlers: HashMap::new(),
+            pointer_up_handlers: HashMap::new(),
             gesture_configs: HashMap::new(),
             node_configs: HashMap::new(),
         }
@@ -222,7 +232,11 @@ impl HandlerRegistry {
     pub fn get_config(&self, node_id: u32, config_type: u8) -> Option<u32> {
         match config_type {
             CONFIG_TAP_COUNT => self.tap_handlers.get(&node_id).copied(),
-            _ => self.gesture_configs.get(&node_id)?.get(&config_type).copied(),
+            _ => self
+                .gesture_configs
+                .get(&node_id)?
+                .get(&config_type)
+                .copied(),
         }
     }
 
@@ -250,6 +264,12 @@ impl HandlerRegistry {
             HandlerType::Rotation => {
                 self.rotation_handlers.insert(node_id, ());
             }
+            HandlerType::PointerDown => {
+                self.pointer_down_handlers.insert(node_id, ());
+            }
+            HandlerType::PointerUp => {
+                self.pointer_up_handlers.insert(node_id, ());
+            }
         };
     }
 
@@ -260,6 +280,8 @@ impl HandlerRegistry {
         self.pan_handlers.remove(&node_id);
         self.scale_handlers.remove(&node_id);
         self.rotation_handlers.remove(&node_id);
+        self.pointer_down_handlers.remove(&node_id);
+        self.pointer_up_handlers.remove(&node_id);
         self.gesture_configs.remove(&node_id);
         self.node_configs.remove(&node_id);
     }
@@ -275,6 +297,8 @@ impl HandlerRegistry {
             HandlerType::Pan => self.pan_handlers.contains_key(&node_id),
             HandlerType::Scale => self.scale_handlers.contains_key(&node_id),
             HandlerType::Rotation => self.rotation_handlers.contains_key(&node_id),
+            HandlerType::PointerDown => self.pointer_down_handlers.contains_key(&node_id),
+            HandlerType::PointerUp => self.pointer_up_handlers.contains_key(&node_id),
         }
     }
 
@@ -397,18 +421,12 @@ mod tests {
 
         // Find handler in bubble path
         let path = vec![5, 8, 10, 20]; // Leaf to root
-        assert_eq!(
-            registry.find_handler(&path, HandlerType::Tap(1)),
-            Some(10)
-        );
+        assert_eq!(registry.find_handler(&path, HandlerType::Tap(1)), Some(10));
         assert_eq!(
             registry.find_handler(&path, HandlerType::LongPress),
             Some(20)
         );
-        assert_eq!(
-            registry.find_handler(&path, HandlerType::Pan),
-            None
-        );
+        assert_eq!(registry.find_handler(&path, HandlerType::Pan), None);
 
         // Unregister
         registry.unregister(10);

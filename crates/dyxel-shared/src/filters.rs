@@ -132,11 +132,11 @@ impl Default for LayerAttribute {
             filter_type: FilterType::None,
             blur_radius: 0.0,
             matrix: [
-                1.0, 0.0, 0.0, 0.0,  // Red
-                0.0, 1.0, 0.0, 0.0,  // Green
-                0.0, 0.0, 1.0, 0.0,  // Blue
-                0.0, 0.0, 0.0, 1.0,  // Alpha
-                0.0, 0.0, 0.0, 0.0,  // Bias
+                1.0, 0.0, 0.0, 0.0, // Red
+                0.0, 1.0, 0.0, 0.0, // Green
+                0.0, 0.0, 1.0, 0.0, // Blue
+                0.0, 0.0, 0.0, 1.0, // Alpha
+                0.0, 0.0, 0.0, 0.0, // Bias
             ],
             opacity: 1.0,
             blend_mode: BlendMode::Normal as u32,
@@ -234,10 +234,7 @@ impl Filter {
 
     /// Create an asymmetric Gaussian blur filter
     pub fn blur_asymmetric(radius_x: f32, radius_y: f32) -> Self {
-        Filter::Blur {
-            radius_x,
-            radius_y,
-        }
+        Filter::Blur { radius_x, radius_y }
     }
 
     /// Create a drop shadow filter
@@ -258,11 +255,8 @@ impl Filter {
     /// Create an identity color matrix (no change)
     pub fn identity_matrix() -> [f32; 20] {
         [
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
-            0.0, 0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0,
         ]
     }
 
@@ -275,9 +269,7 @@ impl Filter {
     /// Returns (left, top, right, bottom) padding in pixels
     pub fn bounds_expansion(&self) -> (f32, f32, f32, f32) {
         match self {
-            Filter::Blur { radius_x, radius_y } => {
-                (*radius_x, *radius_y, *radius_x, *radius_y)
-            }
+            Filter::Blur { radius_x, radius_y } => (*radius_x, *radius_y, *radius_x, *radius_y),
             Filter::DropShadow {
                 dx,
                 dy,

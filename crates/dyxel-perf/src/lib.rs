@@ -89,7 +89,7 @@ pub trait SystemInfoProvider: Send + Sync {
     fn get_cpu_usage(&self) -> Option<f32> {
         None
     }
-    
+
     /// Get CPU temperature in Celsius (if available)
     fn get_temperature(&self) -> Option<f32> {
         None
@@ -229,14 +229,14 @@ impl PerformanceMonitor {
 
         *self.total_frames.lock().unwrap() += 1;
     }
-    
+
     /// Record async renderer startup time
     pub fn record_startup_time(&self, duration: Duration) {
         let ms = duration.as_secs_f32() * 1000.0;
         *self.startup_time_ms.lock().unwrap() = ms;
         log::info!("[PerfMonitor] Async renderer startup time: {:.2}ms", ms);
     }
-    
+
     /// Get the recorded startup time in milliseconds
     pub fn get_startup_time_ms(&self) -> f32 {
         *self.startup_time_ms.lock().unwrap()
@@ -278,7 +278,7 @@ impl PerformanceMonitor {
                     stats.cpu_usage = cpu;
                 }
             }
-            
+
             // Get temperature (if available)
             if let Some(temp) = self.system_info.get_temperature() {
                 stats.temperature_c = Some(temp);
@@ -289,7 +289,7 @@ impl PerformanceMonitor {
             cached.memory_used_mb = stats.memory_used_mb;
             cached.memory_available_mb = stats.memory_available_mb;
             cached.cpu_usage = stats.cpu_usage;
-            
+
             // Record memory history for leak detection
             if self.config.enable_memory && stats.memory_used_mb > 0.0 {
                 let mut history = self.memory_history.lock().unwrap();
@@ -312,29 +312,29 @@ impl PerformanceMonitor {
         stats.timestamp_ms = now.elapsed().as_millis() as u64;
         stats
     }
-    
+
     /// Get memory usage history for leak detection
     pub fn get_memory_history(&self) -> Vec<MemoryHistoryEntry> {
         self.memory_history.lock().unwrap().clone()
     }
-    
+
     /// Analyze memory trend (returns MB per minute)
     pub fn get_memory_trend(&self) -> f32 {
         let history = self.memory_history.lock().unwrap();
         if history.len() < 2 {
             return 0.0;
         }
-        
+
         let first = &history[0];
         let last = &history[history.len() - 1];
         let duration_min = (last.timestamp_ms - first.timestamp_ms) as f32 / 60000.0;
         if duration_min <= 0.0 {
             return 0.0;
         }
-        
+
         (last.memory_mb - first.memory_mb) / duration_min
     }
-    
+
     /// Check for potential memory leak (>10MB/min growth)
     pub fn has_memory_leak(&self) -> bool {
         self.get_memory_trend() > 10.0

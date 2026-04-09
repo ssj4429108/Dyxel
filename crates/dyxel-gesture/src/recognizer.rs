@@ -61,12 +61,18 @@ pub enum RecognizerState {
 impl RecognizerState {
     /// Check if state is terminal
     pub fn is_terminal(&self) -> bool {
-        matches!(self, RecognizerState::Ended | RecognizerState::Cancelled | RecognizerState::Failed)
+        matches!(
+            self,
+            RecognizerState::Ended | RecognizerState::Cancelled | RecognizerState::Failed
+        )
     }
 
     /// Check if gesture has been accepted (won the arena)
     pub fn is_accepted(&self) -> bool {
-        matches!(self, RecognizerState::Began | RecognizerState::Changed | RecognizerState::Ended)
+        matches!(
+            self,
+            RecognizerState::Began | RecognizerState::Changed | RecognizerState::Ended
+        )
     }
 }
 
@@ -254,7 +260,9 @@ impl TapGestureRecognizer {
     /// Check if waiting for more taps in a multi-tap sequence
     pub fn is_waiting_for_more_taps(&self) -> bool {
         // Waiting if we have some taps but not enough yet
-        self.current_taps > 0 && self.current_taps < self.tap_count && self.multi_tap_deadline.is_some()
+        self.current_taps > 0
+            && self.current_taps < self.tap_count
+            && self.multi_tap_deadline.is_some()
     }
 
     /// Create a single tap recognizer
@@ -463,7 +471,6 @@ impl GestureRecognizer for TapGestureRecognizer {
 // ============================================================================
 // LongPressGestureRecognizer
 // ============================================================================
-
 
 /// Long press gesture recognizer
 pub struct LongPressGestureRecognizer {
@@ -1831,8 +1838,8 @@ mod tests {
 
     #[test]
     fn test_pan_horizontal_lock() {
-        let mut recognizer = PanGestureRecognizer::new(1, 1)
-            .with_direction(PanDirection::Horizontal);
+        let mut recognizer =
+            PanGestureRecognizer::new(1, 1).with_direction(PanDirection::Horizontal);
 
         let down = PointerEventBuilder::new(0).node_id(1).down(100.0, 100.0);
         recognizer.handle_event(&down);
@@ -1900,13 +1907,23 @@ mod tests {
 
         // Should trigger scale (either Start or Update)
         let has_scale_event = events.iter().any(|e| {
-            matches!(e.event_type, GestureEventType::ScaleStart | GestureEventType::ScaleUpdate)
+            matches!(
+                e.event_type,
+                GestureEventType::ScaleStart | GestureEventType::ScaleUpdate
+            )
         });
-        assert!(has_scale_event,
+        assert!(
+            has_scale_event,
             "Expected Scale event. Events: {:?}, Current scale: {}, state: {:?}",
-            events, recognizer.current_scale, recognizer.state());
+            events,
+            recognizer.current_scale,
+            recognizer.state()
+        );
         // State could be Began or Changed depending on timing
-        assert!(matches!(recognizer.state(), RecognizerState::Began | RecognizerState::Changed));
+        assert!(matches!(
+            recognizer.state(),
+            RecognizerState::Began | RecognizerState::Changed
+        ));
     }
 
     #[test]
@@ -1929,7 +1946,9 @@ mod tests {
 
         // Should have scale update events
         let all_events: Vec<_> = events1.into_iter().chain(events2).collect();
-        assert!(all_events.iter().any(|e| matches!(e.event_type, GestureEventType::ScaleUpdate)));
+        assert!(all_events
+            .iter()
+            .any(|e| matches!(e.event_type, GestureEventType::ScaleUpdate)));
 
         // Scale should be close to 1.0 (back to original)
         assert!((recognizer.current_scale - 1.0).abs() < 0.1);
@@ -1950,7 +1969,9 @@ mod tests {
         let events = recognizer.handle_event(&up);
 
         // Should trigger scale end
-        assert!(events.iter().any(|e| matches!(e.event_type, GestureEventType::ScaleEnd)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event_type, GestureEventType::ScaleEnd)));
         assert!(recognizer.state().is_terminal());
     }
 
@@ -2082,12 +2103,16 @@ mod tests {
 
         // Move both pointers - centroid moves from (150, 100) to (180, 130)
         // This is a ~42px diagonal delta, exceeding slop
-        let events1 = recognizer.handle_event(&PointerEventBuilder::new(0).node_id(1).move_to(110.0, 130.0));
-        let events2 = recognizer.handle_event(&PointerEventBuilder::new(1).node_id(1).move_to(250.0, 130.0));
+        let events1 =
+            recognizer.handle_event(&PointerEventBuilder::new(0).node_id(1).move_to(110.0, 130.0));
+        let events2 =
+            recognizer.handle_event(&PointerEventBuilder::new(1).node_id(1).move_to(250.0, 130.0));
 
         // Check if PanStart was triggered in either event
         let all_events: Vec<_> = events1.iter().chain(events2.iter()).collect();
-        let pan_started = all_events.iter().any(|e| matches!(e.event_type, GestureEventType::PanStart));
+        let pan_started = all_events
+            .iter()
+            .any(|e| matches!(e.event_type, GestureEventType::PanStart));
         assert!(pan_started, "Pan should have started");
 
         // After PanStart, verify state and pointer count
@@ -2165,16 +2190,24 @@ mod tests {
         let scale_events2 = scale.handle_event(&move2);
 
         // Both should have started
-        let pan_started = pan_events.iter().chain(pan_events2.iter())
+        let pan_started = pan_events
+            .iter()
+            .chain(pan_events2.iter())
             .any(|e| matches!(e.event_type, GestureEventType::PanStart));
-        let scale_started = scale_events.iter().chain(scale_events2.iter())
+        let scale_started = scale_events
+            .iter()
+            .chain(scale_events2.iter())
             .any(|e| matches!(e.event_type, GestureEventType::ScaleStart));
 
         // In this case, both should trigger (pan from centroid movement, scale from distance change)
-        assert!(pan_started || pan.state() == RecognizerState::Began,
-            "Pan should have started");
-        assert!(scale_started || scale.state() == RecognizerState::Began,
-            "Scale should have started");
+        assert!(
+            pan_started || pan.state() == RecognizerState::Began,
+            "Pan should have started"
+        );
+        assert!(
+            scale_started || scale.state() == RecognizerState::Began,
+            "Scale should have started"
+        );
 
         // Verify they're not exclusive
         assert!(!pan.is_exclusive_with(&scale));
@@ -2240,13 +2273,23 @@ mod tests {
 
         // Should trigger rotation (either Start or Update)
         let has_rotation_event = events.iter().any(|e| {
-            matches!(e.event_type, GestureEventType::RotationStart | GestureEventType::RotationUpdate)
+            matches!(
+                e.event_type,
+                GestureEventType::RotationStart | GestureEventType::RotationUpdate
+            )
         });
-        assert!(has_rotation_event,
+        assert!(
+            has_rotation_event,
             "Expected Rotation event. Events: {:?}, Current rotation: {}, state: {:?}",
-            events, recognizer.current_rotation, recognizer.state());
+            events,
+            recognizer.current_rotation,
+            recognizer.state()
+        );
         // State could be Began or Changed depending on timing
-        assert!(matches!(recognizer.state(), RecognizerState::Began | RecognizerState::Changed));
+        assert!(matches!(
+            recognizer.state(),
+            RecognizerState::Began | RecognizerState::Changed
+        ));
     }
 
     #[test]
@@ -2266,7 +2309,9 @@ mod tests {
         let events = recognizer.handle_event(&up);
 
         // Should trigger rotation end
-        assert!(events.iter().any(|e| matches!(e.event_type, GestureEventType::RotationEnd)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.event_type, GestureEventType::RotationEnd)));
         assert!(recognizer.state().is_terminal());
     }
 
@@ -2299,7 +2344,9 @@ mod tests {
 
         // Should not trigger yet
         let all_events: Vec<_> = events1.into_iter().chain(events2).collect();
-        assert!(!all_events.iter().any(|e| matches!(e.event_type, GestureEventType::RotationStart)));
+        assert!(!all_events
+            .iter()
+            .any(|e| matches!(e.event_type, GestureEventType::RotationStart)));
         assert_eq!(recognizer.state(), RecognizerState::Possible);
     }
 
@@ -2322,7 +2369,11 @@ mod tests {
 
         // Angle should have changed by approximately PI/2 (90 degrees)
         let diff = recognizer.normalize_angle_diff(angle2 - angle1);
-        assert!(diff.abs() > 1.5, "Expected significant rotation, got diff={}", diff); // PI/2 ≈ 1.57
+        assert!(
+            diff.abs() > 1.5,
+            "Expected significant rotation, got diff={}",
+            diff
+        ); // PI/2 ≈ 1.57
     }
 
     #[test]
@@ -2360,15 +2411,26 @@ mod tests {
         let scale_events2 = scale.handle_event(&move2);
 
         // Scale should activate (delta > 0.1 slop: 1.4 - 1.0 = 0.4)
-        let scale_started = scale_events1.iter().chain(scale_events2.iter())
+        let scale_started = scale_events1
+            .iter()
+            .chain(scale_events2.iter())
             .any(|e| matches!(e.event_type, GestureEventType::ScaleStart));
         assert!(scale_started, "Scale should start with 40% zoom change");
 
         // Pan should NOT activate yet (20px movement, within 36px multi-pointer slop)
-        let pan_started = pan_events1.iter().chain(pan_events2.iter())
+        let pan_started = pan_events1
+            .iter()
+            .chain(pan_events2.iter())
             .any(|e| matches!(e.event_type, GestureEventType::PanStart));
-        assert!(!pan_started, "Pan should delay activation with 2 pointers (20px < 36px)");
-        assert_eq!(pan.state(), RecognizerState::Possible, "Pan should remain in Possible");
+        assert!(
+            !pan_started,
+            "Pan should delay activation with 2 pointers (20px < 36px)"
+        );
+        assert_eq!(
+            pan.state(),
+            RecognizerState::Possible,
+            "Pan should remain in Possible"
+        );
     }
 
     #[test]
@@ -2384,8 +2446,12 @@ mod tests {
         let move_evt = PointerEventBuilder::new(0).node_id(1).move_to(130.0, 100.0);
         let events = pan.handle_event(&move_evt);
 
-        assert!(events.iter().any(|e| matches!(e.event_type, GestureEventType::PanStart)),
-            "Single-pointer Pan should activate normally");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event_type, GestureEventType::PanStart)),
+            "Single-pointer Pan should activate normally"
+        );
         assert_eq!(pan.state(), RecognizerState::Began);
     }
 
@@ -2410,12 +2476,19 @@ mod tests {
         let events1 = pan.handle_event(&move1);
 
         // Check if pan already activated on first move
-        let pan_started1 = events1.iter().any(|e| matches!(e.event_type, GestureEventType::PanStart));
+        let pan_started1 = events1
+            .iter()
+            .any(|e| matches!(e.event_type, GestureEventType::PanStart));
 
         let events2 = pan.handle_event(&move2);
-        let pan_started2 = events2.iter().any(|e| matches!(e.event_type, GestureEventType::PanStart));
+        let pan_started2 = events2
+            .iter()
+            .any(|e| matches!(e.event_type, GestureEventType::PanStart));
 
-        assert!(pan_started1 || pan_started2 || pan.state() == RecognizerState::Began,
-            "Pan should activate with large multi-pointer movement (110px > 36px). State: {:?}", pan.state());
+        assert!(
+            pan_started1 || pan_started2 || pan.state() == RecognizerState::Began,
+            "Pan should activate with large multi-pointer movement (110px > 36px). State: {:?}",
+            pan.state()
+        );
     }
 }

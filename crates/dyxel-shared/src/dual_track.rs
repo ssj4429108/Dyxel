@@ -7,8 +7,8 @@
 //! - Registry (Static): Node structure, append-only
 //! - CommandStream (Dynamic): Property changes, ring buffer with backpressure
 
-use core::sync::atomic::{AtomicU32, Ordering};
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // ============================================================================
 // Constants
@@ -109,8 +109,8 @@ pub struct RegistryNode {
 pub enum RegistryFlags {
     None = 0,
     Initialized = 1 << 0,
-    Frozen = 1 << 1,       // No more nodes can be added
-    Dirty = 1 << 2,        // Host needs to resync
+    Frozen = 1 << 1, // No more nodes can be added
+    Dirty = 1 << 2,  // Host needs to resync
 }
 
 /// Registry header (64 bytes)
@@ -131,7 +131,7 @@ pub struct RegistryHeader {
 }
 
 /// Registry area (32KB total)
-/// 
+///
 /// Layout: Header (64B) + Nodes (~12.5KB) + Padding + Sentinel (4B)
 #[repr(C, align(4096))]
 pub struct Registry {
@@ -175,7 +175,9 @@ impl Registry {
         self.header.magic = REGISTRY_MAGIC;
         self.header.version.store(1, Ordering::Release);
         self.header.node_count.store(0, Ordering::Release);
-        self.header.flags.store(RegistryFlags::Initialized as u32, Ordering::Release);
+        self.header
+            .flags
+            .store(RegistryFlags::Initialized as u32, Ordering::Release);
         self.sentinel = SENTINEL_MAGIC;
     }
 
@@ -192,7 +194,7 @@ impl Registry {
     }
 
     /// Add a node to registry
-    /// 
+    ///
     /// SAFETY: Must be called from WASM side with exclusive access
     pub unsafe fn add_node(&self, node: RegistryNode) -> Option<u32> {
         let count = self.header.node_count.load(Ordering::Acquire);
@@ -233,13 +235,17 @@ impl Registry {
     /// Mark as dirty (Host needs to resync)
     pub fn mark_dirty(&self) {
         let old = self.header.flags.load(Ordering::Relaxed);
-        self.header.flags.store(old | RegistryFlags::Dirty as u32, Ordering::Release);
+        self.header
+            .flags
+            .store(old | RegistryFlags::Dirty as u32, Ordering::Release);
     }
 
     /// Clear dirty flag
     pub fn clear_dirty(&self) {
         let old = self.header.flags.load(Ordering::Relaxed);
-        self.header.flags.store(old & !(RegistryFlags::Dirty as u32), Ordering::Release);
+        self.header
+            .flags
+            .store(old & !(RegistryFlags::Dirty as u32), Ordering::Release);
     }
 }
 
@@ -301,7 +307,7 @@ pub struct CommandStreamHeader {
 }
 
 /// Command Stream (96KB total)
-/// 
+///
 /// Layout: Header (64B) + Data (~95.9KB) + Sentinel (4B)
 #[repr(C, align(4096))]
 pub struct CommandStream {
@@ -344,8 +350,7 @@ impl CommandStream {
 
     /// Check if valid
     pub fn is_valid(&self) -> bool {
-        self.header.magic == COMMAND_STREAM_MAGIC
-            && self.sentinel == SENTINEL_MAGIC
+        self.header.magic == COMMAND_STREAM_MAGIC && self.sentinel == SENTINEL_MAGIC
     }
 
     /// Check sentinel
@@ -391,7 +396,7 @@ impl CommandStream {
     }
 
     /// Reserve space (with NOP padding if needed)
-    /// 
+    ///
     /// SAFETY: Single writer (WASM)
     pub unsafe fn reserve_space(&self, size: usize) -> Option<usize> {
         if size > self.header.capacity as usize - SAFETY_MARGIN {
@@ -428,7 +433,7 @@ impl CommandStream {
     }
 
     /// Write command to stream
-    /// 
+    ///
     /// SAFETY: Single writer (WASM), must call reserve_space first
     pub unsafe fn write_command(&self, opcode: u8, data: &[u8], pos: usize) -> bool {
         let total_len = 1 + data.len();

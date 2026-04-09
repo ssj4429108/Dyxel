@@ -21,8 +21,12 @@ impl std::fmt::Display for FilterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FilterError::DeviceNotInitialized => write!(f, "GPU device not initialized"),
-            FilterError::ShaderCompilationFailed(msg) => write!(f, "Shader compilation failed: {}", msg),
-            FilterError::InvalidFilterParameters(msg) => write!(f, "Invalid filter parameters: {}", msg),
+            FilterError::ShaderCompilationFailed(msg) => {
+                write!(f, "Shader compilation failed: {}", msg)
+            }
+            FilterError::InvalidFilterParameters(msg) => {
+                write!(f, "Invalid filter parameters: {}", msg)
+            }
             FilterError::OutOfMemory => write!(f, "Out of GPU memory"),
         }
     }
@@ -69,44 +73,45 @@ impl FilterPipeline {
     /// Create a new filter pipeline
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Result<Self, FilterError> {
         // Create bind group layout for blur
-        let blur_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Blur Bind Group Layout"),
-            entries: &[
-                // Input texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let blur_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Blur Bind Group Layout"),
+                entries: &[
+                    // Input texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Output texture (storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                    // Output texture (storage)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Uniforms
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
 
         // Create compute pipeline
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -154,48 +159,50 @@ impl FilterPipeline {
         });
 
         // Create composite pipeline (for final blending)
-        let composite_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Composite Bind Group Layout"),
-            entries: &[
-                // Source texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let composite_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Composite Bind Group Layout"),
+                entries: &[
+                    // Source texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Uniforms
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                    // Uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         // For now, composite pipeline is a placeholder
         // Full implementation would create a render pipeline for blending
-        let composite_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Composite Pipeline Layout"),
-            bind_group_layouts: &[&composite_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Composite Pipeline Layout"),
+                bind_group_layouts: &[&composite_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Composite Shader"),
@@ -261,10 +268,7 @@ impl FilterPipeline {
         let iterations = ((radius / 2.0).ceil() as u32).max(1).min(8);
 
         // Create intermediate textures for ping-pong
-        let intermediate_size = (
-            (input_size.0 / 4).max(1),
-            (input_size.1 / 4).max(1),
-        );
+        let intermediate_size = ((input_size.0 / 4).max(1), (input_size.1 / 4).max(1));
 
         let desc = wgpu::TextureDescriptor {
             label: Some("Blur Intermediate"),
@@ -286,9 +290,11 @@ impl FilterPipeline {
         let ping = self.device.create_texture(&desc);
         let pong = self.device.create_texture(&desc);
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Blur Command Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Blur Command Encoder"),
+            });
 
         // Step 1: Downsample to intermediate size
         self.run_blur_pass(
@@ -368,11 +374,8 @@ impl FilterPipeline {
             output_size: [output_size.0 as f32, output_size.1 as f32],
         };
 
-        self.queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&uniforms),
-        );
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         // Create bind group for this pass
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -464,9 +467,11 @@ impl FilterPipeline {
         _dy: f32,
         _color: [f32; 4],
     ) -> Result<(), FilterError> {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Shadow Composite Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Shadow Composite Encoder"),
+            });
 
         // For now, use a simple render pass
         // Full implementation would use the composite pipeline with proper blending
@@ -502,9 +507,11 @@ impl FilterPipeline {
         source: &wgpu::Texture,
         destination: &wgpu::Texture,
     ) -> Result<(), FilterError> {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Texture Copy Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Texture Copy Encoder"),
+            });
 
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {

@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Staged initialization for Vello renderer
-//! 
+//!
 //! This module provides a way to initialize Vello renderer in stages:
 //! 1. Stage 1: Core shaders only (~40% of total) - allows basic rendering
 //! 2. Stage 2: Full shaders - complete functionality
-//! 
+//!
 //! This reduces initial startup time while maintaining full functionality.
 
-use std::sync::{Arc, Mutex, atomic::{AtomicU8, Ordering}};
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::Instant;
 
@@ -41,7 +44,7 @@ impl StagedInit {
             start_time: Instant::now(),
         }
     }
-    
+
     /// Get current stage
     pub fn stage(&self) -> InitStage {
         match self.stage.load(Ordering::SeqCst) {
@@ -52,17 +55,17 @@ impl StagedInit {
             _ => InitStage::None,
         }
     }
-    
+
     /// Check if core is ready
     pub fn is_core_ready(&self) -> bool {
         self.stage.load(Ordering::SeqCst) >= InitStage::CoreReady as u8
     }
-    
+
     /// Check if fully initialized
     pub fn is_full_ready(&self) -> bool {
         self.stage.load(Ordering::SeqCst) >= InitStage::FullReady as u8
     }
-    
+
     /// Advance to next stage
     pub fn advance(&self) {
         let current = self.stage.load(Ordering::SeqCst);
@@ -75,7 +78,7 @@ impl StagedInit {
             );
         }
     }
-    
+
     /// Get elapsed time
     pub fn elapsed(&self) -> std::time::Duration {
         self.start_time.elapsed()
@@ -118,7 +121,7 @@ impl BackgroundLoader {
     pub fn new() -> Self {
         Self { handle: None }
     }
-    
+
     /// Start background loading
     pub fn start<F>(&mut self, delay_ms: u64, f: F)
     where
@@ -129,12 +132,12 @@ impl BackgroundLoader {
             f();
         }));
     }
-    
+
     /// Check if loading is complete
     pub fn is_complete(&self) -> bool {
         self.handle.as_ref().map_or(true, |h| h.is_finished())
     }
-    
+
     /// Wait for completion
     pub fn wait(&mut self) {
         if let Some(handle) = self.handle.take() {
@@ -158,7 +161,7 @@ pub struct StagedInitMetrics {
 }
 
 /// Simplified staged init for VelloBackend
-/// 
+///
 /// Usage:
 /// 1. Create StagedInit at startup
 /// 2. Load core shaders, mark CoreReady
@@ -180,7 +183,7 @@ impl StagedVelloInit {
             metrics: Mutex::new(StagedInitMetrics::default()),
         }
     }
-    
+
     /// Record core load complete
     pub fn core_loaded(&self, elapsed_ms: u64) {
         self.staged.advance();
@@ -188,7 +191,7 @@ impl StagedVelloInit {
             m.core_load_time_ms = elapsed_ms;
         }
     }
-    
+
     /// Start full load in background
     pub fn start_full_load<F>(&self, f: F)
     where
@@ -197,12 +200,12 @@ impl StagedVelloInit {
         if !self.config.enabled || !self.config.enable_full {
             return;
         }
-        
+
         self.staged.advance(); // CoreLoading -> FullLoading
-        
+
         let staged = self.staged.clone();
         let start = Instant::now();
-        
+
         if let Ok(mut loader) = self.loader.lock() {
             loader.start(self.config.stage2_delay_ms, move || {
                 f();
@@ -211,29 +214,29 @@ impl StagedVelloInit {
             });
         }
     }
-    
+
     /// Check if core is ready
     pub fn is_core_ready(&self) -> bool {
         self.staged.is_core_ready()
     }
-    
+
     /// Check if fully ready
     pub fn is_full_ready(&self) -> bool {
         self.staged.is_full_ready()
     }
-    
+
     /// Get current stage
     pub fn stage(&self) -> InitStage {
         self.staged.stage()
     }
-    
+
     /// Wait for full initialization
     pub fn wait_for_full(&self) {
         while !self.is_full_ready() {
             thread::sleep(std::time::Duration::from_millis(10));
         }
     }
-    
+
     /// Get metrics
     pub fn metrics(&self) -> StagedInitMetrics {
         self.metrics.lock().map(|m| m.clone()).unwrap_or_default()

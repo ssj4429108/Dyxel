@@ -1,65 +1,87 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle};
-#[cfg(target_os = "android")] use raw_window_handle::AndroidNdkWindowHandle;
-#[cfg(target_os = "ios")] use raw_window_handle::{UiKitDisplayHandle, UiKitWindowHandle};
-#[cfg(target_os = "macos")] use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle};
-#[cfg(target_arch = "wasm32")] use raw_window_handle::{WebDisplayHandle, WebWindowHandle};
+#[cfg(target_os = "android")]
+use raw_window_handle::AndroidNdkWindowHandle;
+#[cfg(target_os = "macos")]
+use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, WindowHandle,
+};
+#[cfg(target_os = "ios")]
+use raw_window_handle::{UiKitDisplayHandle, UiKitWindowHandle};
+#[cfg(target_arch = "wasm32")]
+use raw_window_handle::{WebDisplayHandle, WebWindowHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SurfaceId(pub u64);
 
 pub struct SafeWindowHandle {
-    #[cfg(target_os = "android")] android_window: Option<std::ptr::NonNull<ndk_sys::ANativeWindow>>,
-    #[allow(dead_code)] raw_window_handle: RawWindowHandle,
-    #[allow(dead_code)] raw_display_handle: RawDisplayHandle,
+    #[cfg(target_os = "android")]
+    android_window: Option<std::ptr::NonNull<ndk_sys::ANativeWindow>>,
+    #[allow(dead_code)]
+    raw_window_handle: RawWindowHandle,
+    #[allow(dead_code)]
+    raw_display_handle: RawDisplayHandle,
 }
 
 impl SafeWindowHandle {
     #[cfg(target_os = "android")]
     pub fn new_android(surface_ptr: u64) -> Self {
         let ptr = std::ptr::NonNull::new(surface_ptr as *mut ndk_sys::ANativeWindow).expect("Null");
-        Self { 
-            android_window: Some(ptr), 
-            raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(ptr.cast())), 
-            raw_display_handle: RawDisplayHandle::Android(raw_window_handle::AndroidDisplayHandle::new()) 
+        Self {
+            android_window: Some(ptr),
+            raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(ptr.cast())),
+            raw_display_handle: RawDisplayHandle::Android(
+                raw_window_handle::AndroidDisplayHandle::new(),
+            ),
         }
     }
     #[cfg(target_os = "ios")]
     pub fn new_ios(surface_ptr: u64) -> Self {
-        Self { 
-            #[cfg(target_os = "android")] android_window: None, 
-            raw_window_handle: RawWindowHandle::UiKit(raw_window_handle::UiKitWindowHandle::new(std::ptr::NonNull::new(surface_ptr as *mut _).unwrap())), 
-            raw_display_handle: RawDisplayHandle::UiKit(raw_window_handle::UiKitDisplayHandle::new()) 
+        Self {
+            #[cfg(target_os = "android")]
+            android_window: None,
+            raw_window_handle: RawWindowHandle::UiKit(raw_window_handle::UiKitWindowHandle::new(
+                std::ptr::NonNull::new(surface_ptr as *mut _).unwrap(),
+            )),
+            raw_display_handle: RawDisplayHandle::UiKit(
+                raw_window_handle::UiKitDisplayHandle::new(),
+            ),
         }
     }
 
     #[cfg(target_os = "macos")]
     pub fn new_macos(surface_ptr: u64) -> Self {
-        Self { 
-            #[cfg(target_os = "android")] android_window: None, 
-            raw_window_handle: RawWindowHandle::AppKit(AppKitWindowHandle::new(std::ptr::NonNull::new(surface_ptr as *mut _).unwrap())), 
-            raw_display_handle: RawDisplayHandle::AppKit(AppKitDisplayHandle::new()) 
+        Self {
+            #[cfg(target_os = "android")]
+            android_window: None,
+            raw_window_handle: RawWindowHandle::AppKit(AppKitWindowHandle::new(
+                std::ptr::NonNull::new(surface_ptr as *mut _).unwrap(),
+            )),
+            raw_display_handle: RawDisplayHandle::AppKit(AppKitDisplayHandle::new()),
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     pub fn new_web(id: u32) -> Self {
-        Self { 
-            raw_window_handle: RawWindowHandle::Web(WebWindowHandle::new(id)), 
-            raw_display_handle: RawDisplayHandle::Web(WebDisplayHandle::new()) 
+        Self {
+            raw_window_handle: RawWindowHandle::Web(WebWindowHandle::new(id)),
+            raw_display_handle: RawDisplayHandle::Web(WebDisplayHandle::new()),
         }
     }
 }
 
 #[cfg(target_os = "android")]
-impl Drop for SafeWindowHandle { 
-    fn drop(&mut self) { 
-        if let Some(ptr) = self.android_window { 
-            unsafe { ndk_sys::ANativeWindow_release(ptr.as_ptr()); } 
-        } 
-    } 
+impl Drop for SafeWindowHandle {
+    fn drop(&mut self) {
+        if let Some(ptr) = self.android_window {
+            unsafe {
+                ndk_sys::ANativeWindow_release(ptr.as_ptr());
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -83,13 +105,13 @@ pub extern "C" fn Java_com_dyxel_android_DyxelEngine_initLogger(
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
-    
+
     // Set custom panic hook to capture backtrace and log to logcat
     std::panic::set_hook(Box::new(|info| {
         let backtrace = backtrace::Backtrace::new();
         let thread = std::thread::current();
         let thread_name = thread.name().unwrap_or("<unknown>");
-        
+
         let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
             s.to_string()
         } else if let Some(s) = info.payload().downcast_ref::<String>() {
@@ -97,13 +119,13 @@ pub extern "C" fn Java_com_dyxel_android_DyxelEngine_initLogger(
         } else {
             "Unknown panic payload".to_string()
         };
-        
+
         let location = if let Some(loc) = info.location() {
             format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
         } else {
             "<unknown location>".to_string()
         };
-        
+
         log::error!("╔══════════════════════════════════════════════════════════════╗");
         log::error!("║ RUST PANIC                                                   ║");
         log::error!("╠══════════════════════════════════════════════════════════════╣");
@@ -114,14 +136,23 @@ pub extern "C" fn Java_com_dyxel_android_DyxelEngine_initLogger(
         log::error!("║ Backtrace:");
         for (i, frame) in backtrace.frames().iter().enumerate() {
             for symbol in frame.symbols() {
-                let name = symbol.name().map(|n| n.to_string()).unwrap_or_else(|| "<unknown>".to_string());
-                let file = symbol.filename().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "<unknown>".to_string());
-                let line = symbol.lineno().map(|l| l.to_string()).unwrap_or_else(|| "?".to_string());
+                let name = symbol
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let file = symbol
+                    .filename()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let line = symbol
+                    .lineno()
+                    .map(|l| l.to_string())
+                    .unwrap_or_else(|| "?".to_string());
                 log::error!("║   {}: {} at {}:{}", i, name, file, line);
             }
         }
         log::error!("╚══════════════════════════════════════════════════════════════╝");
-        
+
         // Also print to stderr as fallback
         eprintln!("RUST PANIC in thread '{}' at {}", thread_name, location);
         eprintln!("Payload: {}", payload);
@@ -129,16 +160,16 @@ pub extern "C" fn Java_com_dyxel_android_DyxelEngine_initLogger(
     }));
 }
 
-impl HasWindowHandle for SafeWindowHandle { 
-    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> { 
-        unsafe { Ok(WindowHandle::borrow_raw(self.raw_window_handle.clone())) } 
-    } 
+impl HasWindowHandle for SafeWindowHandle {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        unsafe { Ok(WindowHandle::borrow_raw(self.raw_window_handle.clone())) }
+    }
 }
 
-impl HasDisplayHandle for SafeWindowHandle { 
-    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> { 
-        unsafe { Ok(DisplayHandle::borrow_raw(self.raw_display_handle.clone())) } 
-    } 
+impl HasDisplayHandle for SafeWindowHandle {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        unsafe { Ok(DisplayHandle::borrow_raw(self.raw_display_handle.clone())) }
+    }
 }
 
 unsafe impl Send for SafeWindowHandle {}

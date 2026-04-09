@@ -1,0 +1,459 @@
+// Copyright 2024 Dyxel Contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! TextInput Component - Text with keyboard interaction support
+//!
+//! Architecture: TextInput IS-A Text node for rendering,
+//! but gesture handlers should be registered on its PARENT container.
+//!
+//! # Example
+//! ```rust
+/// View {
+///     width: 280.0,
+///     height: 44.0,
+///     TextInput {
+///         placeholder: "Enter your name",
+///     }
+/// }
+/// ```
+
+use crate::{push_command, SHARED_BUFFER, select_node, track_node, BaseView, TextRenderable};
+use crate::Prop;
+use dyxel_shared::{InputType, ReturnKeyType};
+use std::sync::atomic::Ordering;
+use futures_signals::signal::SignalExt;
+
+/// TextInput component - A Text node with input capabilities
+///
+/// The parent View must have explicit width/height for hit testing.
+/// Gesture handlers are automatically registered on the parent when
+/// attached via the `child()` method.
+pub struct TextInput {
+    pub id: u32,
+    placeholder_text: Option<String>,
+}
+
+// Pending TextInput registrations - stored until parent is available
+thread_local! {
+    static PENDING_TEXTINPUTS: RefCell<HashMap<u32, TextInputRegistration>> = RefCell::new(HashMap::new());
+}
+
+/// Check if a node is a pending TextInput and register its gestures on the parent.
+/// Called by View::child() when adding a child.
+pub fn register_if_pending(child_id: u32, parent_id: u32) {
+    PENDING_TEXTINPUTS.with(|p| {
+        if let Some(reg) = p.borrow().get(&child_id) {
+            let text_node_id = reg.text_node_id;
+            let placeholder = reg.placeholder.clone();
+
+            crate::log(&format!(
+                "[TextInput] Registering gestures for node {} on parent {}",
+                text_node_id, parent_id
+            ));
+
+            // Register default long press handler on PARENT (for proper hit testing)
+            crate::gesture::register_long_press_handler(parent_id, move |_event| {
+                select_node(text_node_id);
+                push_command!(SHARED_BUFFER, ShowTextInputContextMenu, text_node_id);
+            });
+
+            // Register tap handler on PARENT (for proper hit testing)
+            crate::gesture::register_tap_handler(parent_id, move |_event| {
+                select_node(text_node_id);
+                push_command!(SHARED_BUFFER, SetTextInputFocused, text_node_id, 1u8);
+                push_command!(SHARED_BUFFER, ShowTextInputKeyboard);
+            });
+
+            // Apply placeholder if set
+            if let Some(ref text) = placeholder {
+                let len = text.len() as u32;
+                push_command!(SHARED_BUFFER, SetTextInputPlaceholder, text_node_id, len);
+                unsafe {
+                    let offset = crate::SHARED_BUFFER.command_len as usize;
+                    if offset + text.len() <= crate::MAX_COMMAND_BYTES {
+                        crate::SHARED_BUFFER.command_data[offset..offset+text.len()].copy_from_slice(text.as_bytes());
+                        crate::SHARED_BUFFER.command_len = (offset + text.len()) as u32;
+                    }
+                }
+            }
+
+            // Remove from pending registrations
+            p.borrow_mut().remove(&child_id);
+        }
+    });
+}
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// Registration info for a TextInput that needs gesture handlers
+struct TextInputRegistration {
+    text_node_id: u32,
+    placeholder: Option<String>,
+}
+
+impl TextInput {
+    /// Create a new TextInput node
+    ///
+    /// Creates a Text node for rendering. Gesture handlers will be registered
+    /// on the parent View when `register_gestures_on_parent()` is called.
+    pub fn new() -> Self {
+        let id = crate::NODE_COUNTER.fetch_add(1, Ordering::SeqCst);
+        track_node(id);
+
+        // Create as Text node (for text rendering via dyxel-editor)
+        push_command!(SHARED_BUFFER, CreateTextNode, id);
+        select_node(id);
+
+        // Register as text input (enables keyboard, cursor, selection)
+        push_command!(SHARED_BUFFER, CreateTextInput, id);
+
+        // Store in pending registrations - gestures will be registered when parent is known
+        PENDING_TEXTINPUTS.with(|p| {
+            p.borrow_mut().insert(id, TextInputRegistration {
+                text_node_id: id,
+                placeholder: None,
+            });
+        });
+
+        // Set default styles to make input visible
+        select_node(id);
+        // Default text color: Black
+        push_command!(SHARED_BUFFER, SetTextColor, id, 0u8, 0u8, 0u8, 255u8);
+
+        // Debug: log buffer state after creating TextInput
+        let current_cmd_len = unsafe { SHARED_BUFFER.command_len };
+        let msg = format!("[TextInput] TextInput::new id={}, cmd_len={}", id, current_cmd_len);
+        crate::log_to_console(&msg);
+
+        Self { id, placeholder_text: None }
+    }
+
+    /// Set the text state value (Responsive)
+    pub fn value(self, state: impl Into<Prop<dyxel_shared::TextState>>) -> Self {
+        match state.into() {
+            crate::Prop::Static(v) => {
+                let text = v.text.clone();
+                let sel = v.selection.clone();
+                select_node(self.id);
+                push_command!(SHARED_BUFFER, SyncTextState, self.id, text.len() as u32, sel.start as u32, sel.end as u32);
+                unsafe {
+                    let offset = crate::SHARED_BUFFER.command_len as usize;
+                    if offset + text.len() <= crate::MAX_COMMAND_BYTES {
+                        crate::SHARED_BUFFER.command_data[offset..offset+text.len()].copy_from_slice(text.as_bytes());
+                        crate::SHARED_BUFFER.command_len = (offset + text.len()) as u32;
+                    }
+                }
+            }
+            crate::Prop::Dynamic(s) => {
+                let id = self.id;
+                let future = s.for_each(move |val| {
+                    let text = val.text.clone();
+                    let sel = val.selection.clone();
+                    select_node(id);
+                    push_command!(SHARED_BUFFER, SyncTextState, id, text.len() as u32, sel.start as u32, sel.end as u32);
+                    unsafe {
+                        let offset = crate::SHARED_BUFFER.command_len as usize;
+                        if offset + text.len() <= crate::MAX_COMMAND_BYTES {
+                            crate::SHARED_BUFFER.command_data[offset..offset+text.len()].copy_from_slice(text.as_bytes());
+                            crate::SHARED_BUFFER.command_len = (offset + text.len()) as u32;
+                        }
+                    }
+                    async {}
+                });
+                crate::EXECUTOR.with(|ex| ex.borrow_mut().push(Box::pin(future)));
+            }
+        }
+        self
+    }
+
+    /// Callback when text state changes (Responsive)
+    pub fn on_change<F>(self, mut handler: F) -> Self
+    where
+        F: FnMut(dyxel_shared::TextState) + 'static,
+    {
+        crate::TEXT_INPUT_HANDLERS.with(|h| {
+            h.borrow_mut().insert(self.id, Box::new(move |new_state| {
+                handler(new_state);
+            }));
+        });
+        self
+    }
+
+    /// Set font size
+    pub fn font_size(self, size: impl Into<Prop<f32>>) -> Self {
+        match size.into() {
+            crate::Prop::Static(v) => {
+                select_node(self.id);
+                push_command!(crate::SHARED_BUFFER, SetFontSize, self.id, v);
+            }
+            crate::Prop::Dynamic(s) => {
+                let id = self.id;
+                let future = s.for_each(move |val| {
+                    select_node(id);
+                    push_command!(crate::SHARED_BUFFER, SetFontSize, id, val);
+                    async {}
+                });
+                crate::EXECUTOR.with(|ex| ex.borrow_mut().push(Box::pin(future)));
+            }
+        }
+        self
+    }
+
+    /// Set text color
+    pub fn text_color(self, color: impl Into<Prop<(u8, u8, u8, u8)>>) -> Self {
+        match color.into() {
+            crate::Prop::Static((r, g, b, a)) => {
+                select_node(self.id);
+                push_command!(crate::SHARED_BUFFER, SetTextColor, self.id, r, g, b, a);
+            }
+            crate::Prop::Dynamic(s) => {
+                let id = self.id;
+                let future = s.for_each(move |val: (u8, u8, u8, u8)| {
+                    let (r, g, b, a) = val;
+                    select_node(id);
+                    push_command!(crate::SHARED_BUFFER, SetTextColor, id, r, g, b, a);
+                    async {}
+                });
+                crate::EXECUTOR.with(|ex| ex.borrow_mut().push(Box::pin(future)));
+            }
+        }
+        self
+    }
+
+    /// Set the placeholder text (shown when empty)
+    pub fn placeholder(mut self, text: impl Into<String>) -> Self {
+        let text_str = text.into();
+        self.placeholder_text = Some(text_str.clone());
+
+        // Update pending registration if still pending
+        PENDING_TEXTINPUTS.with(|p| {
+            if let Some(reg) = p.borrow_mut().get_mut(&self.id) {
+                reg.placeholder = Some(text_str);
+            }
+        });
+
+        self
+    }
+
+    // Helper to apply placeholder text
+    fn apply_placeholder(&self, text: &str) {
+        let text_node_id = self.id;
+        let len = text.len() as u32;
+        push_command!(SHARED_BUFFER, SetTextInputPlaceholder, text_node_id, len);
+        unsafe {
+            let offset = crate::SHARED_BUFFER.command_len as usize;
+            if offset + text.len() <= crate::MAX_COMMAND_BYTES {
+                crate::SHARED_BUFFER.command_data[offset..offset+text.len()].copy_from_slice(text.as_bytes());
+                crate::SHARED_BUFFER.command_len = (offset + text.len()) as u32;
+            }
+        }
+    }
+
+    /// Set input type (text, password, number, email, phone, multiline)
+    pub fn input_type(self, input_type: InputType) -> Self {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputType, self.id, input_type as u8);
+        self
+    }
+
+    /// Set return key type (done, go, next, search, send)
+    pub fn return_key_type(self, key_type: ReturnKeyType) -> Self {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputReturnKeyType, self.id, key_type as u8);
+        self
+    }
+
+    /// Set maximum text length (0 = unlimited)
+    pub fn max_length(self, max_length: u32) -> Self {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputMaxLength, self.id, max_length);
+        self
+    }
+
+    /// Set whether input is secure (password mode with dots/asterisks)
+    pub fn secure(self, secure: bool) -> Self {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputSecure, self.id, secure as u8);
+        self
+    }
+
+    /// Set whether autocorrect is enabled
+    pub fn auto_correct(self, _enabled: bool) -> Self {
+        // TODO: Send autocorrect hint to platform keyboard
+        self
+    }
+
+    /// Focus the input (show keyboard)
+    pub fn focus(self) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputFocused, self.id, 1u8);
+        push_command!(SHARED_BUFFER, ShowTextInputKeyboard);
+    }
+
+    /// Blur the input (hide keyboard)
+    pub fn blur(self) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputFocused, self.id, 0u8);
+        push_command!(SHARED_BUFFER, HideTextInputKeyboard);
+    }
+
+    /// Select all text in the input
+    pub fn select_all(self) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputSelection, self.id, 0u32, u32::MAX);
+    }
+
+    /// Clear all text
+    pub fn clear(self) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SyncTextState, self.id, 0u32, 0u32, 0u32);
+    }
+
+    /// Set cursor position
+    pub fn set_cursor_position(self, pos: u32) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputCursor, self.id, pos);
+    }
+
+    /// Set selection range
+    pub fn set_selection(self, start: u32, end: u32) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, SetTextInputSelection, self.id, start, end);
+    }
+
+    /// Copy selected text to clipboard
+    pub fn copy(self) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, CopyToClipboard, self.id);
+    }
+
+    /// Cut selected text to clipboard
+    pub fn cut(self) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, CutToClipboard, self.id);
+    }
+
+    /// Request paste from clipboard
+    pub fn paste(self) {
+        select_node(self.id);
+        push_command!(SHARED_BUFFER, RequestPasteFromClipboard, self.id);
+    }
+
+    // === Callbacks ===
+
+    /// Callback when input gains focus
+    pub fn on_focus<F>(self, _handler: F) -> Self
+    where
+        F: FnMut() + 'static,
+    {
+        self
+    }
+
+    /// Callback when input loses focus
+    pub fn on_blur<F>(self, _handler: F) -> Self
+    where
+        F: FnMut() + 'static,
+    {
+        self
+    }
+
+    /// Callback when user submits (presses return key)
+    pub fn on_submit<F>(self, _handler: F) -> Self
+    where
+        F: FnMut(String) + 'static,
+    {
+        self
+    }
+
+    /// Callback when selection changes
+    pub fn on_selection_change<F>(self, _handler: F) -> Self
+    where
+        F: FnMut(usize, usize) + 'static,
+    {
+        self
+    }
+
+    /// Register custom long press handler
+    pub fn on_long_press<F>(self, handler: F) -> Self
+    where
+        F: FnMut(crate::gesture::GestureEvent) + 'static,
+    {
+        // Register on parent node (or self if no parent)
+        let target_id = crate::get_parent_node(self.id).unwrap_or(self.id);
+        crate::gesture::register_long_press_handler(target_id, handler);
+        self
+    }
+}
+
+impl Default for TextInput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BaseView for TextInput {
+    fn node_id(&self) -> u32 {
+        self.id
+    }
+}
+
+impl TextRenderable for TextInput {
+    fn text_node_id(&self) -> u32 {
+        self.id
+    }
+}
+
+// === Convenience constructors for common input types ===
+
+impl TextInput {
+    /// Create a password input
+    pub fn password() -> Self {
+        Self::new()
+            .input_type(InputType::Password)
+            .secure(true)
+            .placeholder("Password")
+    }
+
+    /// Create an email input
+    pub fn email() -> Self {
+        Self::new()
+            .input_type(InputType::Email)
+            .placeholder("Email")
+    }
+
+    /// Create a number input
+    pub fn number() -> Self {
+        Self::new()
+            .input_type(InputType::Number)
+            .placeholder("0")
+    }
+
+    /// Create a phone number input
+    pub fn phone() -> Self {
+        Self::new()
+            .input_type(InputType::Phone)
+            .placeholder("Phone number")
+    }
+
+    /// Create a multiline text input
+    pub fn multiline() -> Self {
+        Self::new()
+            .input_type(InputType::Multiline)
+    }
+
+    /// Create a search input
+    pub fn search() -> Self {
+        Self::new()
+            .input_type(InputType::Text)
+            .return_key_type(ReturnKeyType::Search)
+            .placeholder("Search...")
+    }
+
+    /// Create a URL input
+    pub fn url() -> Self {
+        Self::new()
+            .input_type(InputType::URL)
+            .placeholder("https://")
+    }
+}

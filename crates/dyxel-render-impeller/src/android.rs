@@ -1,10 +1,10 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::os::raw::c_void;
-use dyxel_render_api::{SurfaceState, RenderContext};
-use impellers::{Context, VkSwapChain};
 use ash::vk::Handle;
+use dyxel_render_api::{RenderContext, SurfaceState};
+use impellers::{Context, VkSwapChain};
+use std::os::raw::c_void;
 
 pub struct AndroidImpellerSurfaceState {
     pub swapchain: VkSwapChain,
@@ -14,7 +14,13 @@ pub struct AndroidImpellerSurfaceState {
 }
 
 impl AndroidImpellerSurfaceState {
-    pub fn new(context: &Context, native_window: *mut c_void, width: u32, height: u32, density: f32) -> Self {
+    pub fn new(
+        context: &Context,
+        native_window: *mut c_void,
+        width: u32,
+        height: u32,
+        density: f32,
+    ) -> Self {
         unsafe {
             // 1. Get Vulkan instance from Impeller Context
             let vk_info = context.get_vulkan_info().expect("Not a Vulkan context");
@@ -23,12 +29,12 @@ impl AndroidImpellerSurfaceState {
             // Workaround to create ash::Instance from a raw handle
             let vk_instance_handle = ash::vk::Instance::from_raw(vk_info.vk_instance as u64);
             let instance = ash::Instance::load(entry.static_fn(), vk_instance_handle);
-            
+
             // 3. Create Android Surface
             let android_surface_fn = ash::khr::android_surface::Instance::new(&entry, &instance);
-            let create_info = ash::vk::AndroidSurfaceCreateInfoKHR::default()
-                .window(native_window as *mut _);
-            
+            let create_info =
+                ash::vk::AndroidSurfaceCreateInfoKHR::default().window(native_window as *mut _);
+
             let vk_surface = android_surface_fn
                 .create_android_surface(&create_info, None)
                 .expect("Failed to create Android Vulkan Surface");
@@ -52,15 +58,25 @@ unsafe impl Send for AndroidImpellerSurfaceState {}
 unsafe impl Sync for AndroidImpellerSurfaceState {}
 
 impl SurfaceState for AndroidImpellerSurfaceState {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
     fn resize(&mut self, _context: &mut RenderContext, width: u32, height: u32) {
         self.width = width;
         self.height = height;
     }
-    fn width(&self) -> u32 { self.width }
-    fn height(&self) -> u32 { self.height }
-    fn density(&self) -> f32 { self.density }
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
+    fn density(&self) -> f32 {
+        self.density
+    }
 }
 
 pub fn render_android(
@@ -71,15 +87,19 @@ pub fn render_android(
     static mut RENDER_COUNT: u32 = 0;
     unsafe {
         if RENDER_COUNT < 5 {
-            log::info!("RENDER_ANDROID_ENTRY: width={}, height={}", surface.width, surface.height);
+            log::info!(
+                "RENDER_ANDROID_ENTRY: width={}, height={}",
+                surface.width,
+                surface.height
+            );
             RENDER_COUNT += 1;
         }
     }
 
     if let Some(mut impeller_surface) = surface.swapchain.acquire_next_surface_new() {
         unsafe {
-            if RENDER_COUNT < 6 { 
-                log::info!("RENDER_ANDROID: Surface acquired, drawing..."); 
+            if RENDER_COUNT < 6 {
+                log::info!("RENDER_ANDROID: Surface acquired, drawing...");
                 RENDER_COUNT += 1;
             }
         }
@@ -93,7 +113,10 @@ pub fn render_android(
         static mut FAIL_COUNT: u32 = 0;
         unsafe {
             if FAIL_COUNT % 60 == 0 {
-                log::warn!("IMPELLER: Failed to acquire next surface from swapchain (count: {})", FAIL_COUNT);
+                log::warn!(
+                    "IMPELLER: Failed to acquire next surface from swapchain (count: {})",
+                    FAIL_COUNT
+                );
             }
             FAIL_COUNT += 1;
         }

@@ -2,16 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Two-stage initialization for optimal cache behavior
-//! 
+//!
 //! Stage 1: Load minimal shaders (~400ms), save cache immediately
 //! Stage 2: Load remaining shaders (~800ms), update cache when complete
-//! 
+//!
 //! This ensures:
 //! - First launch: Fast startup with Stage 1, cache saved
 //! - Second launch: Stage 1 from cache, Stage 2 loads and saves updated cache
 //! - Third launch: Full cache hit, fastest startup
 
-use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 use std::thread;
 
 /// Stage of initialization
@@ -35,7 +38,7 @@ const CACHE_VERSION: u32 = 1;
 pub struct CacheHeader {
     pub magic: [u8; 4],
     pub version: u32,
-    pub stage: u8,  // Which stage this cache contains
+    pub stage: u8, // Which stage this cache contains
     pub reserved: [u8; 3],
 }
 
@@ -48,7 +51,7 @@ impl CacheHeader {
             reserved: [0; 3],
         }
     }
-    
+
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 8 {
             return None;
@@ -68,7 +71,7 @@ impl CacheHeader {
             reserved: [0; 3],
         })
     }
-    
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(12);
         bytes.extend_from_slice(&self.magic);
@@ -89,13 +92,13 @@ impl TwoStageLoader {
     pub fn new(cache_path: String) -> Self {
         let stage = Self::detect_stage_from_cache(&cache_path);
         log::info!("[TwoStage] Current stage from cache: {:?}", stage);
-        
+
         Self {
             stage: Arc::new(AtomicU8::new(stage as u8)),
             cache_path,
         }
     }
-    
+
     /// Detect stage from existing cache file
     fn detect_stage_from_cache(cache_path: &str) -> InitStage {
         match std::fs::read(cache_path) {
@@ -113,7 +116,7 @@ impl TwoStageLoader {
             _ => InitStage::None,
         }
     }
-    
+
     /// Get current stage
     pub fn stage(&self) -> InitStage {
         match self.stage.load(Ordering::SeqCst) {
@@ -124,46 +127,48 @@ impl TwoStageLoader {
             _ => InitStage::None,
         }
     }
-    
+
     /// Check if we need Stage 2 loading
     pub fn needs_stage2(&self) -> bool {
         self.stage() != InitStage::Stage2Complete
     }
-    
+
     /// Check if cache exists at all
     pub fn has_any_cache(&self) -> bool {
         std::path::Path::new(&self.cache_path).exists()
     }
-    
+
     /// Save cache with stage metadata
     pub fn save_cache_with_stage(&self, wgpu_cache_data: &[u8], stage: u8) {
         let header = CacheHeader::new(stage);
         let mut data = header.to_bytes();
         data.extend_from_slice(wgpu_cache_data);
-        
+
         match std::fs::write(&self.cache_path, &data) {
-            Ok(_) => log::info!("[TwoStage] Cache saved with stage {} ({} bytes total)", stage, data.len()),
+            Ok(_) => log::info!(
+                "[TwoStage] Cache saved with stage {} ({} bytes total)",
+                stage,
+                data.len()
+            ),
             Err(e) => log::error!("[TwoStage] Failed to save cache: {}", e),
         }
     }
-    
+
     /// Load cache data (without header)
     pub fn load_cache_data(&self) -> Option<Vec<u8>> {
         match std::fs::read(&self.cache_path) {
-            Ok(data) if data.len() > 12 => {
-                Some(data[12..].to_vec())
-            }
+            Ok(data) if data.len() > 12 => Some(data[12..].to_vec()),
             _ => None,
         }
     }
-    
+
     /// Advance to next stage
     pub fn advance_stage(&self, stage: InitStage) {
         self.stage.store(stage as u8, Ordering::SeqCst);
     }
-    
+
     /// Execute two-stage loading
-    /// 
+    ///
     /// `stage1_loader`: Function to load minimal shaders, returns cache data
     /// `stage2_loader`: Function to load remaining shaders, returns updated cache data
     pub fn execute<F1, F2>(&self, stage1_loader: F1, stage2_loader: F2)
@@ -174,14 +179,14 @@ impl TwoStageLoader {
         let current_stage = self.stage();
         let cache_path = self.cache_path.clone();
         let stage = self.stage.clone();
-        
+
         thread::spawn(move || {
             match current_stage {
                 InitStage::None | InitStage::Stage1Loading => {
                     // Stage 1: Load minimal shaders
                     log::info!("[TwoStage] Starting Stage 1 (minimal shaders)");
                     stage.store(InitStage::Stage1Loading as u8, Ordering::SeqCst);
-                    
+
                     match stage1_loader() {
                         Ok(cache_data) => {
                             // Save Stage 1 cache immediately
@@ -189,21 +194,21 @@ impl TwoStageLoader {
                             let mut data = header.to_bytes();
                             data.extend_from_slice(&cache_data);
                             let _ = std::fs::write(&cache_path, &data);
-                            
+
                             stage.store(InitStage::Stage1Complete as u8, Ordering::SeqCst);
                             log::info!("[TwoStage] Stage 1 complete, cache saved");
-                            
+
                             // Continue to Stage 2 immediately
                             log::info!("[TwoStage] Starting Stage 2 (remaining shaders)");
                             stage.store(InitStage::Stage2Loading as u8, Ordering::SeqCst);
-                            
+
                             match stage2_loader() {
                                 Ok(updated_cache) => {
                                     let header = CacheHeader::new(InitStage::Stage2Complete as u8);
                                     let mut data = header.to_bytes();
                                     data.extend_from_slice(&updated_cache);
                                     let _ = std::fs::write(&cache_path, &data);
-                                    
+
                                     stage.store(InitStage::Stage2Complete as u8, Ordering::SeqCst);
                                     log::info!("[TwoStage] Stage 2 complete, full cache saved");
                                 }
@@ -221,14 +226,14 @@ impl TwoStageLoader {
                     // Stage 1 was done, continue with Stage 2
                     log::info!("[TwoStage] Resuming with Stage 2 (Stage 1 was cached)");
                     stage.store(InitStage::Stage2Loading as u8, Ordering::SeqCst);
-                    
+
                     match stage2_loader() {
                         Ok(updated_cache) => {
                             let header = CacheHeader::new(InitStage::Stage2Complete as u8);
                             let mut data = header.to_bytes();
                             data.extend_from_slice(&updated_cache);
                             let _ = std::fs::write(&cache_path, &data);
-                            
+
                             stage.store(InitStage::Stage2Complete as u8, Ordering::SeqCst);
                             log::info!("[TwoStage] Stage 2 complete, full cache saved");
                         }
@@ -257,14 +262,17 @@ impl TwoStageInit {
             loader: Arc::new(TwoStageLoader::new(cache_path)),
         }
     }
-    
+
     /// Check if we should use minimal config for fast startup
     pub fn use_minimal_for_startup(&self) -> bool {
         let stage = self.loader.stage();
         // Use minimal if no cache or only Stage 1
-        matches!(stage, InitStage::None | InitStage::Stage1Loading | InitStage::Stage1Complete)
+        matches!(
+            stage,
+            InitStage::None | InitStage::Stage1Loading | InitStage::Stage1Complete
+        )
     }
-    
+
     /// Check if full cache is ready
     pub fn is_full_cache_ready(&self) -> bool {
         self.loader.stage() == InitStage::Stage2Complete

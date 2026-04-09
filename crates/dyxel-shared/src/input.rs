@@ -213,11 +213,7 @@ impl RawInputEvent {
     }
 
     /// Create a new text input event
-    pub fn new_text_input(
-        event_type: InputEventType,
-        text: &str,
-        cursor_pos: u8,
-    ) -> Option<Self> {
+    pub fn new_text_input(event_type: InputEventType, text: &str, cursor_pos: u8) -> Option<Self> {
         let len = text.len();
         if len > 16 {
             return None; // Text too long for inline storage
@@ -276,17 +272,17 @@ impl Default for RawInputEvent {
 }
 
 /// Buffer capacity: 100 events (~3.2KB)
-/// 
+///
 /// At 120Hz sampling rate can cache ~830ms of events,
 /// sufficient for frame rate fluctuations
 pub const INPUT_BUFFER_CAPACITY: usize = 100;
 
 /// Input event ring buffer
-/// 
+///
 /// Single-producer single-consumer model:
 /// - Producer: Host-side input thread
 /// - Consumer: WASM logic thread
-/// 
+///
 /// Uses wrapping_add for lock-free ring buffer
 #[repr(C)]
 pub struct InputBuffer {
@@ -343,7 +339,7 @@ impl InputBuffer {
     }
 
     /// Push event (called by host)
-    /// 
+    ///
     /// Returns true on success, false if buffer full (event dropped)
     pub fn push(&mut self, event: RawInputEvent) -> bool {
         if self.is_full() {
@@ -357,7 +353,7 @@ impl InputBuffer {
     }
 
     /// Pop event (called by WASM)
-    /// 
+    ///
     /// Returns None if buffer empty
     pub fn pop(&mut self) -> Option<RawInputEvent> {
         if self.is_empty() {
@@ -370,7 +366,7 @@ impl InputBuffer {
     }
 
     /// Batch read all available events
-    /// 
+    ///
     /// Used to process all accumulated events at frame start
     pub fn drain(&mut self) -> InputBufferDrainIterator<'_> {
         InputBufferDrainIterator { buffer: self }
@@ -437,18 +433,18 @@ mod tests {
     #[test]
     fn test_input_buffer_basic() {
         let mut buffer = InputBuffer::new();
-        
+
         // Initial state
         assert!(buffer.is_empty());
         assert!(!buffer.is_full());
         assert_eq!(buffer.len(), 0);
-        
+
         // Push event
         let event = RawInputEvent::default();
         assert!(buffer.push(event));
         assert!(!buffer.is_empty());
         assert_eq!(buffer.len(), 1);
-        
+
         // Pop event
         let popped = buffer.pop();
         assert!(popped.is_some());
@@ -458,47 +454,47 @@ mod tests {
     #[test]
     fn test_input_buffer_wrap_around() {
         let mut buffer = InputBuffer::new();
-        
+
         // Write 100 events
         for i in 0..INPUT_BUFFER_CAPACITY {
             let mut event = RawInputEvent::default();
             event.pointer_id = i as u32;
             assert!(buffer.push(event));
         }
-        
+
         assert!(buffer.is_full());
         assert_eq!(buffer.len(), INPUT_BUFFER_CAPACITY);
-        
+
         // Read 50
         for _ in 0..50 {
             buffer.pop();
         }
-        
+
         assert_eq!(buffer.len(), INPUT_BUFFER_CAPACITY - 50);
-        
+
         // Write 50 more (test wrap-around)
         for i in 0..50 {
             let mut event = RawInputEvent::default();
             event.pointer_id = (i + 100) as u32;
             assert!(buffer.push(event));
         }
-        
+
         assert!(buffer.is_full());
     }
 
     #[test]
     fn test_input_buffer_overflow() {
         let mut buffer = InputBuffer::new();
-        
+
         // Fill buffer
         for _ in 0..INPUT_BUFFER_CAPACITY {
             assert!(buffer.push(RawInputEvent::default()));
         }
-        
+
         // Next should fail
         assert!(!buffer.push(RawInputEvent::default()));
         assert_eq!(buffer.overflow_count, 1);
-        
+
         // Try again
         assert!(!buffer.push(RawInputEvent::default()));
         assert_eq!(buffer.overflow_count, 2);
@@ -507,19 +503,19 @@ mod tests {
     #[test]
     fn test_input_buffer_drain() {
         let mut buffer = InputBuffer::new();
-        
+
         // Write 10 events
         for i in 0..10 {
             let mut event = RawInputEvent::default();
             event.pointer_id = i as u32;
             buffer.push(event);
         }
-        
+
         // Batch read
         let events: Vec<_> = buffer.drain().collect();
         assert_eq!(events.len(), 10);
         assert!(buffer.is_empty());
-        
+
         // Verify order
         for (i, event) in events.iter().enumerate() {
             assert_eq!(event.pointer_id, i as u32);
@@ -528,14 +524,26 @@ mod tests {
 
     #[test]
     fn test_event_type_from_u8() {
-        assert_eq!(InputEventType::from_u8(0), Some(InputEventType::PointerDown));
-        assert_eq!(InputEventType::from_u8(1), Some(InputEventType::PointerMove));
+        assert_eq!(
+            InputEventType::from_u8(0),
+            Some(InputEventType::PointerDown)
+        );
+        assert_eq!(
+            InputEventType::from_u8(1),
+            Some(InputEventType::PointerMove)
+        );
         assert_eq!(InputEventType::from_u8(2), Some(InputEventType::PointerUp));
-        assert_eq!(InputEventType::from_u8(3), Some(InputEventType::PointerCancel));
+        assert_eq!(
+            InputEventType::from_u8(3),
+            Some(InputEventType::PointerCancel)
+        );
         assert_eq!(InputEventType::from_u8(5), Some(InputEventType::KeyDown));
         assert_eq!(InputEventType::from_u8(6), Some(InputEventType::KeyUp));
         assert_eq!(InputEventType::from_u8(7), Some(InputEventType::TextInput));
-        assert_eq!(InputEventType::from_u8(8), Some(InputEventType::ImeComposition));
+        assert_eq!(
+            InputEventType::from_u8(8),
+            Some(InputEventType::ImeComposition)
+        );
         assert_eq!(InputEventType::from_u8(9), Some(InputEventType::ImeCommit));
         assert_eq!(InputEventType::from_u8(99), None);
     }
@@ -566,7 +574,8 @@ mod tests {
     #[test]
     fn test_text_input_too_long() {
         // Text longer than 16 bytes should be rejected
-        let result = RawInputEvent::new_text_input(InputEventType::TextInput, "this is a very long text", 0);
+        let result =
+            RawInputEvent::new_text_input(InputEventType::TextInput, "this is a very long text", 0);
         assert!(result.is_none());
     }
 

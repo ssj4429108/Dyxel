@@ -4,19 +4,21 @@
 // Allow deprecated warnings from wasm-bindgen async constructors
 #![allow(deprecated)]
 
-use wasm_bindgen::prelude::*;
-use std::collections::HashMap;
-use dyxel_core::DyxelHost;
-use dyxel_render_api::{SharedPtr, SharedMutex};
-use dyxel_shared::{Role, ViewType, SharedState};
 use dyxel_core::input::hit_test_recursive;
-use web_sys::{HtmlCanvasElement, HtmlElement, Response};
+use dyxel_core::DyxelHost;
+use dyxel_render_api::{SharedMutex, SharedPtr};
+use dyxel_shared::{Role, SharedState, ViewType};
 use kurbo::Vec2;
+use std::collections::HashMap;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
+use web_sys::{HtmlCanvasElement, HtmlElement, Response};
 
 // Web-specific window handle wrapper for wgpu SurfaceTarget
-use raw_window_handle::{HasWindowHandle, HasDisplayHandle, WindowHandle, DisplayHandle, HandleError};
-use raw_window_handle::{WebWindowHandle, WebDisplayHandle, RawWindowHandle, RawDisplayHandle};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
+};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WebDisplayHandle, WebWindowHandle};
 
 /// Wrapper for HtmlCanvasElement to implement raw_window_handle traits
 pub struct WebCanvasHandle {
@@ -32,7 +34,7 @@ impl WebCanvasHandle {
         let id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         Self { canvas, id }
     }
-    
+
     pub fn canvas(&self) -> &HtmlCanvasElement {
         &self.canvas
     }
@@ -53,9 +55,9 @@ impl HasDisplayHandle for WebCanvasHandle {
 }
 
 #[wasm_bindgen(start)]
-pub fn start() { 
+pub fn start() {
     wasm_logger::init(wasm_logger::Config::default());
-    console_error_panic_hook::set_once(); 
+    console_error_panic_hook::set_once();
 }
 
 #[wasm_bindgen]
@@ -71,17 +73,22 @@ impl WebHost {
     pub async fn new(canvas: HtmlCanvasElement) -> Result<WebHost, JsValue> {
         log::info!("Dyxel WebHost: Creating new instance...");
         let host = DyxelHost::new();
-        
+
         let document = web_sys::window().unwrap().document().unwrap();
         let semantics_root = document.create_element("div")?.dyn_into::<HtmlElement>()?;
         let s = semantics_root.style();
         s.set_property("position", "absolute")?;
-        s.set_property("top", "0")?; s.set_property("left", "0")?;
-        s.set_property("width", "100%")?; s.set_property("height", "100%")?;
+        s.set_property("top", "0")?;
+        s.set_property("left", "0")?;
+        s.set_property("width", "100%")?;
+        s.set_property("height", "100%")?;
         s.set_property("pointer-events", "none")?;
-        s.set_property("color", "white")?;  // Set default text color
+        s.set_property("color", "white")?; // Set default text color
         s.set_property("font-family", "system-ui, -apple-system, sans-serif")?;
-        canvas.parent_element().unwrap().append_child(&semantics_root)?;
+        canvas
+            .parent_element()
+            .unwrap()
+            .append_child(&semantics_root)?;
 
         // 1. Asynchronously load engine
         host.prepare_engine(".".to_string()).await;
@@ -92,20 +99,19 @@ impl WebHost {
         let canvas_handle = WebCanvasHandle::new(canvas.clone());
         let wgpu_target: vello::wgpu::SurfaceTarget<'static> = canvas_handle.into();
         let target_handle = dyxel_render_api::SurfaceTargetHandle::new(wgpu_target);
-        host.setup(
-            target_handle,
-            canvas.width(),
-            canvas.height(),
-            None
-        ).await;
+        host.setup(target_handle, canvas.width(), canvas.height(), None)
+            .await;
         log::info!("Dyxel WebHost: Surface setup complete.");
-        
+
         // 3. Load default font for Vello rendering
         // Load Roboto from Google Fonts CDN
         let font_url = "https://fonts.gstatic.com/s/roboto/v32/KFOmCnqEu92Fr1Mu4mxKKTU1Kg.woff2";
         match load_font_data(font_url).await {
             Ok(font_data) => {
-                log::info!("Dyxel WebHost: Loaded font data ({} bytes)", font_data.len());
+                log::info!(
+                    "Dyxel WebHost: Loaded font data ({} bytes)",
+                    font_data.len()
+                );
                 // Store font data for Vello rendering
                 // Note: In a full implementation, we'd register this with fontique
             }
@@ -120,7 +126,7 @@ impl WebHost {
             dom_nodes: HashMap::new(),
         })
     }
-    
+
     #[wasm_bindgen(js_name = loadWasm)]
     pub async fn load_wasm(&self, _wasm_url: String) {
         // In scheme A, JS is responsible for loading WASM, this method is just a placeholder
@@ -131,14 +137,14 @@ impl WebHost {
     #[wasm_bindgen(js_name = wasmSyncTick)]
     pub fn wasm_sync_tick(&mut self, guest_memory: &js_sys::Uint8Array, buffer_ptr: u32) {
         let mut mem = guest_memory.to_vec();
-        
+
         if let Some(ss) = self.host.get_shared_state() {
             // Process guest commands
             let _ = dyxel_core::process_commands(&mut mem, buffer_ptr, &ss);
-            
+
             // Execute rendering
             self.host.tick();
-            
+
             // Sync new layout back to guest memory
             #[cfg(target_arch = "wasm32")]
             {
@@ -146,7 +152,7 @@ impl WebHost {
                 let _ = dyxel_core::sync_layout_to_wasm(&mut mem, buffer_ptr, &*layout_guard);
             }
         }
-        
+
         guest_memory.copy_from(&mem);
     }
 
@@ -156,7 +162,10 @@ impl WebHost {
     }
 
     fn sync_semantics(&mut self) {
-        let rid = self.host.get_shared_state().and_then(|ss| ss.lock().unwrap().root_id);
+        let rid = self
+            .host
+            .get_shared_state()
+            .and_then(|ss| ss.lock().unwrap().root_id);
         if let Some(rid) = rid {
             self.sync_node_dom_recursive(rid, Vec2::ZERO);
         }
@@ -170,10 +179,15 @@ impl WebHost {
 
         let (node_data, global_pos) = {
             let shared_guard = ss.lock().unwrap();
-            let Some(node) = shared_guard.nodes.get(&id) else { return; };
-            let Ok(layout) = shared_guard.taffy.layout(node.taffy_node) else { return; };
-            let global_pos = parent_pos + Vec2::new(layout.location.x as f64, layout.location.y as f64);
-            
+            let Some(node) = shared_guard.nodes.get(&id) else {
+                return;
+            };
+            let Ok(layout) = shared_guard.taffy.layout(node.taffy_node) else {
+                return;
+            };
+            let global_pos =
+                parent_pos + Vec2::new(layout.location.x as f64, layout.location.y as f64);
+
             (
                 (
                     node.view_type,
@@ -193,7 +207,11 @@ impl WebHost {
 
         let el = self.dom_nodes.entry(id).or_insert_with(|| {
             let document = web_sys::window().unwrap().document().unwrap();
-            let el = document.create_element("div").unwrap().dyn_into::<HtmlElement>().unwrap();
+            let el = document
+                .create_element("div")
+                .unwrap()
+                .dyn_into::<HtmlElement>()
+                .unwrap();
             let s = el.style();
             s.set_property("position", "absolute").unwrap();
             // Note: Text color is set to visible since WASM font loading via fontique is limited
@@ -201,15 +219,21 @@ impl WebHost {
             // Web: Use visible color for DOM text overlay since Vello font loading is limited in WASM
             s.set_property("color", "white").unwrap();
             s.set_property("font-size", "16px").unwrap();
-            s.set_property("font-family", "system-ui, -apple-system, BlinkMacSystemFont, sans-serif").unwrap();
+            s.set_property(
+                "font-family",
+                "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+            )
+            .unwrap();
             s.set_property("user-select", "none").unwrap();
             self.semantics_root.append_child(&el).unwrap();
             el
         });
 
         let s = el.style();
-        s.set_property("left", &format!("{}px", global_pos.x)).unwrap();
-        s.set_property("top", &format!("{}px", global_pos.y)).unwrap();
+        s.set_property("left", &format!("{}px", global_pos.x))
+            .unwrap();
+        s.set_property("top", &format!("{}px", global_pos.y))
+            .unwrap();
         s.set_property("width", &format!("{}px", width)).unwrap();
         s.set_property("height", &format!("{}px", height)).unwrap();
 
@@ -223,7 +247,9 @@ impl WebHost {
             s.set_property("pointer-events", "auto").unwrap();
             s.set_property("cursor", "pointer").unwrap();
             el.set_attribute("tabindex", "0").unwrap();
-            if role == Role::None { el.set_attribute("role", "button").unwrap(); }
+            if role == Role::None {
+                el.set_attribute("role", "button").unwrap();
+            }
         } else {
             s.set_property("pointer-events", "none").unwrap();
         }
@@ -239,7 +265,14 @@ impl WebHost {
             let mouse_pos = Vec2::new(x, y);
             let s_guard = ss.lock().unwrap();
             return s_guard.root_id.and_then(|rid| {
-                hit_test_recursive(rid, mouse_pos, &s_guard.nodes, &s_guard.taffy, Vec2::ZERO, &s_guard.click_listeners)
+                hit_test_recursive(
+                    rid,
+                    mouse_pos,
+                    &s_guard.nodes,
+                    &s_guard.taffy,
+                    Vec2::ZERO,
+                    &s_guard.click_listeners,
+                )
             });
         }
         None
@@ -252,17 +285,16 @@ impl WebHost {
     }
 }
 
-
 /// Load font data from URL
 async fn load_font_data(url: &str) -> Result<Vec<u8>, JsValue> {
     let window = web_sys::window().unwrap();
     let resp_value = JsFuture::from(window.fetch_with_str(url)).await?;
     let resp: Response = resp_value.dyn_into()?;
-    
+
     if !resp.ok() {
         return Err(JsValue::from_str(&format!("HTTP error: {}", resp.status())));
     }
-    
+
     let buffer = JsFuture::from(resp.array_buffer()?).await?;
     let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
     Ok(bytes)

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Gesture Events
-//! 
+//!
 //! Defines the high-level gesture events that are dispatched to WASM.
 //! These events are the output of the gesture recognition system.
 
@@ -152,7 +152,7 @@ pub enum GestureEventType {
 }
 
 /// High-level gesture event
-/// 
+///
 /// This is what gets dispatched to WASM. It contains all the
 /// information needed to handle the gesture.
 #[derive(Debug, Clone)]
@@ -195,7 +195,14 @@ pub enum GesturePhase {
 
 impl GestureEvent {
     /// Create a tap event with specified count
-    pub fn tap(node_id: u32, pointer_id: u32, x: f32, y: f32, tap_count: u32, timestamp_us: u64) -> Self {
+    pub fn tap(
+        node_id: u32,
+        pointer_id: u32,
+        x: f32,
+        y: f32,
+        tap_count: u32,
+        timestamp_us: u64,
+    ) -> Self {
         Self {
             event_type: GestureEventType::Tap,
             target_node_id: node_id,
@@ -233,7 +240,13 @@ impl GestureEvent {
     }
 
     /// Create a long press start event
-    pub fn long_press_start(node_id: u32, pointer_id: u32, x: f32, y: f32, timestamp_us: u64) -> Self {
+    pub fn long_press_start(
+        node_id: u32,
+        pointer_id: u32,
+        x: f32,
+        y: f32,
+        timestamp_us: u64,
+    ) -> Self {
         Self {
             event_type: GestureEventType::LongPressStart,
             target_node_id: node_id,
@@ -252,7 +265,13 @@ impl GestureEvent {
     }
 
     /// Create a long press end event
-    pub fn long_press_end(node_id: u32, pointer_id: u32, x: f32, y: f32, timestamp_us: u64) -> Self {
+    pub fn long_press_end(
+        node_id: u32,
+        pointer_id: u32,
+        x: f32,
+        y: f32,
+        timestamp_us: u64,
+    ) -> Self {
         Self {
             event_type: GestureEventType::LongPressEnd,
             target_node_id: node_id,

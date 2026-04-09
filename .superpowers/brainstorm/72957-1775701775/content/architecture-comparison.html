@@ -1,0 +1,85 @@
+<h2>TextInput 架构对比 (真相来源)</h2>
+<p class="subtitle">决定 WASM (Guest) 与 Native (Host) 之间的同步方式</p>
+
+<div class="options" data-choice="model">
+  <div class="option" data-choice="guest-centric" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Guest 中心化 (受控组件)</h3>
+      <p><b>WASM 持有主状态。</b> Native 每次按键都发给 Guest，Guest 过滤后返回给 Native 更新输入缓冲区。</p>
+      <div class="pros-cons">
+        <div class="pros">
+          <ul>
+            <li>极致的控制力 (如输入掩码、撤销逻辑)</li>
+            <li>与 Xilem/React 逻辑完美契合</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <ul>
+            <li>FFI 延迟可能导致 IME 候选词抖动</li>
+            <li>处理亚洲语言 (IME) 极其复杂</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="host-centric" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Host 中心化 (原生驱动)</h3>
+      <p><b>Native 持有主状态。</b> 使用平台原生的 TextInputView，WASM 仅接收“文本已变更”事件并渲染结果。</p>
+      <div class="pros-cons">
+        <div class="pros">
+          <ul>
+            <li>IME 体验最流畅 (iOS/Android 原生体验)</li>
+            <li>开发复杂度最低</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <ul>
+            <li>WASM 端很难实时拦截/修改输入</li>
+            <li>渲染可能与原生输入框有短暂不同步</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="hybrid" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>混合/事务型 (解耦合)</h3>
+      <p><b>Flutter 模式。</b> Native 通过 TextInputClient 与 WASM 通信，变更以事务形式同步。WASM 端维护对应的 TextEditingController。</p>
+      <div class="pros-cons">
+        <div class="pros">
+          <ul>
+            <li>兼顾流畅度与逻辑控制</li>
+            <li>更易扩展到多行、富文本等复杂场景</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <ul>
+            <li>实现逻辑最复杂</li>
+            <li>需要精细处理状态调和 (Reconciliation)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">架构演示：数据流向</div>
+  <div class="mockup-body" style="padding: 20px; text-align: center;">
+    <div style="display: flex; justify-content: space-around; align-items: center;">
+      <div class="placeholder" style="width: 120px; height: 80px; padding: 10px;">
+        <b>Native (Host)</b><br>Keyboard / IME
+      </div>
+      <div style="font-size: 24px;">&harr; (FFI) &harr;</div>
+      <div class="placeholder" style="width: 120px; height: 80px; padding: 10px;">
+        <b>WASM (Guest)</b><br>State / View
+      </div>
+    </div>
+  </div>
+</div>

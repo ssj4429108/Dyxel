@@ -1,0 +1,75 @@
+<h2>TextInput API 风格选择</h2>
+<p class="subtitle">如何将响应式状态与解耦合的 TextInputClient 绑定</p>
+
+<div class="options" data-choice="api-style">
+  <div class="option" data-choice="signal" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>信号驱动 (Xilem/Leptos 风格)</h3>
+      <p><b>极致简洁。</b> 开发者只需提供一个 Signal。所有复杂的 FFI 同步和事务处理都封装在组件内部。</p>
+      <pre><code>let name = create_signal("World".to_string());
+
+TextInput {
+  text: name,
+  on_change: move |val| name.set(val),
+}</code></pre>
+      <div class="pros-cons">
+        <div class="pros">
+          <ul>
+            <li>声明式代码，易于上手</li>
+            <li>符合 Dyxel 目前的信号系统</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <ul>
+            <li>很难精细控制光标和选区</li>
+            <li>难以实现复杂的自定义逻辑 (如高亮)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="controller" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>控制器驱动 (Flutter 风格)</h3>
+      <p><b>精细控制。</b> 开发者创建一个 Controller。Controller 包含 Text、Selection 和 Composing 状态，并管理所有事务。</p>
+      <pre><code>let controller = use_text_controller("World");
+
+TextInput {
+  controller: controller,
+}
+
+// 可以在外部精细操作
+controller.select_all();
+controller.insert_at_cursor("!");</code></pre>
+      <div class="pros-cons">
+        <div class="pros">
+          <ul>
+            <li>强大的功能 (光标位置、多行选择)</li>
+            <li>支持富文本、语法高亮等高级功能</li>
+          </ul>
+        </div>
+        <div class="cons">
+          <ul>
+            <li>API 相对繁琐</li>
+            <li>需要管理 Controller 的生命周期</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">底层机制：FFI 事务流</div>
+  <div class="mockup-body" style="padding: 10px;">
+    <ol style="font-size: 14px;">
+      <li><b>Native IME</b> 捕获按键</li>
+      <li>发送 <b>TextUpdateTransaction</b> 到 WASM</li>
+      <li>WASM <b>Controller</b> 调和状态 (Reconciliation)</li>
+      <li>触发 <b>Signal</b> 更新或重绘视图</li>
+    </ol>
+  </div>
+</div>

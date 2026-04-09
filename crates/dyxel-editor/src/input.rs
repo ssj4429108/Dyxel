@@ -36,7 +36,7 @@ pub struct Modifiers {
 pub struct KeyboardEvent {
     pub key: Key,
     pub modifiers: Modifiers,
-    pub pressed: bool,  // true = key down, false = key up
+    pub pressed: bool, // true = key down, false = key up
 }
 
 /// Pointer (mouse/touch) event
@@ -66,7 +66,11 @@ impl Editor {
         let shift = event.modifiers.shift;
         let ctrl = event.modifiers.ctrl;
         let meta = event.modifiers.meta;
-        let action_mod = if cfg!(target_os = "macos") { meta } else { ctrl };
+        let action_mod = if cfg!(target_os = "macos") {
+            meta
+        } else {
+            ctrl
+        };
 
         match event.key {
             Key::Character(c) => {
@@ -100,7 +104,11 @@ impl Editor {
             }
             Key::Left => {
                 if action_mod {
-                    if shift { self.select_word_left(); } else { self.move_word_left(); }
+                    if shift {
+                        self.select_word_left();
+                    } else {
+                        self.move_word_left();
+                    }
                 } else if shift {
                     self.select_left();
                 } else {
@@ -109,7 +117,11 @@ impl Editor {
             }
             Key::Right => {
                 if action_mod {
-                    if shift { self.select_word_right(); } else { self.move_word_right(); }
+                    if shift {
+                        self.select_word_right();
+                    } else {
+                        self.move_word_right();
+                    }
                 } else if shift {
                     self.select_right();
                 } else {
@@ -117,14 +129,26 @@ impl Editor {
                 }
             }
             Key::Up => {
-                if shift { self.select_up(); } else { self.move_up(); }
+                if shift {
+                    self.select_up();
+                } else {
+                    self.move_up();
+                }
             }
             Key::Down => {
-                if shift { self.select_down(); } else { self.move_down(); }
+                if shift {
+                    self.select_down();
+                } else {
+                    self.move_down();
+                }
             }
             Key::Home => {
                 if action_mod {
-                    if shift { self.select_to_text_start(); } else { self.move_to_text_start(); }
+                    if shift {
+                        self.select_to_text_start();
+                    } else {
+                        self.move_to_text_start();
+                    }
                 } else if shift {
                     self.select_to_line_start();
                 } else {
@@ -133,7 +157,11 @@ impl Editor {
             }
             Key::End => {
                 if action_mod {
-                    if shift { self.select_to_text_end(); } else { self.move_to_text_end(); }
+                    if shift {
+                        self.select_to_text_end();
+                    } else {
+                        self.move_to_text_end();
+                    }
                 } else if shift {
                     self.select_to_line_end();
                 } else {

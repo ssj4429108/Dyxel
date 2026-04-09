@@ -1,0 +1,55 @@
+<h2>TextInput 最终架构方案</h2>
+<p class="subtitle">基于事务 (Transaction) 与 响应式值 (Reactive Value) 的 WASM 渲染方案</p>
+
+<div class="mockup">
+  <div class="mockup-header">架构概览：三层协作模型</div>
+  <div class="mockup-body" style="padding: 15px;">
+    <div style="display: flex; gap: 10px;">
+      <div class="placeholder" style="flex: 1; height: 200px; padding: 10px;">
+        <b class="label">Native (Host)</b>
+        <p style="font-size: 12px;"><b>IME 采集层</b></p>
+        <ul style="font-size: 10px; margin-left: 15px;">
+          <li>监听软键盘按键</li>
+          <li>处理中日韩 (IME) 候选词</li>
+          <li>不持有 Source of Truth</li>
+          <li>发送变更事务给 Guest</li>
+        </ul>
+      </div>
+      <div class="placeholder" style="flex: 1; height: 200px; padding: 10px; border-color: var(--primary);">
+        <b class="label" style="color: var(--primary);">WASM (Guest)</b>
+        <p style="font-size: 12px;"><b>逻辑 & 状态层</b></p>
+        <ul style="font-size: 10px; margin-left: 15px;">
+          <li><b>Source of Truth</b> (Signal)</li>
+          <li>事务调和 (Reconciliation)</li>
+          <li>文本布局计算 (Taffy)</li>
+          <li>光标/选区坐标计算</li>
+        </ul>
+      </div>
+      <div class="placeholder" style="flex: 1; height: 200px; padding: 10px;">
+        <b class="label">Renderer (Vello)</b>
+        <p style="font-size: 12px;"><b>绘制层</b></p>
+        <ul style="font-size: 10px; margin-left: 15px;">
+          <li>渲染文本 glyphs</li>
+          <li>绘制光标 (矩形)</li>
+          <li>绘制选区 (半透明)</li>
+          <li>处理动画 (光标闪烁)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>为什么选择此方案？</h3>
+  <div class="pros-cons">
+    <div class="pros">
+      <ul>
+        <li><b>跨平台一致性：</b>Vello 渲染的光标在 Web/iOS/Android 上看起来完全一样。</li>
+        <li><b>响应式 API：</b>对开发者友好，符合 Dyxel 的状态流。</li>
+        <li><b>低延迟：</b>逻辑在 WASM 中处理，渲染直接通过 GPU。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="mock-nav">确认架构后，我将进入设计文档编写阶段</div>

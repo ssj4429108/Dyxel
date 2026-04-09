@@ -30,6 +30,7 @@ pollster = "0.3"
 log = "0.4"
 raw-window-handle = "0.6"
 parley.workspace = true
+lazy_static = "1.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Only include wasm3 crate on non-wasm32 targets

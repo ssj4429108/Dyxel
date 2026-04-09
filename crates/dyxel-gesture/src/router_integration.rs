@@ -8,11 +8,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::events::{PointerEvent, PointerEventType, GestureEvent};
-use crate::arena::{GestureArenaManager, GestureArena};
+use crate::arena::{GestureArena, GestureArenaManager};
+use crate::events::{GestureEvent, PointerEvent, PointerEventType};
 use crate::recognizer::{
-    TapGestureRecognizer, LongPressGestureRecognizer,
-    PanGestureRecognizer, ScaleGestureRecognizer, RotationGestureRecognizer
+    LongPressGestureRecognizer, PanGestureRecognizer, RotationGestureRecognizer,
+    ScaleGestureRecognizer, TapGestureRecognizer,
 };
 
 /// Gesture type for configuration
@@ -86,8 +86,7 @@ impl RecognizerFactory {
             // Use max_tap_count from config (supports single/double/triple/etc)
             let tap_count = config.max_tap_count.max(1);
 
-            let tap_recognizer = TapGestureRecognizer::new(rid, node_id)
-                .with_tap_count(tap_count);
+            let tap_recognizer = TapGestureRecognizer::new(rid, node_id).with_tap_count(tap_count);
 
             arena.add_member(Box::new(tap_recognizer));
             recognizer_ids.push(rid);
@@ -110,8 +109,7 @@ impl RecognizerFactory {
             let rid = self.next_recognizer_id;
             self.next_recognizer_id += 1;
 
-            let pan_recognizer = PanGestureRecognizer::new(rid, node_id)
-                .with_slop(config.slop);
+            let pan_recognizer = PanGestureRecognizer::new(rid, node_id).with_slop(config.slop);
 
             arena.add_member(Box::new(pan_recognizer));
             recognizer_ids.push(rid);
@@ -133,8 +131,8 @@ impl RecognizerFactory {
             let rid = self.next_recognizer_id;
             self.next_recognizer_id += 1;
 
-            let rotation_recognizer = RotationGestureRecognizer::new(rid, node_id)
-                .with_slop(config.slop); // Use same slop as other gestures
+            let rotation_recognizer =
+                RotationGestureRecognizer::new(rid, node_id).with_slop(config.slop); // Use same slop as other gestures
 
             arena.add_member(Box::new(rotation_recognizer));
             recognizer_ids.push(rid);
@@ -173,23 +171,50 @@ impl GestureRouter {
     }
 
     /// Route a pointer event with an explicit bubble path
-    pub fn route_pointer_event_with_path(&mut self, event: &PointerEvent, bubble_path: Vec<u32>) -> Vec<GestureEvent> {
+    pub fn route_pointer_event_with_path(
+        &mut self,
+        event: &PointerEvent,
+        bubble_path: Vec<u32>,
+    ) -> Vec<GestureEvent> {
         // On pointer down, create a new arena and add recognizers for all nodes in path
         if event.event_type == PointerEventType::Down {
             // Collect valid node ids first (without configs to avoid clone)
             let node_ids: Vec<u32> = bubble_path
+                .clone()
                 .into_iter()
                 .filter(|id| *id != 0)
                 .collect();
 
+            log::info!(
+                "GestureRouter: PointerDown at ({:.1},{:.1}) target={} bubble_path={:?}",
+                event.x,
+                event.y,
+                event.target_node_id,
+                bubble_path
+            );
+            log::info!(
+                "GestureRouter: node_configs has {} nodes, checking {:?}",
+                self.node_configs.len(),
+                node_ids
+            );
+
             // Check if arena already exists for this pointer
-            let arena_existed = self.arena_manager.pointer_to_arena.contains_key(&event.pointer_id);
+            let arena_existed = self
+                .arena_manager
+                .pointer_to_arena
+                .contains_key(&event.pointer_id);
 
             // First, ensure arena exists by calling get_or_create_arena
-            let _ = self.arena_manager.get_or_create_arena(event.pointer_id, event.target_node_id);
+            let _ = self
+                .arena_manager
+                .get_or_create_arena(event.pointer_id, event.target_node_id);
 
             // Get the arena_id for this pointer
-            let arena_id_opt = self.arena_manager.pointer_to_arena.get(&event.pointer_id).copied();
+            let arena_id_opt = self
+                .arena_manager
+                .pointer_to_arena
+                .get(&event.pointer_id)
+                .copied();
 
             // Only add recognizers if this is a new arena
             // For multi-tap, the same recognizer handles all taps
@@ -203,17 +228,37 @@ impl GestureRouter {
                         // SAFETY: We check if config exists and immediately use it
                         // The borrow checker ensures no mutable borrow overlaps
                         if let Some(config) = self.node_configs.get(&node_id) {
+                            log::info!(
+                                "GestureRouter: Found config for node {} with types={:?}",
+                                node_id,
+                                config.registered_types
+                            );
                             if let Some(arena) = self.arena_manager.get_arena_mut(arena_id) {
                                 let ids = factory.create_recognizers(node_id, config, arena);
+                                log::info!(
+                                    "GestureRouter: Created {} recognizers for node {}",
+                                    ids.len(),
+                                    node_id
+                                );
                                 if !ids.is_empty() {
                                     self.node_recognizers.insert(node_id, ids);
                                 }
                             }
+                        } else {
+                            log::warn!(
+                                "GestureRouter: NO config found for node {} - tap will not work!",
+                                node_id
+                            );
                         }
                     }
 
                     // Update next_recognizer_id
                     self.next_recognizer_id = factory.next_recognizer_id;
+                } else {
+                    log::info!(
+                        "GestureRouter: Arena already existed for pointer {}",
+                        event.pointer_id
+                    );
                 }
             }
         }

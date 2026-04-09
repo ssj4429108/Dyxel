@@ -76,7 +76,10 @@ impl GestureArena {
     pub fn has_pending_multi_tap(&self) -> bool {
         self.members.iter().any(|m| {
             // Check if this is a tap recognizer waiting for more taps
-            if let Some(tap) = m.as_any().downcast_ref::<crate::recognizer::TapGestureRecognizer>() {
+            if let Some(tap) = m
+                .as_any()
+                .downcast_ref::<crate::recognizer::TapGestureRecognizer>()
+            {
                 return tap.is_waiting_for_more_taps();
             }
             false
@@ -103,8 +106,20 @@ impl GestureArena {
     /// Process a pointer event
     pub fn process_event(&mut self, event: &PointerEvent) -> Vec<GestureEvent> {
         if self.is_closed {
+            log::info!(
+                "Arena {}: Closed, ignoring event {:?}",
+                self.id,
+                event.event_type
+            );
             return vec![];
         }
+
+        log::info!(
+            "Arena {}: Processing {:?} with {} members",
+            self.id,
+            event.event_type,
+            self.members.len()
+        );
 
         let mut events = vec![];
         let mut newly_accepted = vec![];
@@ -157,6 +172,18 @@ impl GestureArena {
         // This ensures:
         // - Continuous gestures (Pan) can continue receiving events after being accepted
         // - Discrete gestures (Tap) can complete via timer (e.g., multi-tap waiting)
+
+        if !events.is_empty() {
+            log::info!(
+                "Arena {}: Generated {} events: {:?}",
+                self.id,
+                events.len(),
+                events
+                    .iter()
+                    .map(|e| format!("{:?}", e.event_type))
+                    .collect::<Vec<_>>()
+            );
+        }
 
         events
     }
@@ -377,7 +404,10 @@ impl GestureArenaManager {
                         // For discrete gestures (Tap), close arena immediately on Up if resolved
                         // For continuous gestures (Pan), keep arena open until Up event
                         // For multi-tap, keep arena open until all taps are received or timeout
-                        if matches!(event.event_type, PointerEventType::Up | PointerEventType::Cancel) {
+                        if matches!(
+                            event.event_type,
+                            PointerEventType::Up | PointerEventType::Cancel
+                        ) {
                             if arena.all_members_resolved() && !arena.has_pending_multi_tap() {
                                 arena.close();
                             }
@@ -461,7 +491,9 @@ impl Default for GestureArenaManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recognizer::{TapGestureRecognizer, LongPressGestureRecognizer, PanGestureRecognizer};
+    use crate::recognizer::{
+        LongPressGestureRecognizer, PanGestureRecognizer, TapGestureRecognizer,
+    };
     use crate::test_utils::{GestureEventAssertions, PointerEventBuilder};
     use std::time::Duration;
 
@@ -471,14 +503,18 @@ mod tests {
         let node_id = 1;
 
         // Add tap recognizer
-        let down = PointerEventBuilder::new(0).node_id(node_id).down(100.0, 100.0);
+        let down = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .down(100.0, 100.0);
         let arena = manager.get_or_create_arena(0, node_id);
         arena.add_member(Box::new(TapGestureRecognizer::single_tap(1, node_id)));
 
         let events = manager.handle_pointer_event(&down);
         assert!(events.is_empty());
 
-        let up = PointerEventBuilder::new(0).node_id(node_id).up_at(100.0, 100.0);
+        let up = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .up_at(100.0, 100.0);
         let events = manager.handle_pointer_event(&up);
         events.assert_tap(1).assert_count(1);
     }
@@ -489,7 +525,9 @@ mod tests {
         let node_id = 1;
 
         // Add both recognizers
-        let down = PointerEventBuilder::new(0).node_id(node_id).down(100.0, 100.0);
+        let down = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .down(100.0, 100.0);
         let arena = manager.get_or_create_arena(0, node_id);
         arena.add_member(Box::new(TapGestureRecognizer::single_tap(1, node_id)));
         arena.add_member(Box::new(LongPressGestureRecognizer::new(2, node_id)));
@@ -498,7 +536,9 @@ mod tests {
         assert!(events.is_empty());
 
         // Quick tap - should fire immediately
-        let up = PointerEventBuilder::new(0).node_id(node_id).up_at(100.0, 100.0);
+        let up = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .up_at(100.0, 100.0);
         let events = manager.handle_pointer_event(&up);
         events.assert_tap(1).assert_count(1);
     }
@@ -510,7 +550,9 @@ mod tests {
         let start = Instant::now();
 
         // Add both recognizers
-        let down = PointerEventBuilder::new(0).node_id(node_id).down(100.0, 100.0);
+        let down = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .down(100.0, 100.0);
         let arena = manager.get_or_create_arena(0, node_id);
         arena.add_member(Box::new(TapGestureRecognizer::single_tap(1, node_id)));
         arena.add_member(Box::new(LongPressGestureRecognizer::new(2, node_id)));
@@ -528,7 +570,9 @@ mod tests {
         let node_id = 1;
 
         // Add both recognizers
-        let down = PointerEventBuilder::new(0).node_id(node_id).down(100.0, 100.0);
+        let down = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .down(100.0, 100.0);
         let arena = manager.get_or_create_arena(0, node_id);
         arena.add_member(Box::new(TapGestureRecognizer::single_tap(1, node_id)));
         arena.add_member(Box::new(PanGestureRecognizer::new(2, node_id)));
@@ -536,7 +580,9 @@ mod tests {
         manager.handle_pointer_event(&down);
 
         // Move beyond slop - pan should win
-        let move_evt = PointerEventBuilder::new(0).node_id(node_id).move_to(130.0, 130.0);
+        let move_evt = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .move_to(130.0, 130.0);
         let events = manager.handle_pointer_event(&move_evt);
         events.assert_pan_start().assert_count(1);
     }
@@ -547,7 +593,9 @@ mod tests {
         let node_id = 1;
 
         // Create arena
-        let down = PointerEventBuilder::new(0).node_id(node_id).down(100.0, 100.0);
+        let down = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .down(100.0, 100.0);
         let arena = manager.get_or_create_arena(0, node_id);
         arena.add_member(Box::new(TapGestureRecognizer::single_tap(1, node_id)));
 
@@ -555,7 +603,9 @@ mod tests {
         assert_eq!(manager.arenas.len(), 1);
 
         // Complete gesture
-        let up = PointerEventBuilder::new(0).node_id(node_id).up_at(100.0, 100.0);
+        let up = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .up_at(100.0, 100.0);
         manager.handle_pointer_event(&up);
 
         // Cleanup
@@ -569,13 +619,17 @@ mod tests {
         let node_id = 1;
 
         // First pointer
-        let down1 = PointerEventBuilder::new(0).node_id(node_id).down(100.0, 100.0);
+        let down1 = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .down(100.0, 100.0);
         let arena1 = manager.get_or_create_arena(0, node_id);
         arena1.add_member(Box::new(TapGestureRecognizer::single_tap(1, node_id)));
         manager.handle_pointer_event(&down1);
 
         // Second pointer (different pointer_id)
-        let down2 = PointerEventBuilder::new(1).node_id(node_id).down(200.0, 200.0);
+        let down2 = PointerEventBuilder::new(1)
+            .node_id(node_id)
+            .down(200.0, 200.0);
         let arena2 = manager.get_or_create_arena(1, node_id);
         arena2.add_member(Box::new(TapGestureRecognizer::single_tap(2, node_id)));
         manager.handle_pointer_event(&down2);
@@ -583,8 +637,12 @@ mod tests {
         assert_eq!(manager.arenas.len(), 2);
 
         // Complete both
-        let up1 = PointerEventBuilder::new(0).node_id(node_id).up_at(100.0, 100.0);
-        let up2 = PointerEventBuilder::new(1).node_id(node_id).up_at(200.0, 200.0);
+        let up1 = PointerEventBuilder::new(0)
+            .node_id(node_id)
+            .up_at(100.0, 100.0);
+        let up2 = PointerEventBuilder::new(1)
+            .node_id(node_id)
+            .up_at(200.0, 200.0);
         manager.handle_pointer_event(&up1);
         manager.handle_pointer_event(&up2);
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Layout synchronization helper
-//! 
+//!
 //! This module provides a mechanism for Render thread to notify Core thread
 //! that layout has been computed and nodes need to be marked as dirty.
 
@@ -17,7 +17,10 @@ pub fn register_layout_dirty_nodes(node_ids: &[u32]) {
     if let Ok(mut registry) = LAYOUT_DIRTY_REGISTRY.lock() {
         registry.clear();
         registry.extend_from_slice(node_ids);
-        log::debug!("[LayoutSync] Registered {} nodes as layout-dirty", node_ids.len());
+        log::debug!(
+            "[LayoutSync] Registered {} nodes as layout-dirty",
+            node_ids.len()
+        );
     }
 }
 

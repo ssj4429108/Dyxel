@@ -4,7 +4,9 @@
 // Allow unexpected_cfgs from objc crate macros
 #![allow(unexpected_cfgs)]
 
-use dyxel_render_api::{BackendConfig, RenderResult, DeviceHandle, QueueHandle, SurfaceTargetHandle, SurfaceHandle};
+use dyxel_render_api::{
+    BackendConfig, DeviceHandle, QueueHandle, RenderResult, SurfaceHandle, SurfaceTargetHandle,
+};
 use dyxel_render_api::{LifecycleEvent, RenderBackend, RenderContext, SurfaceState};
 use dyxel_shared::SharedState;
 use impellers::{Color, Context, DisplayListBuilder, Paint, Point, Rect, Size};
@@ -213,15 +215,15 @@ impl RenderBackend for ImpellerBackend {
         }
         Ok(())
     }
-    
+
     fn sync_gpu(&self, _device: DeviceHandle, _queue: QueueHandle) {
         // Impeller handles its own synchronization
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    
+
     fn on_lifecycle_event(&self, _event: LifecycleEvent) {}
 }
 

@@ -4,17 +4,27 @@
 //! RSX Macro - String Interpolation with Dynamic State Binding
 
 use proc_macro::TokenStream;
-use proc_macro2::{TokenTree, Span, Delimiter, Literal};
+use proc_macro2::{Delimiter, Literal, Span, TokenTree};
 use quote::{quote, quote_spanned};
 
 /// RSX 宏 - 支持字符串插值和动态 State 绑定
+///
+/// 属性命名使用小驼峰 (camelCase)，例如:
+/// - `fontSize` 而不是 `font_size`
+/// - `backgroundColor` 而不是 `background_color`
+/// - `onTap` 而不是 `on_tap`
+///
+/// 宏会自动将 camelCase 转换为 Rust 方法名的 snake_case。
 #[proc_macro]
 pub fn rsx(input: TokenStream) -> TokenStream {
     let input2 = proc_macro2::TokenStream::from(input);
-    
+
     let first_token = input2.clone().into_iter().next();
-    let input_span = first_token.as_ref().map(|t| t.span()).unwrap_or_else(Span::call_site);
-    
+    let input_span = first_token
+        .as_ref()
+        .map(|t| t.span())
+        .unwrap_or_else(Span::call_site);
+
     match parse_rsx_element(input2) {
         Ok(node) => {
             let expanded = expand_node(&node);
@@ -53,12 +63,12 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
         }
         _ => return Err("Expected element type".to_string()),
     };
-    
+
     // Check for variable reference
     if let Some(next) = tokens.get(*pos) {
         let is_group = matches!(next, TokenTree::Group(g) 
             if g.delimiter() == Delimiter::Parenthesis || g.delimiter() == Delimiter::Brace);
-        
+
         if !is_group {
             return Ok(RsxNode {
                 node_type,
@@ -70,20 +80,30 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
             });
         }
     }
-    
+
     // Parse () group
     let mut props = Vec::new();
     if let Some(TokenTree::Group(group)) = tokens.get(*pos) {
         if group.delimiter() == Delimiter::Parenthesis {
             *pos += 1;
             let args: Vec<_> = group.stream().into_iter().collect();
-            
-            if node_type == "Text" && !args.is_empty() {
-                let first_span = args.first().map(|t| t.span()).unwrap_or_else(Span::call_site);
+
+            if (node_type == "Text" || node_type == "Button") && !args.is_empty() {
+                let first_span = args
+                    .first()
+                    .map(|t| t.span())
+                    .unwrap_or_else(Span::call_site);
                 if let Some(first) = args.first() {
                     let s = first.to_string();
-                    if s.starts_with('"') && s.contains('{') && s.contains('}') {
+                    if node_type == "Text"
+                        && s.starts_with('"')
+                        && s.contains('{')
+                        && s.contains('}')
+                    {
                         props.push(("value_dynamic".to_string(), args, first_span));
+                    } else if node_type == "Button" {
+                        // Button("Label") - label is the first argument
+                        props.push(("label".to_string(), args, first_span));
                     } else {
                         props.push(("value".to_string(), args, first_span));
                     }
@@ -91,7 +111,7 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
             }
         }
     }
-    
+
     // Parse {} block
     let mut children = Vec::new();
     if let Some(TokenTree::Group(group)) = tokens.get(*pos) {
@@ -99,7 +119,7 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
             *pos += 1;
             let inner: Vec<_> = group.stream().into_iter().collect();
             let mut inner_pos = 0;
-            
+
             while inner_pos < inner.len() {
                 while let Some(TokenTree::Punct(p)) = inner.get(inner_pos) {
                     if p.as_char() == ',' {
@@ -108,27 +128,27 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
                         break;
                     }
                 }
-                
+
                 match inner.get(inner_pos) {
                     None => break,
                     Some(TokenTree::Ident(ident)) => {
                         let name = ident.to_string();
                         let name_span = ident.span();
-                        
+
                         let is_property = matches!(
                             inner.get(inner_pos + 1),
                             Some(TokenTree::Punct(p)) if p.as_char() == ':'
                         );
-                        
+
                         if is_property {
                             inner_pos += 1; // skip property name
-                            // Skip the colon
+                                            // Skip the colon
                             if let Some(TokenTree::Punct(p)) = inner.get(inner_pos) {
                                 if p.as_char() == ':' {
                                     inner_pos += 1;
                                 }
                             }
-                            
+
                             // Collect value tokens
                             let mut value_tokens = Vec::new();
                             let brace_depth = 0;
@@ -136,14 +156,16 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
                             let bracket_depth = 0;
                             let mut pipe_depth = 0;
                             let mut in_closure_params = false;
-                            
+
                             while inner_pos < inner.len() {
                                 match inner.get(inner_pos) {
-                                    Some(TokenTree::Punct(p)) if p.as_char() == ',' 
-                                        && brace_depth == 0 
-                                        && paren_depth == 0 
-                                        && bracket_depth == 0
-                                        && pipe_depth == 0 => {
+                                    Some(TokenTree::Punct(p))
+                                        if p.as_char() == ','
+                                            && brace_depth == 0
+                                            && paren_depth == 0
+                                            && bracket_depth == 0
+                                            && pipe_depth == 0 =>
+                                    {
                                         inner_pos += 1;
                                         break;
                                     }
@@ -171,19 +193,28 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
                                     None => break,
                                 }
                             }
-                            
+
                             // Check if value is dynamic string
                             if value_tokens.len() == 1 {
                                 if let Some(TokenTree::Literal(lit)) = value_tokens.first() {
                                     let s = lit.to_string();
                                     if s.starts_with('"') && s.contains('{') && s.contains('}') {
-                                        props.push((format!("{}_dynamic", name), value_tokens, name_span));
+                                        props.push((
+                                            format!("{}_dynamic", name),
+                                            value_tokens,
+                                            name_span,
+                                        ));
                                         continue;
                                     }
                                 }
                             }
-                            
+
                             props.push((name, value_tokens, name_span));
+                        } else if is_flag_property(&name) {
+                            // Flag property without value: expanded, disabled, etc.
+                            // Treat as property with empty value
+                            props.push((name, vec![], name_span));
+                            inner_pos += 1; // skip the identifier
                         } else {
                             let child = parse_element_with_span(&inner, &mut inner_pos)?;
                             children.push(child);
@@ -196,7 +227,7 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
             }
         }
     }
-    
+
     Ok(RsxNode {
         node_type,
         type_span,
@@ -209,22 +240,24 @@ fn parse_element_with_span(tokens: &[TokenTree], pos: &mut usize) -> Result<RsxN
 
 fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
     if node.is_var_ref {
-        let var_name = proc_macro2::Ident::new(&node.node_type, 
-            node.var_span.unwrap_or_else(Span::call_site));
+        let var_name = proc_macro2::Ident::new(
+            &node.node_type,
+            node.var_span.unwrap_or_else(Span::call_site),
+        );
         return quote! { #var_name };
     }
-    
+
     let type_span = node.type_span;
     let node_type = proc_macro2::Ident::new(&node.node_type, type_span);
     let node_var = proc_macro2::Ident::new(
         &format!("_{}_node", node.node_type.to_lowercase()),
-        Span::call_site()
+        Span::call_site(),
     );
-    
+
     // Separate static props from dynamic bindings
     let mut static_props = Vec::new();
     let mut dynamic_bindings = Vec::new();
-    
+
     for (name, value_tokens, name_span) in &node.props {
         if name.ends_with("_dynamic") || name == "value_dynamic" {
             let real_name = if name == "value_dynamic" {
@@ -237,11 +270,19 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
             static_props.push((name.clone(), value_tokens.clone(), *name_span));
         }
     }
-    
+
     // Static property assignments
     let static_assignments: Vec<_> = static_props.iter().map(|(name, value_tokens, name_span)| {
         let value = tokens_to_stream(value_tokens);
-        
+
+        // Convert camelCase property names to snake_case for method calls
+        // This allows RSX to use familiar camelCase while internal Rust code uses snake_case
+        let name = if name.contains(|c: char| c.is_uppercase()) {
+            camel_to_snake(name)
+        } else {
+            name.to_string()
+        };
+
         // Special handling for gesture DSL
         if name == "gesture" {
             return quote_spanned! { *name_span =>
@@ -285,8 +326,7 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
             };
             
             if let Some(state_ident) = state_ident {
-                let method_name = camel_to_snake(name);
-                let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
+                let method_ident = proc_macro2::Ident::new(&name, *name_span);
                 
                 // Choose appropriate signal method based on property name
                 // width/height need sig_size() for f32 -> SizeUnit conversion
@@ -307,6 +347,28 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
             }
         }
         
+        // Special handling for flag properties (no value) - call method without arguments
+        // e.g., expanded -> .expanded()
+        if value_tokens.is_empty() {
+            let method_ident = proc_macro2::Ident::new(&name, *name_span);
+            return quote_spanned! { *name_span =>
+                .#method_ident()
+            };
+        }
+
+        // Special handling for unit value () - call method without arguments
+        // e.g., expanded: () -> .expanded()
+        if value_tokens.len() == 1 {
+            if let Some(TokenTree::Group(g)) = value_tokens.first() {
+                if g.delimiter() == Delimiter::Parenthesis && g.stream().is_empty() {
+                    let method_ident = proc_macro2::Ident::new(&name, *name_span);
+                    return quote_spanned! { *name_span =>
+                        .#method_ident()
+                    };
+                }
+            }
+        }
+
         // Special handling for gestures
         // Simple versions (no event parameter): onTap, onDoubleTap, onLongPress, onPanSimple
         // Full versions (with GestureEvent): onTapEvent, onDoubleTapEvent, onLongPressEvent, onPan
@@ -350,103 +412,169 @@ fn expand_node(node: &RsxNode) -> proc_macro2::TokenStream {
                 .on_pan_simple(#value)
             };
         }
-        
+
         if is_code_block {
             // Regular code block - pass directly
-            let method_name = camel_to_snake(name);
-            let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
-            
+            let method_ident = proc_macro2::Ident::new(&name, *name_span);
+
             return quote_spanned! { *name_span =>
                 .#method_ident(#value)
             };
         }
-        
-        let method_name = camel_to_snake(name);
-        let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
+
+        let method_ident = proc_macro2::Ident::new(&name, *name_span);
         
         quote_spanned! { *name_span =>
             .#method_ident(#value)
         }
     }).collect();
-    
+
     // Dynamic bindings - use bind_text for automatic updates
-    let dynamic_assignments: Vec<_> = dynamic_bindings.iter().map(|(name, value_tokens, name_span)| {
-        let lit = tokens_to_stream(value_tokens);
-        let lit_str = lit.to_string();
-
-        let (format_str, vars) = parse_interpolation(&lit_str);
-
-        if vars.is_empty() {
-            // No interpolation, treat as static
-            let method_name = camel_to_snake(name);
-            let method_ident = proc_macro2::Ident::new(&method_name, *name_span);
-            return quote_spanned! { *name_span =>
-                .#method_ident(#lit)
-            };
-        }
-
-        // Generate dynamic binding
-        let format_lit = Literal::string(&format_str);
-
-        // Build format arguments with proper type handling based on format spec
-        let format_args: Vec<_> = vars.iter().map(|var| {
-            let var_ident = proc_macro2::Ident::new(&var.name, Span::call_site());
-            if var.format_spec.is_empty() {
-                // No format spec - use to_string() for backward compatibility
-                quote! { #var_ident.get().to_string() }
+    let dynamic_assignments: Vec<_> = dynamic_bindings
+        .iter()
+        .map(|(name, value_tokens, name_span)| {
+            // Convert camelCase to snake_case for method names
+            let name = if name.contains(|c: char| c.is_uppercase()) {
+                camel_to_snake(name)
             } else {
-                // Has format spec - pass value directly to format!
-                // The format spec (e.g., .1, .2$) is already in the format string
-                quote! { #var_ident.get() }
-            }
-        }).collect();
+                name.to_string()
+            };
 
-        quote_spanned! { *name_span =>
-            .value({
-                let __initial = format!(#format_lit, #(#format_args),*);
-                __initial
-            })
-        }
-    }).collect();
-    
+            let lit = tokens_to_stream(value_tokens);
+            let lit_str = lit.to_string();
+
+            let (format_str, vars) = parse_interpolation(&lit_str);
+
+            if vars.is_empty() {
+                // No interpolation, treat as static
+                let method_ident = proc_macro2::Ident::new(&name, *name_span);
+                return quote_spanned! { *name_span =>
+                    .#method_ident(#lit)
+                };
+            }
+
+            // Generate dynamic binding
+            let format_lit = Literal::string(&format_str);
+
+            // Build format arguments with proper type handling based on format spec
+            let format_args: Vec<_> = vars
+                .iter()
+                .map(|var| {
+                    let var_ident = proc_macro2::Ident::new(&var.name, Span::call_site());
+                    if var.format_spec.is_empty() {
+                        // No format spec - use to_string() for backward compatibility
+                        quote! { #var_ident.get().to_string() }
+                    } else {
+                        // Has format spec - pass value directly to format!
+                        // The format spec (e.g., .1, .2$) is already in the format string
+                        quote! { #var_ident.get() }
+                    }
+                })
+                .collect();
+
+            quote_spanned! { *name_span =>
+                .value({
+                    let __initial = format!(#format_lit, #(#format_args),*);
+                    __initial
+                })
+            }
+        })
+        .collect();
+
     // Generate post-creation bindings for dynamic text
-    let binding_code: Vec<_> = dynamic_bindings.iter().filter_map(|(name, value_tokens, _)| {
-        if name != "value" {
-            return None; // Only support text value for now
-        }
-
-        let lit = tokens_to_stream(value_tokens);
-        let lit_str = lit.to_string();
-        let (_format_str, vars) = parse_interpolation(&lit_str);
-
-        if vars.is_empty() {
-            return None;
-        }
-
-        // Generate bind_text calls - format spec only affects initial value
-        // Updates use to_string for simplicity
-        let binds: Vec<_> = vars.iter().map(|var| {
-            let var_ident = proc_macro2::Ident::new(&var.name, Span::call_site());
-            quote! {
-                #var_ident.bind_text(#node_var.node_id(), |v| v.to_string());
+    let binding_code: Vec<_> = dynamic_bindings
+        .iter()
+        .filter_map(|(name, value_tokens, _)| {
+            if name != "value" {
+                return None; // Only support text value for now
             }
-        }).collect();
 
-        Some(quote! { #(#binds)* })
-    }).collect();
-    
+            let lit = tokens_to_stream(value_tokens);
+            let lit_str = lit.to_string();
+            let (_format_str, vars) = parse_interpolation(&lit_str);
+
+            if vars.is_empty() {
+                return None;
+            }
+
+            // Generate bind_text calls - format spec only affects initial value
+            // Updates use to_string for simplicity
+            let binds: Vec<_> = vars
+                .iter()
+                .map(|var| {
+                    let var_ident = proc_macro2::Ident::new(&var.name, Span::call_site());
+                    quote! {
+                        #var_ident.bind_text(#node_var.node_id(), |v| v.to_string());
+                    }
+                })
+                .collect();
+
+            Some(quote! { #(#binds)* })
+        })
+        .collect();
+
     // Children
-    let child_assignments: Vec<_> = node.children.iter().map(|child| {
-        let child_expr = expand_node(child);
+    let child_assignments: Vec<_> = node
+        .children
+        .iter()
+        .map(|child| {
+            let child_expr = expand_node(child);
+            quote! {
+                let __child = #child_expr;
+                #node_var = ::dyxel_view::BaseView::child(#node_var, __child.node_id());
+            }
+        })
+        .collect();
+
+    // Determine the module path for the component
+    // Flex components are in ::dyxel_view::flex module
+    // Button and TextInput are in ::dyxel_view::components module
+    let is_flex_component = matches!(
+        node.node_type.as_str(),
+        "Column" | "Row" | "Spacer" | "Divider"
+    );
+    let is_button = node.node_type == "Button";
+    let is_text_input = node.node_type == "TextInput";
+
+    // Extract label from props if Button
+    let label_expr = if is_button {
+        node.props
+            .iter()
+            .find(|(name, _, _)| name == "label")
+            .map(|(_, tokens, _)| tokens_to_stream(tokens))
+    } else {
+        None
+    };
+
+    let new_expr = if is_flex_component {
         quote! {
-            let __child = #child_expr;
-            #node_var = ::dyxel_view::BaseView::child(#node_var, __child.node_id());
+            ::dyxel_view::flex::#node_type::new()
         }
-    }).collect();
-    
+    } else if is_button {
+        // Button::new("label") - label is required first argument
+        if let Some(label) = label_expr {
+            quote! {
+                ::dyxel_view::components::button::#node_type::new(#label)
+            }
+        } else {
+            // Fallback: use empty label
+            quote! {
+                ::dyxel_view::components::button::#node_type::new("")
+            }
+        }
+    } else if is_text_input {
+        quote! {
+            ::dyxel_view::components::text_input::#node_type::new()
+        }
+    } else {
+        quote! {
+            ::dyxel_view::#node_type::new()
+        }
+    };
+
     quote_spanned! { type_span =>
         {
-            let mut #node_var = ::dyxel_view::#node_type::new()
+            let mut #node_var = #new_expr
                 #(#static_assignments)*
                 #(#dynamic_assignments)*;
             #(#binding_code)*
@@ -470,7 +598,7 @@ fn parse_interpolation(lit: &str) -> (String, Vec<InterpVar>) {
     let mut vars = Vec::new();
 
     let content = if lit.starts_with('"') && lit.ends_with('"') {
-        &lit[1..lit.len()-1]
+        &lit[1..lit.len() - 1]
     } else {
         lit
     };
@@ -545,10 +673,23 @@ fn tokens_to_stream(tokens: &[TokenTree]) -> proc_macro2::TokenStream {
     tokens.iter().cloned().collect()
 }
 
+/// Check if a property name is a flag property (no value needed)
+/// These are properties like `expanded`, `disabled`, `clipToBounds` that
+/// can be written as just the name without `: ()` or `: true`
+///
+/// Supports both camelCase (e.g., `clipToBounds`) and lowercase (e.g., `cliptobounds`)
+fn is_flag_property(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "expanded" | "disabled" | "cliptobounds" | "hidden" | "enabled"
+    )
+}
+
 fn camel_to_snake(camel: &str) -> String {
     let mut result = String::new();
     let mut prev_was_upper = false;
-    
+
     for (i, c) in camel.chars().enumerate() {
         if c.is_uppercase() {
             if i > 0 && !prev_was_upper {
@@ -561,6 +702,6 @@ fn camel_to_snake(camel: &str) -> String {
             prev_was_upper = false;
         }
     }
-    
+
     result
 }

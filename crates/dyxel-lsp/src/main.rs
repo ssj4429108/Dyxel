@@ -1,11 +1,11 @@
 // Dyxel Language Server - Simplified Version
 // 提供 RSX 基础支持
 
+use dyxel_lsp::RsxAnalyzer;
+use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use dyxel_lsp::RsxAnalyzer;
-use std::sync::Mutex;
 
 #[derive(Debug)]
 struct DyxelLanguageServer {
@@ -50,11 +50,11 @@ impl LanguageServer for DyxelLanguageServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        
+
         self.client
             .log_message(MessageType::INFO, format!("Opened: {}", uri))
             .await;
-            
+
         // 打开文档到分析器
         if let Ok(mut analyzer) = self.analyzer.lock() {
             analyzer.open_document(&uri, &text);
@@ -63,11 +63,11 @@ impl LanguageServer for DyxelLanguageServer {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
-        
+
         self.client
             .log_message(MessageType::INFO, format!("Changed: {}", uri))
             .await;
-            
+
         // 更新文档内容
         if let Some(change) = params.content_changes.first() {
             if let Ok(mut analyzer) = self.analyzer.lock() {
@@ -80,11 +80,14 @@ impl LanguageServer for DyxelLanguageServer {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
-        
+
         self.client
-            .log_message(MessageType::INFO, format!("Completion requested at {:?}", position))
+            .log_message(
+                MessageType::INFO,
+                format!("Completion requested at {:?}", position),
+            )
             .await;
-        
+
         let items = {
             if let Ok(analyzer) = self.analyzer.lock() {
                 analyzer.complete(&uri, position)
@@ -92,19 +95,25 @@ impl LanguageServer for DyxelLanguageServer {
                 vec![]
             }
         };
-        
+
         self.client
-            .log_message(MessageType::INFO, format!("Returning {} completion items", items.len()))
+            .log_message(
+                MessageType::INFO,
+                format!("Returning {} completion items", items.len()),
+            )
             .await;
-                
+
         Ok(Some(CompletionResponse::Array(items)))
     }
 
     // 处理定义跳转
-    async fn goto_definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        
+
         let locations = {
             if let Ok(analyzer) = self.analyzer.lock() {
                 analyzer.find_definition(&uri, position)
@@ -112,7 +121,7 @@ impl LanguageServer for DyxelLanguageServer {
                 vec![]
             }
         };
-        
+
         if !locations.is_empty() {
             Ok(Some(GotoDefinitionResponse::Array(locations)))
         } else {
@@ -124,7 +133,7 @@ impl LanguageServer for DyxelLanguageServer {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        
+
         let result = {
             if let Ok(analyzer) = self.analyzer.lock() {
                 analyzer.hover(&uri, position)
@@ -132,7 +141,7 @@ impl LanguageServer for DyxelLanguageServer {
                 None
             }
         };
-        
+
         Ok(result)
     }
 }
@@ -140,14 +149,14 @@ impl LanguageServer for DyxelLanguageServer {
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    
+
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    
-    let (service, socket) = LspService::new(|client| DyxelLanguageServer { 
+
+    let (service, socket) = LspService::new(|client| DyxelLanguageServer {
         client,
         analyzer: Mutex::new(RsxAnalyzer::new()),
     });
-    
+
     Server::new(stdin, stdout, socket).serve(service).await;
 }

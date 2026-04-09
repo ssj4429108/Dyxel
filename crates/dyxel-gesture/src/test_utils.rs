@@ -303,10 +303,14 @@ impl<R: SimulatableRouter> GestureSimulator<R> {
         let p2_start = (center.0 + initial_distance / 2.0, center.1);
 
         // Down for both pointers
-        let down1 = PointerEventBuilder::new(pointer1).node_id(node_id).down(p1_start.0, p1_start.1);
+        let down1 = PointerEventBuilder::new(pointer1)
+            .node_id(node_id)
+            .down(p1_start.0, p1_start.1);
         events.extend(self.router.route_pointer_event(&down1));
 
-        let down2 = PointerEventBuilder::new(pointer2).node_id(node_id).down(p2_start.0, p2_start.1);
+        let down2 = PointerEventBuilder::new(pointer2)
+            .node_id(node_id)
+            .down(p2_start.0, p2_start.1);
         events.extend(self.router.route_pointer_event(&down2));
 
         // Move steps
@@ -391,10 +395,14 @@ pub trait GestureEventAssertions {
 
 impl GestureEventAssertions for Vec<GestureEvent> {
     fn assert_tap(&self, count: u32) -> &Self {
-        let found = self.iter().any(|e| {
-            matches!(e.event_type, GestureEventType::Tap) && e.tap_count == count
-        });
-        assert!(found, "Expected tap with count={}, but found: {:?}", count, self);
+        let found = self
+            .iter()
+            .any(|e| matches!(e.event_type, GestureEventType::Tap) && e.tap_count == count);
+        assert!(
+            found,
+            "Expected tap with count={}, but found: {:?}",
+            count, self
+        );
         self
     }
 
@@ -402,11 +410,7 @@ impl GestureEventAssertions for Vec<GestureEvent> {
         let found = self
             .iter()
             .any(|e| matches!(e.event_type, GestureEventType::LongPressStart));
-        assert!(
-            found,
-            "Expected LongPressStart, but found: {:?}",
-            self
-        );
+        assert!(found, "Expected LongPressStart, but found: {:?}", self);
         self
     }
 

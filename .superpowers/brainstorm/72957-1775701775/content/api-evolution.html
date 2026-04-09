@@ -1,0 +1,66 @@
+<h2>API 进化：响应式值 (Reactive Value)</h2>
+<p class="subtitle">平衡简洁性 (A) 与 控制力 (B)</p>
+
+<div class="options" data-choice="api-evolution">
+  <div class="option" data-choice="simple-signal">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>简单信号 (Signal&lt;String&gt;)</h3>
+      <p>只关注内容。丢失光标、选区、IME 组合状态。</p>
+      <div class="cons">
+        <ul>
+          <li>无法处理中文输入法(IME)中间态</li>
+          <li>无法实现代码高亮</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="reactive-value" onclick="toggleSelect(this)">
+    <div class="letter">精</div>
+    <div class="content">
+      <h3>响应式值 (Signal&lt;TextState&gt;)</h3>
+      <p><b>推荐方案。</b> 将文本、光标、选区打包进一个响应式对象。保留 A 的声明式语法，获得 B 的控制力。</p>
+      <pre style="font-size: 11px;"><code>let state = create_signal(TextState::new("Hello"));
+
+TextInput {
+  value: state,
+  on_change: |s| state.set(s),
+}</code></pre>
+      <div class="pros">
+        <ul>
+          <li>FFI 频率与 A 一致</li>
+          <li>支持 IME 组合状态显示</li>
+          <li>支持外部控制光标</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="heavy-controller">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>重型控制器 (Controller)</h3>
+      <p>完全命令式。手动管理事务、订阅者和 FFI 指令。</p>
+      <div class="cons">
+        <ul>
+          <li>容易导致内存泄漏 (循环引用)</li>
+          <li>不符合 Xilem 的纯函数式视图理念</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">数据流：为什么 FFI 开销是一样的？</div>
+  <div class="mockup-body" style="padding: 10px; font-size: 12px;">
+    <p><b>Native 输入 "A"</b> &rarr; [FFI Call] &rarr; <b>WASM 接收</b></p>
+    <p>Payload 差异：</p>
+    <ul>
+      <li>方案 A: <code>"A"</code> (1 byte)</li>
+      <li>响应式值: <code>{ text: "A", cursor: 1 }</code> (9 bytes)</li>
+    </ul>
+    <p style="color: #666;">结论：FFI 的开销主要在“调用”动作本身，Payload 大小微增对性能无感。</p>
+  </div>
+</div>

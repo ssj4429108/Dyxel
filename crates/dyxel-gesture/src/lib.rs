@@ -35,39 +35,28 @@ pub mod gesture_composition;
 pub mod test_utils;
 
 // Re-export core APIs
-pub use arena::{
-    GestureArenaManager,
-    GestureArenaMember,
-};
+pub use arena::{GestureArenaManager, GestureArenaMember};
 
 pub use router::PointerRouter;
 
 pub use recognizer::{
-    GestureDisposition,
-    RecognizerState,
-    GestureRecognizer,
-    TapGestureRecognizer,
-    PanGestureRecognizer,
-    LongPressGestureRecognizer,
-    ScaleGestureRecognizer,
-    RotationGestureRecognizer,
-    GestureCategoryType,
-    PanDirection,
+    GestureCategoryType, GestureDisposition, GestureRecognizer, LongPressGestureRecognizer,
+    PanDirection, PanGestureRecognizer, RecognizerState, RotationGestureRecognizer,
+    ScaleGestureRecognizer, TapGestureRecognizer,
 };
 
 // Re-export shared types
-pub use events::{GestureEvent, GestureEventType, PointerEvent, PointerData, PointerEventType};
-pub use events::{PanPhase, LongPressPhase, GesturePhase};
-pub use hit_test::{HitTestResult, HitTester, NoOpHitTester, RectHitTester, LayoutHitTester};
+pub use events::{GestureEvent, GestureEventType, PointerData, PointerEvent, PointerEventType};
+pub use events::{GesturePhase, LongPressPhase, PanPhase};
+pub use hit_test::{HitTestResult, HitTester, LayoutHitTester, NoOpHitTester, RectHitTester};
 pub use spatial_hit_tester::{SpatialHitTester, SpatialStats};
 
 // Router integration for dyxel-core
-pub use router_integration::{GestureRouter, GestureConfig, GestureType};
+pub use router_integration::{GestureConfig, GestureRouter, GestureType};
 
 // Gesture composition for RSX DSL
 pub use gesture_composition::{
-    ExclusiveGesture, SimultaneousGesture, SequencedGesture,
-    GestureRelationship, ComposableGesture,
+    ComposableGesture, ExclusiveGesture, GestureRelationship, SequencedGesture, SimultaneousGesture,
 };
 
 /// Global gesture configuration

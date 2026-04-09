@@ -904,6 +904,7 @@ dependencies = [
  "gloo-timers",
  "jni",
  "kurbo",
+ "lazy_static",
  "log",
  "naga",
  "ndk-sys 0.6.0+11769913",
@@ -1076,6 +1077,7 @@ dependencies = [
  "dyxel-state",
  "futures-signals",
  "futures-util",
+ "log",
  "taffy",
 ]
 

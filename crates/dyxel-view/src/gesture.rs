@@ -67,6 +67,10 @@ pub enum GestureEventType {
     Scale,
     /// Rotation gesture (use phase to check state)
     Rotation,
+    /// Pointer down (for press effects)
+    PointerDown,
+    /// Pointer up (for press effects)
+    PointerUp,
 }
 
 /// Unified gesture event
@@ -217,7 +221,14 @@ impl GestureEvent {
     }
 
     /// Create a scale event
-    pub fn scale(node_id: u32, x: f32, y: f32, scale: f32, delta_scale: f32, phase: GesturePhase) -> Self {
+    pub fn scale(
+        node_id: u32,
+        x: f32,
+        y: f32,
+        scale: f32,
+        delta_scale: f32,
+        phase: GesturePhase,
+    ) -> Self {
         Self {
             gesture_type: GestureEventType::Scale,
             phase,
@@ -254,7 +265,14 @@ impl GestureEvent {
     }
 
     /// Create a rotation event
-    pub fn rotation(node_id: u32, x: f32, y: f32, angle: f32, delta_angle: f32, phase: GesturePhase) -> Self {
+    pub fn rotation(
+        node_id: u32,
+        x: f32,
+        y: f32,
+        angle: f32,
+        delta_angle: f32,
+        phase: GesturePhase,
+    ) -> Self {
         Self {
             gesture_type: GestureEventType::Rotation,
             phase,
@@ -288,6 +306,50 @@ impl GestureEvent {
     /// Create a rotation end event (deprecated, use rotation with Ended)
     pub fn rotation_end(node_id: u32, x: f32, y: f32) -> Self {
         Self::rotation(node_id, x, y, 0.0, 0.0, GesturePhase::Ended)
+    }
+
+    /// Create a pointer down event (for press effects)
+    pub fn pointer_down(node_id: u32, x: f32, y: f32) -> Self {
+        Self {
+            gesture_type: GestureEventType::PointerDown,
+            phase: GesturePhase::Began,
+            target_node_id: node_id,
+            pointer_id: 0,
+            x,
+            y,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            velocity_x: 0.0,
+            velocity_y: 0.0,
+            tap_count: 0,
+            scale: 1.0,
+            delta_scale: 0.0,
+            rotation: 0.0,
+            delta_rotation: 0.0,
+            timestamp_us: 0,
+        }
+    }
+
+    /// Create a pointer up event (for press effects)
+    pub fn pointer_up(node_id: u32, x: f32, y: f32) -> Self {
+        Self {
+            gesture_type: GestureEventType::PointerUp,
+            phase: GesturePhase::Ended,
+            target_node_id: node_id,
+            pointer_id: 0,
+            x,
+            y,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            velocity_x: 0.0,
+            velocity_y: 0.0,
+            tap_count: 0,
+            scale: 1.0,
+            delta_scale: 0.0,
+            rotation: 0.0,
+            delta_rotation: 0.0,
+            timestamp_us: 0,
+        }
     }
 
     /// Check if this is the beginning of a gesture
@@ -595,7 +657,10 @@ impl SequenceGesture {
         }
     }
 
-    pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
+    pub fn on_gesture_judge_begin(
+        mut self,
+        handler: impl FnMut(&GestureEvent) -> bool + 'static,
+    ) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
         self
     }
@@ -624,7 +689,10 @@ impl ParallelGesture {
         }
     }
 
-    pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
+    pub fn on_gesture_judge_begin(
+        mut self,
+        handler: impl FnMut(&GestureEvent) -> bool + 'static,
+    ) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
         self
     }
@@ -653,7 +721,10 @@ impl ExclusiveGesture {
         }
     }
 
-    pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
+    pub fn on_gesture_judge_begin(
+        mut self,
+        handler: impl FnMut(&GestureEvent) -> bool + 'static,
+    ) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
         self
     }
@@ -761,44 +832,40 @@ pub fn set_gesture_config(node_id: u32, config_type: u8, value: u32) {
 }
 
 /// Register a tap handler for a node (new API with GestureEvent)
-pub fn register_tap_handler<F>(node_id: u32, mut handler: F)
+/// Uses the same TAP_HANDLERS storage as BaseView::on_tap
+pub fn register_tap_handler<F>(node_id: u32, handler: F)
 where
     F: FnMut(GestureEvent) + 'static,
 {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    
-    thread_local! {
-        static TAP_HANDLERS_V2: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
-    }
-    
+    use crate::{TapHandlerEntry, TAP_HANDLERS};
+
     push_command!(SHARED_BUFFER, AttachClick, node_id);
     // Unified tap handler with count=1 for single tap
     push_command!(SHARED_BUFFER, RegisterTapHandler, node_id, 1u32);
 
-    TAP_HANDLERS_V2.with(|h| {
-        h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
+    TAP_HANDLERS.with(|h| {
+        let mut handlers = h.borrow_mut();
+        let entry = handlers.entry(node_id).or_insert_with(TapHandlerEntry::new);
+        entry.single_tap = Some(Box::new(handler));
     });
 }
 
 /// Register a double tap handler for a node (new API with GestureEvent)
-pub fn register_double_tap_handler<F>(node_id: u32, mut handler: F)
+/// Uses the same TAP_HANDLERS storage as BaseView::on_double_tap
+pub fn register_double_tap_handler<F>(node_id: u32, handler: F)
 where
     F: FnMut(GestureEvent) + 'static,
 {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    
-    thread_local! {
-        static DOUBLE_TAP_HANDLERS_V2: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
-    }
-    
+    use crate::{TapHandlerEntry, TAP_HANDLERS};
+
     push_command!(SHARED_BUFFER, AttachClick, node_id);
     // Use unified RegisterTapHandler with count=2 for double tap
     push_command!(SHARED_BUFFER, RegisterTapHandler, node_id, 2u32);
 
-    DOUBLE_TAP_HANDLERS_V2.with(|h| {
-        h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
+    TAP_HANDLERS.with(|h| {
+        let mut handlers = h.borrow_mut();
+        let entry = handlers.entry(node_id).or_insert_with(TapHandlerEntry::new);
+        entry.double_tap = Some(Box::new(handler));
     });
 }
 
@@ -809,16 +876,17 @@ where
 {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    
+
     thread_local! {
         static LONG_PRESS_HANDLERS_V2: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     }
-    
+
     push_command!(SHARED_BUFFER, AttachClick, node_id);
     push_command!(SHARED_BUFFER, RegisterLongPressHandler, node_id);
-    
+
     LONG_PRESS_HANDLERS_V2.with(|h| {
-        h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
+        h.borrow_mut()
+            .insert(node_id, Box::new(move |event| handler(event)));
     });
 }
 
@@ -829,16 +897,17 @@ where
 {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    
+
     thread_local! {
         static PAN_HANDLERS_V2: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     }
-    
+
     push_command!(SHARED_BUFFER, AttachClick, node_id);
     push_command!(SHARED_BUFFER, RegisterPanHandler, node_id);
-    
+
     PAN_HANDLERS_V2.with(|h| {
-        h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
+        h.borrow_mut()
+            .insert(node_id, Box::new(move |event| handler(event)));
     });
 }
 
@@ -877,7 +946,13 @@ impl From<PanDirection> for PanDirectionV2 {
 /// ```
 pub fn register_tap_handler_v2(node_id: u32, count: u8, multi_click_gap_ms: u16) {
     push_command!(SHARED_BUFFER, AttachClick, node_id);
-    push_command!(SHARED_BUFFER, RegisterTapHandlerV2, node_id, count, multi_click_gap_ms);
+    push_command!(
+        SHARED_BUFFER,
+        RegisterTapHandlerV2,
+        node_id,
+        count,
+        multi_click_gap_ms
+    );
 }
 
 /// Register a long press handler with custom configuration (V2 API)
@@ -893,7 +968,13 @@ pub fn register_tap_handler_v2(node_id: u32, count: u8, multi_click_gap_ms: u16)
 /// ```
 pub fn register_long_press_handler_v2(node_id: u32, timeout_ms: u16, slop: u8) {
     push_command!(SHARED_BUFFER, AttachClick, node_id);
-    push_command!(SHARED_BUFFER, RegisterLongPressHandlerV2, node_id, timeout_ms, slop);
+    push_command!(
+        SHARED_BUFFER,
+        RegisterLongPressHandlerV2,
+        node_id,
+        timeout_ms,
+        slop
+    );
 }
 
 /// Register a pan handler with custom configuration (V2 API)
@@ -909,7 +990,13 @@ pub fn register_long_press_handler_v2(node_id: u32, timeout_ms: u16, slop: u8) {
 /// ```
 pub fn register_pan_handler_v2(node_id: u32, slop: u8, direction: u8) {
     push_command!(SHARED_BUFFER, AttachClick, node_id);
-    push_command!(SHARED_BUFFER, RegisterPanHandlerV2, node_id, slop, direction);
+    push_command!(
+        SHARED_BUFFER,
+        RegisterPanHandlerV2,
+        node_id,
+        slop,
+        direction
+    );
 }
 
 /// Register a scale handler with custom configuration (V2 API)

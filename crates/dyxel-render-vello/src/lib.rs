@@ -669,7 +669,10 @@ impl VelloBackend {
             let mut g = shared_state.lock().unwrap();
             let mut editors = self.editors.lock().unwrap();
 
-            // First pass: create/update editors for text nodes
+            // Get text input states for Input nodes
+            let text_input_states = get_all_text_input_states();
+
+            // First pass: create/update editors for text and input nodes
             for (&id, node) in &g.nodes {
                 if node.view_type == ViewType::Text {
                     let editor = editors.entry(id).or_insert_with(|| {
@@ -682,6 +685,24 @@ impl VelloBackend {
                     // Update editor if text changed
                     if editor.text() != node.text {
                         editor.set_text(&node.text);
+                    }
+                } else if node.view_type == ViewType::Input {
+                    // For TextInput nodes, get text from text_input_states
+                    let text_input_text = text_input_states
+                        .get(&id)
+                        .map(|s| s.text.clone())
+                        .unwrap_or_default();
+
+                    let editor = editors.entry(id).or_insert_with(|| {
+                        let mut ed = Editor::new(node.font_size);
+                        ed.set_text(&text_input_text);
+                        ed.set_text_color(node.color);
+                        ed
+                    });
+
+                    // Update editor if text changed
+                    if editor.text() != text_input_text {
+                        editor.set_text(&text_input_text);
                     }
                 }
             }

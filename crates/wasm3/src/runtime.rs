@@ -47,7 +47,10 @@ impl Runtime {
     }
 
     /// Parses and loads a module from bytes.
-    pub fn parse_and_load_module<TData: Into<Box<[u8]>>>(&self, bytes: TData) -> Result<Module<'_>> {
+    pub fn parse_and_load_module<TData: Into<Box<[u8]>>>(
+        &self,
+        bytes: TData,
+    ) -> Result<Module<'_>> {
         Module::parse(&self.environment, bytes).and_then(|module| self.load_module(module))
     }
 

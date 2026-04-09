@@ -134,7 +134,9 @@ fn main() {
             .map(|entry| entry.path())
             .filter(|p| {
                 let is_c = p.extension().and_then(OsStr::to_str) == Some("c");
-                if !is_c { return false; }
+                if !is_c {
+                    return false;
+                }
                 if !has_wasi && p.file_name().and_then(OsStr::to_str) == Some("m3_api_wasi.c") {
                     return false;
                 }

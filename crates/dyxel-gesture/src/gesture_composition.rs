@@ -27,10 +27,7 @@ pub enum GestureRelationship {
 /// A composable gesture that wraps multiple recognizers
 pub trait ComposableGesture {
     /// Process a pointer event
-    fn handle_event(
-        &mut self,
-        event: &PointerEvent,
-    ) -> Vec<GestureEvent>;
+    fn handle_event(&mut self, event: &PointerEvent) -> Vec<GestureEvent>;
 
     /// Check timers
     fn check_timers(&mut self, now: Instant) -> Vec<GestureEvent>;
@@ -102,16 +99,11 @@ impl ExclusiveGesture {
 }
 
 impl ComposableGesture for ExclusiveGesture {
-    fn handle_event(
-        &mut self,
-        event: &PointerEvent,
-    ) -> Vec<GestureEvent> {
+    fn handle_event(&mut self, event: &PointerEvent) -> Vec<GestureEvent> {
         if self.is_resolved {
             // Route events only to the winner
             if let Some(winner_id) = self.winner {
-                if let Some(winner) =
-                    self.recognizers.iter_mut().find(|r| r.id() == winner_id)
-                {
+                if let Some(winner) = self.recognizers.iter_mut().find(|r| r.id() == winner_id) {
                     return winner.handle_event(event);
                 }
             }
@@ -236,10 +228,7 @@ impl SimultaneousGesture {
 }
 
 impl ComposableGesture for SimultaneousGesture {
-    fn handle_event(
-        &mut self,
-        event: &PointerEvent,
-    ) -> Vec<GestureEvent> {
+    fn handle_event(&mut self, event: &PointerEvent) -> Vec<GestureEvent> {
         if self.is_resolved {
             return vec![];
         }
@@ -357,10 +346,7 @@ impl SequencedGesture {
 }
 
 impl ComposableGesture for SequencedGesture {
-    fn handle_event(
-        &mut self,
-        event: &PointerEvent,
-    ) -> Vec<GestureEvent> {
+    fn handle_event(&mut self, event: &PointerEvent) -> Vec<GestureEvent> {
         if self.is_resolved || self.current_index >= self.recognizers.len() {
             return vec![];
         }
@@ -478,7 +464,7 @@ mod tests {
         // when user actually double taps
         let mut gesture = ExclusiveGesture::new(vec![
             Box::new(TapGestureRecognizer::new(1, 1).with_tap_count(2)), // 2-tap recognizer with id 1
-            Box::new(TapGestureRecognizer::double_tap(2, 1)),                  // 2-tap recognizer with id 2
+            Box::new(TapGestureRecognizer::double_tap(2, 1)), // 2-tap recognizer with id 2
         ]);
         // Both recognizers are waiting for 2 taps
         // First tap
@@ -496,7 +482,10 @@ mod tests {
 
         // Both recognizers fire, but only one wins (first to accept)
         assert!(!events.is_empty(), "Double tap should have fired");
-        assert!(events.iter().any(|e| e.tap_count == 2), "Expected tap_count=2");
+        assert!(
+            events.iter().any(|e| e.tap_count == 2),
+            "Expected tap_count=2"
+        );
     }
 
     #[test]
@@ -515,11 +504,7 @@ mod tests {
         assert_eq!(gesture.winner(), Some(2));
 
         // Check that tap recognizer was rejected
-        let tap = gesture
-            .recognizers()
-            .iter()
-            .find(|r| r.id() == 1)
-            .unwrap();
+        let tap = gesture.recognizers().iter().find(|r| r.id() == 1).unwrap();
         assert!(matches!(tap.state(), RecognizerState::Failed));
     }
 
@@ -544,10 +529,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .filter(|e| matches!(
-                    e.event_type,
-                    crate::events::GestureEventType::PanStart
-                ))
+                .filter(|e| matches!(e.event_type, crate::events::GestureEventType::PanStart))
                 .count()
                 >= 1
         );
@@ -569,16 +551,11 @@ mod tests {
         let events = gesture.handle_event(&move_evt);
 
         // Pan should accept, tap should fail
-        assert!(events.iter().any(|e| matches!(
-            e.event_type,
-            crate::events::GestureEventType::PanStart
-        )));
-
-        let tap = gesture
-            .recognizers()
+        assert!(events
             .iter()
-            .find(|r| r.id() == 1)
-            .unwrap();
+            .any(|e| matches!(e.event_type, crate::events::GestureEventType::PanStart)));
+
+        let tap = gesture.recognizers().iter().find(|r| r.id() == 1).unwrap();
         assert!(matches!(tap.state(), RecognizerState::Failed));
     }
 

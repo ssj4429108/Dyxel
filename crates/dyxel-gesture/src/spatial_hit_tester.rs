@@ -6,8 +6,8 @@
 //! Replaces O(N) linear search with grid-based spatial hashing.
 //! Suitable for scenes with 1000+ nodes.
 
+use crate::{HitTestResult, HitTester};
 use std::collections::HashMap;
-use crate::{HitTester, HitTestResult};
 
 /// Grid cell size in logical pixels
 const GRID_CELL_SIZE: f32 = 100.0;
@@ -44,7 +44,7 @@ unsafe impl Send for SpatialHitTester {}
 
 impl SpatialHitTester {
     /// Create a new spatial hit tester
-    /// 
+    ///
     /// # Safety
     /// The pointer must be valid for the lifetime of this hit tester
     pub unsafe fn new(shared_buffer_ptr: *const dyxel_shared::SharedBuffer) -> Self {
@@ -57,7 +57,7 @@ impl SpatialHitTester {
     }
 
     /// Incrementally sync with shared buffer
-    /// 
+    ///
     /// Call this before hit testing to pick up new nodes
     pub fn sync(&mut self) {
         self.do_sync();
@@ -67,60 +67,62 @@ impl SpatialHitTester {
     fn do_sync(&mut self) {
         unsafe {
             let current_max = (*self.shared_buffer_ptr).max_node_id;
-            
+
             // Sync spatial index with shared buffer
-            
+
             // Process new nodes
             for id in (self.last_synced_max_id + 1)..=current_max {
                 self.add_node(id);
             }
-            
+
             // Check existing nodes for layout changes
             // Use dirty_mask from shared buffer to detect changed nodes efficiently
             self.update_changed_nodes();
-            
+
             self.last_synced_max_id = current_max;
-            
-            log::debug!("SpatialHitTester: sync complete, total nodes in index: {}", self.nodes.len());
+
+            log::debug!(
+                "SpatialHitTester: sync complete, total nodes in index: {}",
+                self.nodes.len()
+            );
         }
     }
-    
+
     /// Update nodes that have changed their layout
     /// Uses dirty_mask from shared buffer for efficient change detection
     unsafe fn update_changed_nodes(&mut self) {
         let dirty_mask = &(*self.shared_buffer_ptr).dirty_mask;
-        
+
         // Collect node IDs that need updating
         let mut nodes_to_update: Vec<u32> = Vec::new();
         let _checked_count = 0;
         let mut dirty_mask_hits = 0;
         let mut bounds_changed_hits = 0;
-        
+
         for (node_id, data) in &self.nodes {
             let _ = _checked_count;
             let word_idx = (node_id / 32) as usize;
             let bit_idx = node_id % 32;
-            
+
             // Check if this node is marked as dirty in the shared buffer
             if word_idx < dirty_mask.len() && (dirty_mask[word_idx] >> bit_idx) & 1 != 0 {
                 nodes_to_update.push(*node_id);
                 dirty_mask_hits += 1;
                 continue;
             }
-            
+
             // Also check if layout has changed (fallback for cases where dirty_mask isn't set)
             if *node_id as usize >= dyxel_shared::MAX_NODES {
                 continue;
             }
             let layout = (*self.shared_buffer_ptr).layout_results[*node_id as usize];
-            
+
             // Compare current layout with stored data
-            let bounds_changed = 
-                (layout.x - data.x).abs() > 0.01 ||
-                (layout.y - data.y).abs() > 0.01 ||
-                (layout.width - data.width).abs() > 0.01 ||
-                (layout.height - data.height).abs() > 0.01;
-            
+            let bounds_changed = (layout.x - data.x).abs() > 0.01
+                || (layout.y - data.y).abs() > 0.01
+                || (layout.width - data.width).abs() > 0.01
+                || (layout.height - data.height).abs() > 0.01;
+
             if bounds_changed {
                 nodes_to_update.push(*node_id);
                 bounds_changed_hits += 1;
@@ -128,11 +130,15 @@ impl SpatialHitTester {
                     node_id, data.x, data.y, data.width, data.height, layout.x, layout.y, layout.width, layout.height);
             }
         }
-        
+
         // Update nodes that changed
         if !nodes_to_update.is_empty() {
-            log::debug!("[SpatialHitTester] Updating {} nodes (dirty_mask: {}, bounds_changed: {})",
-                nodes_to_update.len(), dirty_mask_hits, bounds_changed_hits);
+            log::debug!(
+                "[SpatialHitTester] Updating {} nodes (dirty_mask: {}, bounds_changed: {})",
+                nodes_to_update.len(),
+                dirty_mask_hits,
+                bounds_changed_hits
+            );
             for node_id in nodes_to_update {
                 self.remove_node(node_id);
                 self.add_node(node_id);
@@ -141,7 +147,7 @@ impl SpatialHitTester {
     }
 
     /// Full rebuild of spatial index
-    /// 
+    ///
     /// Use this when layout changes significantly (e.g., window resize)
     pub fn rebuild(&mut self) {
         self.grid.clear();
@@ -157,13 +163,13 @@ impl SpatialHitTester {
             return;
         }
         let layout = (*self.shared_buffer_ptr).layout_results[node_id as usize];
-        
+
         // Skip zero-size nodes
         if layout.width <= 0.0 || layout.height <= 0.0 {
             // Skip zero-size nodes
             return;
         }
-        
+
         // Node added to spatial index
 
         // Calculate grid cells this node occupies
@@ -208,9 +214,15 @@ impl SpatialHitTester {
 
     /// Get approximate memory usage in bytes
     pub fn memory_usage(&self) -> usize {
-        let grid_size = self.grid.capacity() * (std::mem::size_of::<(i32, i32)>() + std::mem::size_of::<Vec<u32>>());
-        let cell_size: usize = self.grid.values().map(|v| v.capacity() * std::mem::size_of::<u32>()).sum();
-        let node_size = self.nodes.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<NodeData>());
+        let grid_size = self.grid.capacity()
+            * (std::mem::size_of::<(i32, i32)>() + std::mem::size_of::<Vec<u32>>());
+        let cell_size: usize = self
+            .grid
+            .values()
+            .map(|v| v.capacity() * std::mem::size_of::<u32>())
+            .sum();
+        let node_size =
+            self.nodes.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<NodeData>());
         grid_size + cell_size + node_size
     }
 
@@ -241,12 +253,12 @@ impl HitTester for SpatialHitTester {
         // Call the inherent method, not trait method
         SpatialHitTester::sync(self);
     }
-    
+
     fn hit_test(&self, x: f32, y: f32) -> HitTestResult {
         // Calculate grid cell for point
         let cell_x = (x / GRID_CELL_SIZE).floor() as i32;
         let cell_y = (y / GRID_CELL_SIZE).floor() as i32;
-        
+
         let mut best_node: Option<(u32, NodeData)> = None;
         let mut checked_nodes = 0;
         let mut in_bounds_nodes = 0;
@@ -295,21 +307,30 @@ mod tests {
     fn test_spatial_hit_tester_basic() {
         // Create a mock shared buffer
         use std::alloc::{alloc, Layout};
-        
+
         unsafe {
             let layout = Layout::new::<dyxel_shared::SharedBuffer>();
             let ptr = alloc(layout) as *mut dyxel_shared::SharedBuffer;
-            
+
             // Initialize with some layout data
             (*ptr).max_node_id = 3;
             (*ptr).layout_results[1] = dyxel_shared::LayoutResult {
-                x: 0.0, y: 0.0, width: 100.0, height: 100.0,
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
             };
             (*ptr).layout_results[2] = dyxel_shared::LayoutResult {
-                x: 50.0, y: 50.0, width: 100.0, height: 100.0,
+                x: 50.0,
+                y: 50.0,
+                width: 100.0,
+                height: 100.0,
             };
             (*ptr).layout_results[3] = dyxel_shared::LayoutResult {
-                x: 200.0, y: 200.0, width: 50.0, height: 50.0,
+                x: 200.0,
+                y: 200.0,
+                width: 50.0,
+                height: 50.0,
             };
 
             let mut tester = SpatialHitTester::new(ptr);
