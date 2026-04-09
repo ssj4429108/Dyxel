@@ -815,6 +815,7 @@ fn apply_command_immediate(
             if payload.len() >= 4 {
                 let wasm_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 let id = state.resolve_id(wasm_id);
+                log::debug!("CreateTextInput: wasm_id={}, resolved id={}", wasm_id, id);
                 // 1. 设置 ViewType 为 Input (4) 以启用渲染器分支
                 state.set_view_type(wasm_id, 4);
                 // 2. 在 TextInputManager 中注册状态

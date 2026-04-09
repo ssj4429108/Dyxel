@@ -743,6 +743,8 @@ impl SharedState {
             node.view_type = match vt {
                 1 => ViewType::Text,
                 2 => ViewType::Button,
+                3 => ViewType::Image,
+                4 => ViewType::Input,
                 _ => ViewType::Container,
             };
         }

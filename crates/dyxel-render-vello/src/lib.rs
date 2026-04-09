@@ -693,7 +693,10 @@ impl VelloBackend {
                         .map(|s| s.text.clone())
                         .unwrap_or_default();
 
+                    log::debug!("Creating editor for Input node {}, text='{}', font_size={}", id, text_input_text, node.font_size);
+
                     let editor = editors.entry(id).or_insert_with(|| {
+                        log::debug!("Inserting new editor for node {}", id);
                         let mut ed = Editor::new(node.font_size);
                         ed.set_text(&text_input_text);
                         ed.set_text_color(node.color);
@@ -1511,7 +1514,9 @@ fn render_node_recursive_with_transform(
                 }
 
                 // Render text using Editor
+                log::debug!("Input node {}: looking for editor, editors.len()={}", id, editors.len());
                 if let Some(editor) = editors.get_mut(&id) {
+                    log::debug!("Input node {}: found editor with text '{}'", id, editor.text());
                     // Get text layout size for alignment calculation
                     let (text_width, _) = editor.layout_size();
                     let available_width = node_width as f32;
@@ -1536,7 +1541,10 @@ fn render_node_recursive_with_transform(
                     };
 
                     // === Handle TextInput rendering ===
+                    log::debug!("Input node {}: text_input_states.len()={}, looking for state", id, text_input_states.len());
                     if let Some(text_input) = text_input_states.get(&id) {
+                        log::debug!("Input node {}: found text_input state, focused={}, text_len={}, placeholder_len={}",
+                            id, text_input.focused, text_input.text.len(), text_input.placeholder.len());
                         // Render focus border when focused
                         if text_input.focused {
                             let layout_size = state

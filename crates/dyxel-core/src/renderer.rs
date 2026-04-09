@@ -80,6 +80,7 @@ fn sync_text_input_states(_e: &RenderState) {
             gens.retain(|id, _| active_ids.contains(id));
 
             for node_id in &active_ids {
+                log::debug!("sync_text_input_states: processing node_id={}", node_id);
                 if let Some(state) = manager.get(*node_id) {
                     // Check if state has changed (generation mismatch)
                     let last_gen = gens.get(node_id).copied();
@@ -93,6 +94,9 @@ fn sync_text_input_states(_e: &RenderState) {
                         || state.focused;
 
                     if needs_sync {
+                        log::debug!("sync_text_input_states: node_id={} focused={} text_len={} placeholder_len={}",
+                            node_id, state.focused, state.text.len(), state.placeholder.len());
+
                         let render_state = TextInputRenderState {
                             focused: state.focused,
                             text: state.text.clone(),
