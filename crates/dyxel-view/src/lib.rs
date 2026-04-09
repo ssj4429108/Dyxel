@@ -180,6 +180,8 @@ thread_local! {
     static ROTATION_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     /// Handlers for text updates from host (Native -> WASM)
     pub(crate) static TEXT_INPUT_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(dyxel_shared::TextState)>>> = RefCell::new(HashMap::new());
+    /// Current text content cache for each TextInput (needed for append/delete operations)
+    static TEXT_INPUT_STATES: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
     // Shadow configuration storage (for partial shadow config via separate methods)
     static SHADOW_CONFIG: RefCell<HashMap<u32, ShadowConfig>> = RefCell::new(HashMap::new());
     // Parent-child mapping for gesture registration (TextInput needs this to register on parent)
@@ -587,20 +589,56 @@ fn handle_text_input_event(text: &str, target_node_id: u32) {
         return;
     }
 
-    // Trigger the TextInput's on_change callback
-    TEXT_INPUT_HANDLERS.with(|handlers| {
-        if let Some(handler) = handlers.borrow_mut().get_mut(&target_node_id) {
-            // Construct TextState update
-            let new_state = dyxel_shared::TextState {
-                text: text.to_string(),
-                selection: dyxel_shared::TextSelection {
-                    start: text.len(),
-                    end: text.len(),
-                },
-                composing: None,
-            };
-            handler(new_state);
-        }
+    TEXT_INPUT_STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        let current_text = states.get(&target_node_id).cloned().unwrap_or_default();
+
+        // Process the input text
+        let new_text = if text == "\u{8}" {
+            // Backspace: remove last character
+            let mut chars: Vec<char> = current_text.chars().collect();
+            chars.pop();
+            chars.into_iter().collect()
+        } else if text == "\u{7F}" {
+            // Delete: for now same as backspace (needs cursor position for proper handling)
+            let mut chars: Vec<char> = current_text.chars().collect();
+            chars.pop();
+            chars.into_iter().collect()
+        } else if text == "\n" {
+            // Enter: for single-line input, ignore or submit
+            // For now, just append the newline
+            format!("{}{}", current_text, text)
+        } else {
+            // Normal text: append
+            format!("{}{}", current_text, text)
+        };
+
+        // Calculate new cursor position
+        let cursor_pos = if text == "\u{8}" || text == "\u{7F}" {
+            // Backspace/Delete: cursor moves back (but not below 0)
+            current_text.len().saturating_sub(1)
+        } else {
+            // Normal text: cursor at end
+            new_text.len()
+        };
+
+        // Update cache
+        states.insert(target_node_id, new_text.clone());
+
+        // Trigger the TextInput's on_change callback
+        TEXT_INPUT_HANDLERS.with(|handlers| {
+            if let Some(handler) = handlers.borrow_mut().get_mut(&target_node_id) {
+                let new_state = dyxel_shared::TextState {
+                    text: new_text,
+                    selection: dyxel_shared::TextSelection {
+                        start: cursor_pos,
+                        end: cursor_pos,
+                    },
+                    composing: None,
+                };
+                handler(new_state);
+            }
+        });
     });
 }
 
