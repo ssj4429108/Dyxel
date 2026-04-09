@@ -8,26 +8,46 @@
 use kurbo::{Affine, Point, Rect as KurboRect, Vec2};
 use std::collections::HashMap;
 
-use dyxel_shared::{
-    InputEventType, RawInputEvent, SharedBuffer,
-};
+use dyxel_shared::{InputEventType, RawInputEvent, SharedBuffer};
 
 use crate::state::SharedState;
 
 /// Native input event type (received from platform)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum NativeInputType {
     TouchDown,
     TouchMove,
     TouchUp,
     TouchCancel,
-    MouseWheel { delta_x: f32, delta_y: f32 },
+    MouseWheel {
+        delta_x: f32,
+        delta_y: f32,
+    },
     /// Pinch gesture (trackpad/magic mouse) - scale factor
     /// scale > 1.0 = zoom in, scale < 1.0 = zoom out
-    PinchGesture { scale: f32 },
+    PinchGesture {
+        scale: f32,
+    },
     /// Rotation gesture (trackpad) - angle in radians
     /// Positive = clockwise, negative = counterclockwise
-    RotationGesture { angle: f32 },
+    RotationGesture {
+        angle: f32,
+    },
+    // === Keyboard Events ===
+    /// Key press event
+    KeyDown {
+        key_code: u32,
+        modifiers: u8,
+    },
+    /// Key release event
+    KeyUp {
+        key_code: u32,
+        modifiers: u8,
+    },
+    /// Text input event (character composition)
+    TextInput {
+        text: String,
+    },
 }
 
 /// Multi-touch state tracking
@@ -153,28 +173,13 @@ impl InputProxy {
         // 根据事件类型处理
         match native_type {
             NativeInputType::TouchDown => {
-                self.handle_pointer_down(
-                    pointer_id,
-                    world_pos,
-                    pressure,
-                    shared_buffer,
-                    state,
-                );
+                self.handle_pointer_down(pointer_id, world_pos, pressure, shared_buffer, state);
             }
             NativeInputType::TouchMove => {
-                self.handle_pointer_move(
-                    pointer_id,
-                    world_pos,
-                    pressure,
-                    shared_buffer,
-                );
+                self.handle_pointer_move(pointer_id, world_pos, pressure, shared_buffer);
             }
             NativeInputType::TouchUp => {
-                self.handle_pointer_up(
-                    pointer_id,
-                    world_pos,
-                    shared_buffer,
-                );
+                self.handle_pointer_up(pointer_id, world_pos, shared_buffer);
             }
             NativeInputType::TouchCancel => {
                 self.handle_pointer_cancel(pointer_id, shared_buffer);
@@ -190,20 +195,25 @@ impl InputProxy {
                 );
             }
             NativeInputType::PinchGesture { scale } => {
-                self.handle_pinch_gesture(
-                    world_pos,
-                    scale,
-                    shared_buffer,
-                    state,
-                );
+                self.handle_pinch_gesture(world_pos, scale, shared_buffer, state);
             }
             NativeInputType::RotationGesture { angle } => {
-                self.handle_rotation_gesture(
-                    world_pos,
-                    angle,
-                    shared_buffer,
-                    state,
-                );
+                self.handle_rotation_gesture(world_pos, angle, shared_buffer, state);
+            }
+            NativeInputType::KeyDown {
+                key_code,
+                modifiers,
+            } => {
+                self.handle_key_down(key_code, modifiers, shared_buffer);
+            }
+            NativeInputType::KeyUp {
+                key_code,
+                modifiers,
+            } => {
+                self.handle_key_up(key_code, modifiers, shared_buffer);
+            }
+            NativeInputType::TextInput { text } => {
+                self.handle_text_input(&text, shared_buffer);
             }
         }
     }
@@ -218,9 +228,7 @@ impl InputProxy {
         state: &SharedState,
     ) {
         // Hit detection (with hot-area expansion)
-        let target_id = self
-            .hit_test_with_expansion(world_pos, state)
-            .unwrap_or(0);
+        let target_id = self.hit_test_with_expansion(world_pos, state).unwrap_or(0);
 
         // 记录指针状态
         let pointer_state = PointerState {
@@ -247,6 +255,7 @@ impl InputProxy {
             delta_y: 0.0,
             target_node_id: target_id,
             flags: 0,
+            payload: [0; 24],
         };
 
         self.push_event(shared_buffer, event);
@@ -297,6 +306,7 @@ impl InputProxy {
             delta_y,
             target_node_id: state.target_node_id,
             flags: if state.is_panning { 1 } else { 0 },
+            payload: [0; 24],
         };
 
         self.push_event(shared_buffer, event);
@@ -328,17 +338,14 @@ impl InputProxy {
             delta_y,
             target_node_id: state.target_node_id,
             flags: if state.is_panning { 1 } else { 0 },
+            payload: [0; 24],
         };
 
         self.push_event(shared_buffer, event);
     }
 
     /// 处理指针取消
-    fn handle_pointer_cancel(
-        &mut self,
-        pointer_id: u32,
-        shared_buffer: &mut SharedBuffer,
-    ) {
+    fn handle_pointer_cancel(&mut self, pointer_id: u32, shared_buffer: &mut SharedBuffer) {
         let Some(state) = self.pointer_states.remove(&pointer_id) else {
             return;
         };
@@ -355,6 +362,7 @@ impl InputProxy {
             delta_y: 0.0,
             target_node_id: state.target_node_id,
             flags: 0,
+            payload: [0; 24],
         };
 
         self.push_event(shared_buffer, event);
@@ -370,9 +378,7 @@ impl InputProxy {
         shared_buffer: &mut SharedBuffer,
         state: &SharedState,
     ) {
-        let target_id = self
-            .hit_test_with_expansion(world_pos, state)
-            .unwrap_or(0);
+        let target_id = self.hit_test_with_expansion(world_pos, state).unwrap_or(0);
 
         let event = RawInputEvent {
             timestamp: self.current_time,
@@ -386,6 +392,7 @@ impl InputProxy {
             delta_y,
             target_node_id: target_id,
             flags: 0,
+            payload: [0; 24],
         };
 
         self.push_event(shared_buffer, event);
@@ -400,18 +407,9 @@ impl InputProxy {
     /// Hot-area expansion hit detection
     ///
     /// Auto-expand hot-area for small nodes to improve mobile tap accuracy
-    fn hit_test_with_expansion(
-        &self,
-        point: Point,
-        state: &SharedState,
-    ) -> Option<u32> {
+    fn hit_test_with_expansion(&self, point: Point, state: &SharedState) -> Option<u32> {
         let root_id = state.root_id?;
-        self.hit_test_recursive(
-            root_id,
-            point,
-            state,
-            Vec2::ZERO,
-        )
+        self.hit_test_recursive(root_id, point, state, Vec2::ZERO)
     }
 
     /// 递归Hit detection (with hot-area expansion)
@@ -425,8 +423,7 @@ impl InputProxy {
         let node = state.nodes.get(&id)?;
         let layout = state.taffy.layout(node.taffy_node).ok()?;
 
-        let global_pos = parent_pos
-            + Vec2::new(layout.location.x as f64, layout.location.y as f64);
+        let global_pos = parent_pos + Vec2::new(layout.location.x as f64, layout.location.y as f64);
 
         // Calculate hit rectangle with hot-area expansion
         let expansion = (self.config.hit_area_expansion * self.config.dpi_scale) as f64;
@@ -442,9 +439,7 @@ impl InputProxy {
 
         // 优先检查子节点（从后往前，顶层优先）
         for &child_id in node.children.iter().rev() {
-            if let Some(hit) =
-                self.hit_test_recursive(child_id, point, state, global_pos)
-            {
+            if let Some(hit) = self.hit_test_recursive(child_id, point, state, global_pos) {
                 return Some(hit);
             }
         }
@@ -520,6 +515,7 @@ impl InputProxy {
                     delta_y: 0.0,
                     target_node_id: gesture.target_node_id,
                     flags: 0,
+                    payload: [0; 24],
                 };
                 let event2 = RawInputEvent {
                     timestamp: self.current_time,
@@ -533,6 +529,7 @@ impl InputProxy {
                     delta_y: 0.0,
                     target_node_id: gesture.target_node_id,
                     flags: 0,
+                    payload: [0; 24],
                 };
                 self.push_event(shared_buffer, event1);
                 self.push_event(shared_buffer, event2);
@@ -567,6 +564,7 @@ impl InputProxy {
                     delta_y: 0.0,
                     target_node_id,
                     flags: 0,
+                    payload: [0; 24],
                 };
                 let event2 = RawInputEvent {
                     timestamp: self.current_time,
@@ -580,6 +578,7 @@ impl InputProxy {
                     delta_y: 0.0,
                     target_node_id,
                     flags: 0,
+                    payload: [0; 24],
                 };
                 self.push_event(shared_buffer, event1);
                 self.push_event(shared_buffer, event2);
@@ -627,6 +626,7 @@ impl InputProxy {
                     delta_y: new_finger1_y - old_finger1_y,
                     target_node_id: target_id,
                     flags: 1, // Mark as panning
+                    payload: [0; 24],
                 };
                 let event2 = RawInputEvent {
                     timestamp: self.current_time,
@@ -640,6 +640,7 @@ impl InputProxy {
                     delta_y: new_finger2_y - old_finger2_y,
                     target_node_id: target_id,
                     flags: 1,
+                    payload: [0; 24],
                 };
                 self.push_event(shared_buffer, event1);
                 self.push_event(shared_buffer, event2);
@@ -685,6 +686,7 @@ impl InputProxy {
                     delta_y: 0.0,
                     target_node_id: gesture.target_node_id,
                     flags: 0,
+                    payload: [0; 24],
                 };
                 let event2 = RawInputEvent {
                     timestamp: self.current_time,
@@ -698,6 +700,7 @@ impl InputProxy {
                     delta_y: 0.0,
                     target_node_id: gesture.target_node_id,
                     flags: 0,
+                    payload: [0; 24],
                 };
                 self.push_event(shared_buffer, event1);
                 self.push_event(shared_buffer, event2);
@@ -731,6 +734,7 @@ impl InputProxy {
                     delta_y: 0.0,
                     target_node_id,
                     flags: 0,
+                    payload: [0; 24],
                 };
                 let event2 = RawInputEvent {
                     timestamp: self.current_time,
@@ -744,6 +748,7 @@ impl InputProxy {
                     delta_y: 0.0,
                     target_node_id,
                     flags: 0,
+                    payload: [0; 24],
                 };
                 self.push_event(shared_buffer, event1);
                 self.push_event(shared_buffer, event2);
@@ -790,6 +795,7 @@ impl InputProxy {
                     delta_y: new_finger1_y - old_finger1_y,
                     target_node_id: target_id,
                     flags: 1,
+                    payload: [0; 24],
                 };
                 let event2 = RawInputEvent {
                     timestamp: self.current_time,
@@ -803,6 +809,7 @@ impl InputProxy {
                     delta_y: new_finger2_y - old_finger2_y,
                     target_node_id: target_id,
                     flags: 1,
+                    payload: [0; 24],
                 };
                 self.push_event(shared_buffer, event1);
                 self.push_event(shared_buffer, event2);
@@ -821,6 +828,102 @@ impl InputProxy {
                 log::debug!("Rotation gesture changed: angle={:.2}rad", angle);
             }
         }
+    }
+
+    /// 处理键盘按下事件
+    pub fn handle_key_down(
+        &mut self,
+        key_code: u32,
+        modifiers: u8,
+        shared_buffer: &mut SharedBuffer,
+    ) {
+        self.current_time = Self::current_time_micros();
+
+        // 获取当前 focused 的 text input 节点
+        let target_id = crate::text_input::focused_id();
+
+        let mut event = RawInputEvent::new_key_event(
+            InputEventType::KeyDown,
+            key_code,
+            0, // char_code - not available for key down
+            modifiers,
+            0, // repeat_count
+        );
+        event.timestamp = self.current_time;
+        event.target_node_id = target_id;
+
+        self.push_event(shared_buffer, event);
+    }
+
+    /// 处理键盘释放事件
+    pub fn handle_key_up(
+        &mut self,
+        key_code: u32,
+        modifiers: u8,
+        shared_buffer: &mut SharedBuffer,
+    ) {
+        self.current_time = Self::current_time_micros();
+
+        // 获取当前 focused 的 text input 节点
+        let target_id = crate::text_input::focused_id();
+
+        let mut event = RawInputEvent::new_key_event(
+            InputEventType::KeyUp,
+            key_code,
+            0, // char_code - not available for key up
+            modifiers,
+            0, // repeat_count
+        );
+        event.timestamp = self.current_time;
+        event.target_node_id = target_id;
+
+        self.push_event(shared_buffer, event);
+    }
+
+    /// 处理文本输入事件
+    pub fn handle_text_input(&mut self, text: &str, shared_buffer: &mut SharedBuffer) {
+        self.current_time = Self::current_time_micros();
+
+        let target_id = crate::text_input::focused_id();
+        if target_id == 0 {
+            return; // 没有 focused 的输入框
+        }
+
+        // 使用 RawInputEvent::new_text_input if available, otherwise construct manually
+        let mut event = RawInputEvent::new_text_input(
+            InputEventType::TextInput,
+            text,
+            0, // cursor_pos - will be updated by WASM
+        )
+        .unwrap_or_else(|| {
+            // Fallback: construct manually for short text
+            let text_bytes = text.as_bytes();
+            let len = text_bytes.len().min(16);
+            let mut payload = [0u8; 24];
+            payload[0] = len as u8;
+            payload[1..1 + len].copy_from_slice(&text_bytes[..len]);
+
+            RawInputEvent {
+                timestamp: 0,
+                pointer_id: 0,
+                event_type: InputEventType::TextInput as u8,
+                _padding: [0; 3],
+                x: 0.0,
+                y: 0.0,
+                pressure: 0.0,
+                delta_x: 0.0,
+                delta_y: 0.0,
+                target_node_id: 0,
+                flags: 0,
+                payload,
+            }
+        });
+
+        // Set timestamp and target
+        event.timestamp = self.current_time;
+        event.target_node_id = target_id;
+
+        self.push_event(shared_buffer, event);
     }
 }
 
