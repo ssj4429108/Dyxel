@@ -1487,6 +1487,26 @@ fn render_node_recursive_with_transform(
 
                     // === Handle TextInput rendering ===
                     if let Some(text_input) = text_input_states.get(&id) {
+                        // Render focus border when focused
+                        if text_input.focused {
+                            let layout_size = state
+                                .taffy
+                                .layout(node.taffy_node)
+                                .map(|l| (l.size.width as f64, l.size.height as f64))
+                                .unwrap_or((node_width, node_height));
+                            render_focus_border(
+                                scene,
+                                local_transform,
+                                0.0,
+                                0.0,
+                                layout_size.0,
+                                layout_size.1,
+                                2.0, // border width
+                                Color::from_rgb8(0, 122, 255), // iOS blue
+                                node.border_radius as f64,
+                            );
+                        }
+
                         // Password mode: render dots instead of actual text
                         if text_input.secure && !editor.text().is_empty() {
                             let mut secure_editor = dyxel_editor::Editor::new(node.font_size);
@@ -2121,6 +2141,37 @@ fn render_selection(builder: &mut Scene, transform: Affine, rects: &[KRect], col
     for rect in rects {
         builder.fill(Fill::NonZero, transform, color, None, rect);
     }
+}
+
+/// Render focus border for TextInput
+fn render_focus_border(
+    builder: &mut Scene,
+    transform: Affine,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    border_width: f64,
+    color: Color,
+    border_radius: f64,
+) {
+    use vello::kurbo::{RoundedRect, Stroke};
+
+    let rect = RoundedRect::new(
+        x + border_width / 2.0,
+        y + border_width / 2.0,
+        x + width - border_width / 2.0,
+        y + height - border_width / 2.0,
+        border_radius,
+    );
+
+    builder.stroke(
+        &Stroke::new(border_width),
+        transform,
+        color,
+        None,
+        &rect,
+    );
 }
 
 impl RenderBackendExt for VelloBackend {
