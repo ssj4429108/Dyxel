@@ -1481,6 +1481,35 @@ fn render_node_recursive_with_transform(
         // TODO: Re-enable !blur_applied check after fixing blur compositing
         if true {
             if node.view_type == ViewType::Text || node.view_type == ViewType::Input {
+                // For Input nodes, render background and border first
+                if node.view_type == ViewType::Input {
+                    let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
+                    if node.border_radius > 0.0 {
+                        let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
+                        scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
+                        if node.border_width > 0.0 {
+                            let r = ((node.border_color >> 16) & 0xFF) as u8;
+                            let g = ((node.border_color >> 8) & 0xFF) as u8;
+                            let b = (node.border_color & 0xFF) as u8;
+                            let a = ((node.border_color >> 24) & 0xFF) as u8;
+                            let border_color = vello::peniko::Color::from_rgba8(r, g, b, a);
+                            let stroke = kurbo::Stroke::new(node.border_width as f64);
+                            scene.stroke(&stroke, local_transform, border_color, None, &rounded);
+                        }
+                    } else {
+                        scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
+                        if node.border_width > 0.0 {
+                            let r = ((node.border_color >> 16) & 0xFF) as u8;
+                            let g = ((node.border_color >> 8) & 0xFF) as u8;
+                            let b = (node.border_color & 0xFF) as u8;
+                            let a = ((node.border_color >> 24) & 0xFF) as u8;
+                            let border_color = vello::peniko::Color::from_rgba8(r, g, b, a);
+                            let stroke = kurbo::Stroke::new(node.border_width as f64);
+                            scene.stroke(&stroke, local_transform, border_color, None, &rect);
+                        }
+                    }
+                }
+
                 // Render text using Editor
                 if let Some(editor) = editors.get_mut(&id) {
                     // Get text layout size for alignment calculation

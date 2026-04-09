@@ -95,3 +95,6 @@ impl TextInputRegistry {
         self.focused_id
     }
 }
+
+#[cfg(test)]
+pub mod test;
