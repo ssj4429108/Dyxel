@@ -9,7 +9,8 @@
 //! - 验证渲染状态
 
 use super::*;
-use dyxel_shared::{TextInputState, TextInputRenderState};
+use dyxel_shared::TextInputState;
+use dyxel_render_api::TextInputRenderState;
 
 /// 测试场景构建器
 pub struct TextInputTestScenario {
@@ -205,7 +206,7 @@ mod tests {
             .focused()
             .run(|ctx| {
                 // 同步到渲染器
-                sync_to_renderer();
+                crate::text_input::sync_to_renderer();
 
                 // 这里可以验证渲染状态
                 // 实际项目中可以检查全局状态或 mock 渲染器

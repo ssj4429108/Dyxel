@@ -9,7 +9,7 @@ pub use manager::{
     copy, create_text_input, cut, focused_id, get, handle_menu_item, hide_context_menu,
     hide_keyboard, request_paste, set_cursor_position, set_focused, set_input_type, set_max_length,
     set_placeholder, set_return_key_type, set_secure, set_selection, set_text, show_context_menu,
-    show_keyboard, update_cursor_blink, ClipboardIntegration, ContextMenuConfig,
+    show_keyboard, sync_to_renderer, update_cursor_blink, ClipboardIntegration, ContextMenuConfig,
     ContextMenuIntegration, ContextMenuItem, KeyboardIntegration, TextInputManager,
 };
 
