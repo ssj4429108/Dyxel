@@ -7,21 +7,30 @@
 //!
 //! Default unit is logical pixels (LP). Use `px()` for physical pixels:
 
+pub mod components;
+pub mod focus;
 pub mod gesture;
+pub mod text_renderable;
+pub use components::*;
 pub use gesture::*;
+pub use text_renderable::{TextOverflow, TextRenderable, TextRenderableExt};
 
 // Re-export device pixel utilities
-pub use dyxel_shared::{PxExt, LpExt, px, lp, SizeUnit, FontSizeUnit, DeviceInfo};
+pub use dyxel_shared::{lp, px, DeviceInfo, FontSizeUnit, LpExt, PxExt, SizeUnit};
 
 // Re-export futures-signals for reactive programming
-pub use futures_signals::signal::{Signal, SignalExt, Mutable};
+pub use futures_signals::signal::{Mutable, Signal, SignalExt};
 pub use futures_signals::signal_vec::SignalVecExt;
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use dyxel_shared::push_command;
+pub use dyxel_shared::{
+    AlignContent, AlignItems, Dimension, DirtyField, FlexDirection, FlexWrap, InputType,
+    JustifyContent, LayoutResult, OpCode, ReturnKeyType, Role, SharedBuffer, TextAlign,
+    TransactionFlags, ViewType, MAX_COMMAND_BYTES,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
-pub use dyxel_shared::{FlexDirection, JustifyContent, AlignItems, FlexWrap, AlignContent, Dimension, Role, ViewType, OpCode, LayoutResult, MAX_COMMAND_BYTES, SharedBuffer, DirtyField, TransactionFlags};
-use dyxel_shared::push_command;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 // Re-export RSX macro
 pub use dyxel_rsx::rsx;
@@ -34,19 +43,17 @@ static EVENT_COUNT: AtomicU32 = AtomicU32::new(0);
 static GESTURE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 pub fn init_panic_hook() {
-    std::panic::set_hook(Box::new(|info| {
-        unsafe {
-            let msg = if let Some(location) = info.location() {
-                format!("{}:{}", location.file(), location.line())
-            } else {
-                "panic at unknown location".to_string()
-            };
-            let bytes = msg.as_bytes();
-            let len = bytes.len().min(255);
-            PANIC_BUFFER[0] = len as u8;
-            for i in 0..len {
-                PANIC_BUFFER[i + 1] = bytes[i];
-            }
+    std::panic::set_hook(Box::new(|info| unsafe {
+        let msg = if let Some(location) = info.location() {
+            format!("{}:{}", location.file(), location.line())
+        } else {
+            "panic at unknown location".to_string()
+        };
+        let bytes = msg.as_bytes();
+        let len = bytes.len().min(255);
+        PANIC_BUFFER[0] = len as u8;
+        for i in 0..len {
+            PANIC_BUFFER[i + 1] = bytes[i];
         }
     }));
 }
@@ -65,7 +72,12 @@ pub static mut SHARED_BUFFER: SharedBuffer = SharedBuffer {
     capacity: dyxel_shared::INITIAL_CAPACITY as u32,
     _padding: [0; 1],
     command_data: [0; MAX_COMMAND_BYTES],
-    layout_results: [LayoutResult { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }; dyxel_shared::MAX_CAPACITY],
+    layout_results: [LayoutResult {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    }; dyxel_shared::MAX_CAPACITY],
     generations: [0; dyxel_shared::MAX_CAPACITY],
     dirty_mask: [0; 128],
     input_buffer: dyxel_shared::InputBuffer::new(),
@@ -100,20 +112,33 @@ static mut LAST_SELECTED_NODE: Option<u32> = None;
 
 fn select_node(id: u32) {
     unsafe {
-        if LAST_SELECTED_NODE == Some(id) { return; }
+        if LAST_SELECTED_NODE == Some(id) {
+            return;
+        }
         push_command!(SHARED_BUFFER, SelectNode, id);
         LAST_SELECTED_NODE = Some(id);
     }
 }
 
-fn track_node(id: u32) { unsafe { if id > SHARED_BUFFER.max_node_id { SHARED_BUFFER.max_node_id = id; } } }
+fn track_node(id: u32) {
+    unsafe {
+        if id > SHARED_BUFFER.max_node_id {
+            SHARED_BUFFER.max_node_id = id;
+        }
+    }
+}
 pub fn get_layout(id: u32) -> LayoutResult {
     unsafe {
         let len = (*std::ptr::addr_of!(SHARED_BUFFER.layout_results)).len();
         if (id as usize) < len {
             SHARED_BUFFER.layout_results[id as usize]
         } else {
-            LayoutResult { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
+            LayoutResult {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            }
         }
     }
 }
@@ -123,8 +148,11 @@ pub fn hit_test(x: f32, y: f32) -> Option<u32> {
     for id in (1..=max_id).rev() {
         let layout = get_layout(id);
         if layout.width > 0.0 && layout.height > 0.0 {
-            if x >= layout.x && x <= layout.x + layout.width &&
-               y >= layout.y && y <= layout.y + layout.height {
+            if x >= layout.x
+                && x <= layout.x + layout.width
+                && y >= layout.y
+                && y <= layout.y + layout.height
+            {
                 return Some(id);
             }
         }
@@ -139,26 +167,33 @@ thread_local! {
     static CLICK_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut()>>> = RefCell::new(HashMap::new());
     // Unified tap handlers - all tap counts (single, double, triple+) use this
     // Now supports multiple handlers per node for different tap counts
-    static TAP_HANDLERS: RefCell<HashMap<u32, TapHandlerEntry>> = RefCell::new(HashMap::new());
+    pub(crate) static TAP_HANDLERS: RefCell<HashMap<u32, TapHandlerEntry>> = RefCell::new(HashMap::new());
     static LONG_PRESS_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     static PAN_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     // Scale gesture handlers
     static SCALE_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     // Rotation gesture handlers
+    // Pointer down handlers (for press effects)
+    static POINTER_DOWN_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    // Pointer up handlers (for press effects)
+    static POINTER_UP_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     static ROTATION_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
+    /// Handlers for text updates from host (Native -> WASM)
+    pub(crate) static TEXT_INPUT_HANDLERS: RefCell<HashMap<u32, Box<dyn FnMut(dyxel_shared::TextState)>>> = RefCell::new(HashMap::new());
     // Shadow configuration storage (for partial shadow config via separate methods)
     static SHADOW_CONFIG: RefCell<HashMap<u32, ShadowConfig>> = RefCell::new(HashMap::new());
-    // Note: PARENT_MAP removed - Host now handles event bubbling via HandlerRegistry
+    // Parent-child mapping for gesture registration (TextInput needs this to register on parent)
+    static PARENT_MAP: RefCell<HashMap<u32, u32>> = RefCell::new(HashMap::new());
 }
 
 /// Entry for tap handlers - supports multiple callbacks for different tap counts
-struct TapHandlerEntry {
+pub(crate) struct TapHandlerEntry {
     /// Handler for single tap (count = 1)
-    single_tap: Option<Box<dyn FnMut(GestureEvent)>>,
+    pub(crate) single_tap: Option<Box<dyn FnMut(GestureEvent)>>,
     /// Handler for double tap (count = 2)
-    double_tap: Option<Box<dyn FnMut(GestureEvent)>>,
+    pub(crate) double_tap: Option<Box<dyn FnMut(GestureEvent)>>,
     /// Handler for triple+ taps (count >= 3)
-    multi_tap: Option<Box<dyn FnMut(GestureEvent)>>,
+    pub(crate) multi_tap: Option<Box<dyn FnMut(GestureEvent)>>,
 }
 
 /// Shadow configuration for layer effects
@@ -171,7 +206,7 @@ struct ShadowConfig {
 }
 
 impl TapHandlerEntry {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             single_tap: None,
             double_tap: None,
@@ -201,55 +236,149 @@ impl TapHandlerEntry {
     }
 }
 
-fn process_gesture_commands() {
-    use dyxel_shared::OpCode;
-    
+fn process_host_commands() {
+    use dyxel_shared::{OpCode, TextSelection, TextState};
+
     let cmd_len = unsafe { SHARED_BUFFER.command_len as usize };
-    if cmd_len == 0 { return; }
-    
+    if cmd_len == 0 {
+        return;
+    }
+
     let data = unsafe { &(&*(&raw const SHARED_BUFFER.command_data))[..cmd_len] };
     let mut offset = 0;
-    
+
     while offset < data.len() {
         let op_byte = data[offset];
         offset += 1;
-        
+
         let op = match OpCode::from_u8(op_byte) {
             Some(o) => o,
             None => {
                 // Unknown opcode - skip remaining data to avoid infinite loop
-                log(&format!("Warning: Unknown opcode {} at offset {}, skipping remaining {}", 
-                    op_byte, offset, data.len() - offset));
+                log(&format!(
+                    "Warning: Unknown opcode {} at offset {}, skipping remaining {}",
+                    op_byte,
+                    offset,
+                    data.len() - offset
+                ));
                 break;
             }
         };
-        
+
         match op {
             // === Unified V2 Gesture Events ===
             OpCode::GestureEventV2 => {
                 if offset + 14 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let event_type = data[offset+4];
-                    let phase = data[offset+5];
-                    let x = f32::from_le_bytes([data[offset+6], data[offset+7], data[offset+8], data[offset+9]]);
-                    let y = f32::from_le_bytes([data[offset+10], data[offset+11], data[offset+12], data[offset+13]]);
+                    let node_id = u32::from_le_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]);
+                    let event_type = data[offset + 4];
+                    let phase = data[offset + 5];
+                    let x = f32::from_le_bytes([
+                        data[offset + 6],
+                        data[offset + 7],
+                        data[offset + 8],
+                        data[offset + 9],
+                    ]);
+                    let y = f32::from_le_bytes([
+                        data[offset + 10],
+                        data[offset + 11],
+                        data[offset + 12],
+                        data[offset + 13],
+                    ]);
                     offset += 14;
                     dispatch_v2_gesture_event(node_id, event_type, phase, x, y, 0);
                 }
             }
             OpCode::GestureEventV2Ex => {
                 if offset + 18 <= data.len() {
-                    let node_id = u32::from_le_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
-                    let event_type = data[offset+4];
-                    let phase = data[offset+5];
-                    let x = f32::from_le_bytes([data[offset+6], data[offset+7], data[offset+8], data[offset+9]]);
-                    let y = f32::from_le_bytes([data[offset+10], data[offset+11], data[offset+12], data[offset+13]]);
-                    let payload = u32::from_le_bytes([data[offset+14], data[offset+15], data[offset+16], data[offset+17]]);
+                    let node_id = u32::from_le_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]);
+                    let event_type = data[offset + 4];
+                    let phase = data[offset + 5];
+                    let x = f32::from_le_bytes([
+                        data[offset + 6],
+                        data[offset + 7],
+                        data[offset + 8],
+                        data[offset + 9],
+                    ]);
+                    let y = f32::from_le_bytes([
+                        data[offset + 10],
+                        data[offset + 11],
+                        data[offset + 12],
+                        data[offset + 13],
+                    ]);
+                    let payload = u32::from_le_bytes([
+                        data[offset + 14],
+                        data[offset + 15],
+                        data[offset + 16],
+                        data[offset + 17],
+                    ]);
                     offset += 18;
                     dispatch_v2_gesture_event(node_id, event_type, phase, x, y, payload);
                 }
             }
-            _ => { offset += op.data_len(); }
+            // === TextInput Events ===
+            OpCode::OnTextUpdate => {
+                if offset + 16 <= data.len() {
+                    let id = u32::from_le_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]);
+                    let len = u32::from_le_bytes([
+                        data[offset + 4],
+                        data[offset + 5],
+                        data[offset + 6],
+                        data[offset + 7],
+                    ]);
+                    let sel_start = u32::from_le_bytes([
+                        data[offset + 8],
+                        data[offset + 9],
+                        data[offset + 10],
+                        data[offset + 11],
+                    ]);
+                    let sel_end = u32::from_le_bytes([
+                        data[offset + 12],
+                        data[offset + 13],
+                        data[offset + 14],
+                        data[offset + 15],
+                    ]);
+                    offset += 16;
+
+                    if offset + len as usize <= data.len() {
+                        let text_bytes = &data[offset..offset + len as usize];
+                        if let Ok(text) = std::str::from_utf8(text_bytes) {
+                            let state = TextState {
+                                text: text.to_string(),
+                                selection: TextSelection {
+                                    start: sel_start as usize,
+                                    end: sel_end as usize,
+                                },
+                                composing: None, // TODO: Handle composing region if needed
+                            };
+
+                            TEXT_INPUT_HANDLERS.with(|h| {
+                                if let Some(handler) = h.borrow_mut().get_mut(&id) {
+                                    handler(state);
+                                }
+                            });
+                        }
+                        offset += len as usize;
+                    }
+                }
+            }
+            _ => {
+                offset += op.data_len();
+            }
         }
     }
 }
@@ -260,6 +389,10 @@ const V2_GESTURE_TYPE_LONG_PRESS: u8 = 1;
 const V2_GESTURE_TYPE_PAN: u8 = 2;
 const V2_GESTURE_TYPE_SCALE: u8 = 3;
 const V2_GESTURE_TYPE_ROTATION: u8 = 4;
+
+/// Pointer Event Types (for press effects)
+const V2_POINTER_EVENT_DOWN: u8 = 100;
+const V2_POINTER_EVENT_UP: u8 = 101;
 
 const V2_GESTURE_PHASE_BEGAN: u8 = 0;
 const V2_GESTURE_PHASE_CHANGED: u8 = 1;
@@ -287,7 +420,14 @@ fn decode_v2_payload_rotation(payload: u32) -> f32 {
 }
 
 /// Dispatch unified V2 gesture event to appropriate handler
-fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y: f32, payload: u32) {
+fn dispatch_v2_gesture_event(
+    node_id: u32,
+    event_type: u8,
+    phase: u8,
+    x: f32,
+    y: f32,
+    payload: u32,
+) {
     use crate::gesture::GesturePhase;
 
     let gesture_phase = match phase {
@@ -303,9 +443,32 @@ fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y:
             let tap_count = if payload == 0 { 1 } else { payload };
             // All tap events (single, double, triple+) go through TAP_HANDLERS
             // Dispatch to appropriate handler based on tap_count
+            log(&format!(
+                "[WASM] TAP event for node {} count {}",
+                node_id, tap_count
+            ));
             TAP_HANDLERS.with(|h| {
-                if let Some(entry) = h.borrow_mut().get_mut(&node_id) {
-                    entry.dispatch(GestureEvent::tap(node_id, x, y, tap_count));
+                let handlers = h.borrow();
+                if let Some(entry) = handlers.get(&node_id) {
+                    log(&format!(
+                        "[WASM] Found TAP handler for node {}, has_single={}",
+                        node_id,
+                        entry.single_tap.is_some()
+                    ));
+                    drop(handlers);
+                    if let Some(entry) = h.borrow_mut().get_mut(&node_id) {
+                        entry.dispatch(GestureEvent::tap(node_id, x, y, tap_count));
+                        log(&format!(
+                            "[WASM] Dispatched TAP handler for node {}",
+                            node_id
+                        ));
+                    }
+                } else {
+                    log(&format!(
+                        "[WASM] NO TAP handler for node {}! Registered handlers: {:?}",
+                        node_id,
+                        handlers.keys().collect::<Vec<_>>()
+                    ));
                 }
             });
         }
@@ -336,7 +499,14 @@ fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y:
             };
             SCALE_HANDLERS.with(|h| {
                 if let Some(f) = h.borrow_mut().get_mut(&node_id) {
-                    f(GestureEvent::scale(node_id, x, y, scale, 0.0, gesture_phase));
+                    f(GestureEvent::scale(
+                        node_id,
+                        x,
+                        y,
+                        scale,
+                        0.0,
+                        gesture_phase,
+                    ));
                 }
             });
         }
@@ -348,7 +518,29 @@ fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y:
             };
             ROTATION_HANDLERS.with(|h| {
                 if let Some(f) = h.borrow_mut().get_mut(&node_id) {
-                    f(GestureEvent::rotation(node_id, x, y, rotation, 0.0, gesture_phase));
+                    f(GestureEvent::rotation(
+                        node_id,
+                        x,
+                        y,
+                        rotation,
+                        0.0,
+                        gesture_phase,
+                    ));
+                }
+            });
+        }
+        // Pointer events for press effects (custom event types 100/101)
+        V2_POINTER_EVENT_DOWN => {
+            POINTER_DOWN_HANDLERS.with(|h| {
+                if let Some(f) = h.borrow_mut().get_mut(&node_id) {
+                    f(GestureEvent::pointer_down(node_id, x, y));
+                }
+            });
+        }
+        V2_POINTER_EVENT_UP => {
+            POINTER_UP_HANDLERS.with(|h| {
+                if let Some(f) = h.borrow_mut().get_mut(&node_id) {
+                    f(GestureEvent::pointer_up(node_id, x, y));
                 }
             });
         }
@@ -356,112 +548,333 @@ fn dispatch_v2_gesture_event(node_id: u32, event_type: u8, phase: u8, x: f32, y:
     }
 }
 
+/// Process input events from Host (keyboard, text input)
+/// Called during dyxel_view_tick to handle pending input events
+fn process_input_events() {
+    unsafe {
+        let input_buffer = &mut (*std::ptr::addr_of_mut!(SHARED_BUFFER)).input_buffer;
+
+        // Process all pending input events
+        while let Some(event) = input_buffer.pop() {
+            match event.event_type {
+                5 => {
+                    // KeyDown
+                    if let Some(key_data) = event.as_key_event() {
+                        handle_key_down_event(key_data, event.target_node_id);
+                    }
+                }
+                7 => {
+                    // TextInput
+                    if let Some(text_data) = event.as_text_input() {
+                        let len = text_data.len as usize;
+                        if len > 0 && len <= 16 {
+                            let text = String::from_utf8_lossy(&text_data.text[..len]);
+                            handle_text_input_event(&text, event.target_node_id);
+                        }
+                    }
+                }
+                _ => {
+                    // Other event types (pointer, etc.) are handled in gesture system
+                }
+            }
+        }
+    }
+}
+
+/// Handle text input event from Host
+fn handle_text_input_event(text: &str, target_node_id: u32) {
+    if target_node_id == 0 {
+        return;
+    }
+
+    // Trigger the TextInput's on_change callback
+    TEXT_INPUT_HANDLERS.with(|handlers| {
+        if let Some(handler) = handlers.borrow_mut().get_mut(&target_node_id) {
+            // Construct TextState update
+            let new_state = dyxel_shared::TextState {
+                text: text.to_string(),
+                selection: dyxel_shared::TextSelection {
+                    start: text.len(),
+                    end: text.len(),
+                },
+                composing: None,
+            };
+            handler(new_state);
+        }
+    });
+}
+
+/// Handle keyboard key down event (for special keys like arrows, delete, etc.)
+fn handle_key_down_event(_key_data: dyxel_shared::KeyEventData, target_node_id: u32) {
+    if target_node_id == 0 {
+        return;
+    }
+
+    // TODO: Handle special keys (arrow keys, delete, backspace, etc.)
+    // For now, regular character input goes through TextInput events
+    // This is where we'd handle navigation and editing commands
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn dyxel_view_tick() {
-    process_gesture_commands();
-    
-    unsafe { 
-        LAST_SELECTED_NODE = None; 
-        for i in 0..32 { SHARED_BUFFER.dirty_mask[i] = 0; }
+    process_host_commands();
+
+    // Process input events from Host (keyboard, text input)
+    process_input_events();
+
+    unsafe {
+        LAST_SELECTED_NODE = None;
+        for i in 0..32 {
+            SHARED_BUFFER.dirty_mask[i] = 0;
+        }
     }
-    
+
     EXECUTOR.with(|ex| {
         let mut tasks = ex.borrow_mut();
         let mut i = 0;
         while i < tasks.len() {
             let waker = futures_util::task::noop_waker();
             let mut cx = std::task::Context::from_waker(&waker);
-            if tasks[i].as_mut().poll(&mut cx).is_ready() { let _ = tasks.remove(i); } else { i += 1; }
+            if tasks[i].as_mut().poll(&mut cx).is_ready() {
+                let _ = tasks.remove(i);
+            } else {
+                i += 1;
+            }
         }
     });
-    
+
     // Note: PENDING_CLICKS removed - handlers are now called directly during process_gesture_commands
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn on_node_click(id: u32) {
     CLICK_COUNT.fetch_add(1, Ordering::SeqCst);
-    CLICK_HANDLERS.with(|h| { if let Some(f) = h.borrow_mut().get_mut(&id) { f(); } });
+    CLICK_HANDLERS.with(|h| {
+        if let Some(f) = h.borrow_mut().get_mut(&id) {
+            f();
+        }
+    });
     dyxel_view_tick();
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn dyxel_get_click_count() -> u32 { CLICK_COUNT.load(Ordering::SeqCst) }
+pub extern "C" fn dyxel_get_click_count() -> u32 {
+    CLICK_COUNT.load(Ordering::SeqCst)
+}
 #[unsafe(no_mangle)]
-pub extern "C" fn dyxel_get_event_count() -> u32 { EVENT_COUNT.load(Ordering::SeqCst) }
+pub extern "C" fn dyxel_get_event_count() -> u32 {
+    EVENT_COUNT.load(Ordering::SeqCst)
+}
 #[unsafe(no_mangle)]
-pub extern "C" fn dyxel_get_gesture_count() -> u32 { GESTURE_COUNT.load(Ordering::SeqCst) }
+pub extern "C" fn dyxel_get_gesture_count() -> u32 {
+    GESTURE_COUNT.load(Ordering::SeqCst)
+}
 
 // ===== Property System =====
 
-pub enum Prop<T> { Static(T), Dynamic(Box<dyn Signal<Item = T> + Unpin + 'static>) }
+pub enum Prop<T> {
+    Static(T),
+    Dynamic(Box<dyn Signal<Item = T> + Unpin + 'static>),
+}
 
-impl From<Dimension> for Prop<Dimension> { fn from(v: Dimension) -> Self { Prop::Static(v) } }
-impl From<FlexDirection> for Prop<FlexDirection> { fn from(v: FlexDirection) -> Self { Prop::Static(v) } }
-impl From<JustifyContent> for Prop<JustifyContent> { fn from(v: JustifyContent) -> Self { Prop::Static(v) } }
-impl From<AlignItems> for Prop<AlignItems> { fn from(v: AlignItems) -> Self { Prop::Static(v) } }
-impl From<FlexWrap> for Prop<FlexWrap> { fn from(v: FlexWrap) -> Self { Prop::Static(v) } }
-impl From<AlignContent> for Prop<AlignContent> { fn from(v: AlignContent) -> Self { Prop::Static(v) } }
-impl From<&str> for Prop<Dimension> { fn from(v: &str) -> Self { Prop::Static(Dimension::from(v)) } }
-impl From<f32> for Prop<Dimension> { fn from(v: f32) -> Self { Prop::Static(Dimension::Pixels(v)) } }
-impl From<String> for Prop<String> { fn from(v: String) -> Self { Prop::Static(v) } }
-impl From<&str> for Prop<String> { fn from(v: &str) -> Self { Prop::Static(v.to_string()) } }
-impl From<&String> for Prop<String> { fn from(v: &String) -> Self { Prop::Static(v.clone()) } }
-impl From<f32> for Prop<f32> { fn from(v: f32) -> Self { Prop::Static(v) } }
-impl From<i32> for Prop<i32> { fn from(v: i32) -> Self { Prop::Static(v) } }
-impl From<u16> for Prop<u16> { fn from(v: u16) -> Self { Prop::Static(v) } }
-impl From<bool> for Prop<bool> { fn from(v: bool) -> Self { Prop::Static(v) } }
-impl From<(u32,u32,u32)> for Prop<(u32,u32,u32)> { fn from(v: (u32,u32,u32)) -> Self { Prop::Static(v) } }
-impl From<(u32,u32,u32,u32)> for Prop<(u32,u32,u32,u32)> { fn from(v: (u32,u32,u32,u32)) -> Self { Prop::Static(v) } }
-impl From<(u8,u8,u8,u8)> for Prop<(u8,u8,u8,u8)> { fn from(v: (u8,u8,u8,u8)) -> Self { Prop::Static(v) } }
-impl From<(f32,f32,f32,f32)> for Prop<(f32,f32,f32,f32)> { fn from(v: (f32,f32,f32,f32)) -> Self { Prop::Static(v) } }
-impl From<(f32,f32,f32,u32)> for Prop<(f32,f32,f32,u32)> { fn from(v: (f32,f32,f32,u32)) -> Self { Prop::Static(v) } }
-impl From<(f32,f32)> for Prop<(f32,f32)> { fn from(v: (f32,f32)) -> Self { Prop::Static(v) } }
+impl From<Dimension> for Prop<Dimension> {
+    fn from(v: Dimension) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<FlexDirection> for Prop<FlexDirection> {
+    fn from(v: FlexDirection) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<JustifyContent> for Prop<JustifyContent> {
+    fn from(v: JustifyContent) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<AlignItems> for Prop<AlignItems> {
+    fn from(v: AlignItems) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<FlexWrap> for Prop<FlexWrap> {
+    fn from(v: FlexWrap) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<AlignContent> for Prop<AlignContent> {
+    fn from(v: AlignContent) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<TextAlign> for Prop<u8> {
+    fn from(v: TextAlign) -> Self {
+        Prop::Static(v as u8)
+    }
+}
+impl From<&str> for Prop<Dimension> {
+    fn from(v: &str) -> Self {
+        Prop::Static(Dimension::from(v))
+    }
+}
+impl From<f32> for Prop<Dimension> {
+    fn from(v: f32) -> Self {
+        Prop::Static(Dimension::Pixels(v))
+    }
+}
+impl From<String> for Prop<String> {
+    fn from(v: String) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<&str> for Prop<String> {
+    fn from(v: &str) -> Self {
+        Prop::Static(v.to_string())
+    }
+}
+impl From<&String> for Prop<String> {
+    fn from(v: &String) -> Self {
+        Prop::Static(v.clone())
+    }
+}
+impl From<f32> for Prop<f32> {
+    fn from(v: f32) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<i32> for Prop<i32> {
+    fn from(v: i32) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<u16> for Prop<u16> {
+    fn from(v: u16) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<bool> for Prop<bool> {
+    fn from(v: bool) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<(u32, u32, u32)> for Prop<(u32, u32, u32)> {
+    fn from(v: (u32, u32, u32)) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<(u32, u32, u32, u32)> for Prop<(u32, u32, u32, u32)> {
+    fn from(v: (u32, u32, u32, u32)) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<(u8, u8, u8, u8)> for Prop<(u8, u8, u8, u8)> {
+    fn from(v: (u8, u8, u8, u8)) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<(f32, f32, f32, f32)> for Prop<(f32, f32, f32, f32)> {
+    fn from(v: (f32, f32, f32, f32)) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<(f32, f32, f32, u32)> for Prop<(f32, f32, f32, u32)> {
+    fn from(v: (f32, f32, f32, u32)) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<(f32, f32)> for Prop<(f32, f32)> {
+    fn from(v: (f32, f32)) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<dyxel_shared::TextState> for Prop<dyxel_shared::TextState> {
+    fn from(v: dyxel_shared::TextState) -> Self {
+        Prop::Static(v)
+    }
+}
+
 // SizeUnit support
-impl From<SizeUnit> for Prop<SizeUnit> { fn from(v: SizeUnit) -> Self { Prop::Static(v) } }
-impl From<Dimension> for Prop<SizeUnit> { 
-    fn from(v: Dimension) -> Self { 
+impl From<SizeUnit> for Prop<SizeUnit> {
+    fn from(v: SizeUnit) -> Self {
+        Prop::Static(v)
+    }
+}
+impl From<Dimension> for Prop<SizeUnit> {
+    fn from(v: Dimension) -> Self {
         match v {
             Dimension::Auto => Prop::Static(SizeUnit::Auto),
             Dimension::Pixels(px) => Prop::Static(SizeUnit::Px(px)),
             Dimension::Percent(pct) => Prop::Static(SizeUnit::Percent(pct)),
         }
-    } 
+    }
 }
-impl From<f32> for Prop<SizeUnit> { fn from(v: f32) -> Self { Prop::Static(SizeUnit::Lp(v)) } }
-impl From<i32> for Prop<SizeUnit> { fn from(v: i32) -> Self { Prop::Static(SizeUnit::Lp(v as f32)) } }
-impl From<&str> for Prop<SizeUnit> { fn from(v: &str) -> Self { Prop::Static(SizeUnit::from(v)) } }
+impl From<f32> for Prop<SizeUnit> {
+    fn from(v: f32) -> Self {
+        Prop::Static(SizeUnit::Lp(v))
+    }
+}
+impl From<i32> for Prop<SizeUnit> {
+    fn from(v: i32) -> Self {
+        Prop::Static(SizeUnit::Lp(v as f32))
+    }
+}
+impl From<&str> for Prop<SizeUnit> {
+    fn from(v: &str) -> Self {
+        Prop::Static(SizeUnit::from(v))
+    }
+}
 
 // Support for State signals
-impl From<dyxel_state::SizeUnitSignal> for Prop<SizeUnit> { 
-    fn from(v: dyxel_state::SizeUnitSignal) -> Self { Prop::Dynamic(Box::new(v)) } 
+impl From<dyxel_state::SizeUnitSignal> for Prop<SizeUnit> {
+    fn from(v: dyxel_state::SizeUnitSignal) -> Self {
+        Prop::Dynamic(Box::new(v))
+    }
 }
-impl From<dyxel_state::StateSignal<(u32, u32, u32, u32)>> for Prop<(u32, u32, u32, u32)> { 
-    fn from(v: dyxel_state::StateSignal<(u32, u32, u32, u32)>) -> Self { Prop::Dynamic(Box::new(v)) } 
+impl From<dyxel_state::StateSignal<(u32, u32, u32, u32)>> for Prop<(u32, u32, u32, u32)> {
+    fn from(v: dyxel_state::StateSignal<(u32, u32, u32, u32)>) -> Self {
+        Prop::Dynamic(Box::new(v))
+    }
 }
 
-pub trait SignalPropExt: Signal + Sized { 
-    fn sig(self) -> Prop<Self::Item> where Self: Unpin + 'static { Prop::Dynamic(Box::new(self)) }
-    
+pub trait SignalPropExt: Signal + Sized {
+    fn sig(self) -> Prop<Self::Item>
+    where
+        Self: Unpin + 'static,
+    {
+        Prop::Dynamic(Box::new(self))
+    }
+
     /// Convert f32 signal to SizeUnit signal (for width/height binding)
-    fn sig_size(self) -> Prop<SizeUnit> where Self: Signal<Item = f32> + Unpin + 'static {
+    fn sig_size(self) -> Prop<SizeUnit>
+    where
+        Self: Signal<Item = f32> + Unpin + 'static,
+    {
         Prop::Dynamic(Box::new(self.map(SizeUnit::Lp)))
     }
-    
+
     /// Convert (u32,u32,u32,u32) signal to color Prop (for color binding)
-    fn sig_color(self) -> Prop<(u32,u32,u32,u32)> where Self: Signal<Item = (u32,u32,u32,u32)> + Unpin + 'static {
+    fn sig_color(self) -> Prop<(u32, u32, u32, u32)>
+    where
+        Self: Signal<Item = (u32, u32, u32, u32)> + Unpin + 'static,
+    {
         Prop::Dynamic(Box::new(self))
     }
 }
 impl<S: Signal + SignalExt> SignalPropExt for S {}
 
-static NODE_COUNTER: AtomicU32 = AtomicU32::new(0);
+pub(crate) static NODE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-fn apply_prop<T: 'static, F>(id: u32, p: Prop<T>, f: F) where F: Fn(u32, T) + 'static {
+fn apply_prop<T: 'static, F>(id: u32, p: Prop<T>, f: F)
+where
+    F: Fn(u32, T) + 'static,
+{
     match p {
         Prop::Static(v) => f(id, v),
         Prop::Dynamic(s) => {
-            let future = s.for_each(move |val| { f(id, val); async {} });
+            let future = s.for_each(move |val| {
+                f(id, val);
+                async {}
+            });
             EXECUTOR.with(|ex| ex.borrow_mut().push(Box::pin(future)));
         }
     }
@@ -471,15 +884,29 @@ fn apply_prop<T: 'static, F>(id: u32, p: Prop<T>, f: F) where F: Fn(u32, T) + 's
 
 pub trait BaseView {
     fn node_id(&self) -> u32;
-    
-    fn color(self, p: impl Into<Prop<(u32,u32,u32,u32)>>) -> Self where Self: Sized {
+
+    fn color(self, p: impl Into<Prop<(u32, u32, u32, u32)>>) -> Self
+    where
+        Self: Sized,
+    {
         apply_prop(self.node_id(), p.into(), |id, (r, g, b, a)| {
             select_node(id);
-            push_command!(SHARED_BUFFER, SetColorCompact, r as u8, g as u8, b as u8, a as u8);
-        }); self 
+            push_command!(
+                SHARED_BUFFER,
+                SetColorCompact,
+                r as u8,
+                g as u8,
+                b as u8,
+                a as u8
+            );
+        });
+        self
     }
-    
-    fn width(self, p: impl Into<Prop<SizeUnit>>) -> Self where Self: Sized {
+
+    fn width(self, p: impl Into<Prop<SizeUnit>>) -> Self
+    where
+        Self: Sized,
+    {
         apply_prop(self.node_id(), p.into(), |id, unit| {
             select_node(id);
             unsafe {
@@ -492,10 +919,14 @@ pub trait BaseView {
                 };
                 push_command!(SHARED_BUFFER, SetWidthCompact, t, v);
             }
-        }); self 
+        });
+        self
     }
-    
-    fn height(self, p: impl Into<Prop<SizeUnit>>) -> Self where Self: Sized {
+
+    fn height(self, p: impl Into<Prop<SizeUnit>>) -> Self
+    where
+        Self: Sized,
+    {
         apply_prop(self.node_id(), p.into(), |id, unit| {
             select_node(id);
             unsafe {
@@ -508,57 +939,79 @@ pub trait BaseView {
                 };
                 push_command!(SHARED_BUFFER, SetHeightCompact, t, v);
             }
-        }); self 
+        });
+        self
     }
-    
-    fn flex_direction(self, p: impl Into<Prop<FlexDirection>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, dir| { select_node(id); push_command!(SHARED_BUFFER, SetFlexDirection, id, dir as u32); }); self 
+
+    fn flex_grow(self, p: impl Into<Prop<f32>>) -> Self
+    where
+        Self: Sized,
+    {
+        apply_prop(self.node_id(), p.into(), |id, grow| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetFlexGrow, id, grow);
+        });
+        self
     }
-    fn justify_content(self, p: impl Into<Prop<JustifyContent>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, j| { select_node(id); push_command!(SHARED_BUFFER, SetJustifyContent, id, j as u32); }); self 
+    fn z_index(self, p: impl Into<Prop<i32>>) -> Self
+    where
+        Self: Sized,
+    {
+        apply_prop(self.node_id(), p.into(), |id, z| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetZIndex, id, z);
+        });
+        self
     }
-    fn align_items(self, p: impl Into<Prop<AlignItems>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, a| { select_node(id); push_command!(SHARED_BUFFER, SetAlignItems, id, a as u32); }); self 
+    fn padding(self, p: impl Into<Prop<(f32, f32, f32, f32)>>) -> Self
+    where
+        Self: Sized,
+    {
+        apply_prop(self.node_id(), p.into(), |id, (t, r, b, l)| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetPadding, id, t, r, b, l);
+        });
+        self
     }
-    fn flex_wrap(self, p: impl Into<Prop<FlexWrap>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, w| { select_node(id); push_command!(SHARED_BUFFER, SetFlexWrap, id, w as u32); }); self 
-    }
-    fn align_content(self, p: impl Into<Prop<AlignContent>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, ac| { select_node(id); push_command!(SHARED_BUFFER, SetAlignContent, id, ac as u32); }); self 
-    }
-    fn flex_grow(self, p: impl Into<Prop<f32>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, grow| { select_node(id); push_command!(SHARED_BUFFER, SetFlexGrow, id, grow); }); self 
-    }
-    fn z_index(self, p: impl Into<Prop<i32>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, z| { select_node(id); push_command!(SHARED_BUFFER, SetZIndex, id, z); }); self 
-    }
-    fn padding(self, p: impl Into<Prop<(f32,f32,f32,f32)>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, (t, r, b, l)| { 
-            select_node(id); 
-            push_command!(SHARED_BUFFER, SetPadding, id, t, r, b, l); 
-        }); self 
-    }
-    fn margin(self, p: impl Into<Prop<(f32,f32,f32,f32)>>) -> Self where Self: Sized {
+    fn margin(self, p: impl Into<Prop<(f32, f32, f32, f32)>>) -> Self
+    where
+        Self: Sized,
+    {
         // Note: margin not implemented yet, uses padding as placeholder
         self.padding(p)
     }
-    fn border_radius(self, p: impl Into<Prop<f32>>) -> Self where Self: Sized { 
-        apply_prop(self.node_id(), p.into(), |id, r| { select_node(id); push_command!(SHARED_BUFFER, SetBorderRadius, id, r); }); self 
+    fn border_radius(self, p: impl Into<Prop<f32>>) -> Self
+    where
+        Self: Sized,
+    {
+        apply_prop(self.node_id(), p.into(), |id, r| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetBorderRadius, id, r);
+        });
+        self
     }
-    fn on_click(self, handler: impl FnMut() + 'static) -> Self where Self: Sized {
-        let id = self.node_id(); 
-        select_node(id); 
-        push_command!(SHARED_BUFFER, AttachClick, id); 
-        CLICK_HANDLERS.with(|h| { h.borrow_mut().insert(id, Box::new(handler)); }); 
+    fn on_click(self, handler: impl FnMut() + 'static) -> Self
+    where
+        Self: Sized,
+    {
+        let id = self.node_id();
+        select_node(id);
+        push_command!(SHARED_BUFFER, AttachClick, id);
+        CLICK_HANDLERS.with(|h| {
+            h.borrow_mut().insert(id, Box::new(handler));
+        });
         self
     }
     /// On tap handler - receives GestureEvent
-    fn on_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
+    fn on_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterTapHandler, id, 1u32); // Notify Host (count=1 for single tap)
-        // Store in the appropriate slot of TapHandlerEntry
+                                                                    // Store in the appropriate slot of TapHandlerEntry
         TAP_HANDLERS.with(|h| {
             let mut handlers = h.borrow_mut();
             let entry = handlers.entry(id).or_insert_with(TapHandlerEntry::new);
@@ -568,7 +1021,10 @@ pub trait BaseView {
     }
     /// On double tap handler - receives GestureEvent
     /// Internally uses RegisterTapHandler with count=2 (unified tap command)
-    fn on_double_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
+    fn on_double_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
@@ -584,7 +1040,10 @@ pub trait BaseView {
     }
     /// On long press handler - receives GestureEvent
     /// Use `event.phase` to check state (Began/Ended/Cancelled)
-    fn on_long_press(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
+    fn on_long_press(self, handler: impl FnMut(GestureEvent) + 'static) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
@@ -596,7 +1055,10 @@ pub trait BaseView {
     }
     /// On pan handler - receives GestureEvent
     /// Use `event.phase` to check state (Began/Changed/Ended/Cancelled)
-    fn on_pan(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
+    fn on_pan(self, handler: impl FnMut(GestureEvent) + 'static) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
@@ -608,7 +1070,10 @@ pub trait BaseView {
     }
     /// On scale handler - receives GestureEvent
     /// Use `event.phase` to check state (Began/Changed/Ended/Cancelled)
-    fn on_scale(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
+    fn on_scale(self, handler: impl FnMut(GestureEvent) + 'static) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
@@ -620,7 +1085,10 @@ pub trait BaseView {
     }
     /// On rotation handler - receives GestureEvent
     /// Use `event.phase` to check state (Began/Changed/Ended/Cancelled)
-    fn on_rotation(self, handler: impl FnMut(GestureEvent) + 'static) -> Self where Self: Sized {
+    fn on_rotation(self, handler: impl FnMut(GestureEvent) + 'static) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
@@ -632,24 +1100,40 @@ pub trait BaseView {
     }
 
     // === Layer Effects (Vello Native) ===
-    fn opacity(self, p: impl Into<Prop<f32>>) -> Self where Self: Sized {
+    fn opacity(self, p: impl Into<Prop<f32>>) -> Self
+    where
+        Self: Sized,
+    {
         apply_prop(self.node_id(), p.into(), |id, opacity| {
             select_node(id);
             push_command!(SHARED_BUFFER, SetOpacity, id, opacity.clamp(0.0, 1.0));
-        }); self
+        });
+        self
     }
-    fn shadow_offset(self, x: f32, y: f32) -> Self where Self: Sized {
+    fn shadow_offset(self, x: f32, y: f32) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         // Store partial shadow config - full shadow set via shadow() method
         SHADOW_CONFIG.with(|c| {
             let mut config = c.borrow_mut();
-            config.entry(id).or_insert_with(ShadowConfig::default).offset_x = x;
-            config.entry(id).or_insert_with(ShadowConfig::default).offset_y = y;
+            config
+                .entry(id)
+                .or_insert_with(ShadowConfig::default)
+                .offset_x = x;
+            config
+                .entry(id)
+                .or_insert_with(ShadowConfig::default)
+                .offset_y = y;
         });
         self
     }
-    fn shadow_blur(self, blur: f32) -> Self where Self: Sized {
+    fn shadow_blur(self, blur: f32) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         SHADOW_CONFIG.with(|c| {
@@ -658,40 +1142,76 @@ pub trait BaseView {
         });
         self
     }
-    fn shadow_color(self, color: impl Into<Prop<u32>>) -> Self where Self: Sized {
+    fn shadow_color(self, color: impl Into<Prop<u32>>) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         select_node(id);
         apply_prop(id, color.into(), |node_id, color_val| {
             SHADOW_CONFIG.with(|c| {
                 let mut config = c.borrow_mut();
-                config.entry(node_id).or_insert_with(ShadowConfig::default).color = color_val;
+                config
+                    .entry(node_id)
+                    .or_insert_with(ShadowConfig::default)
+                    .color = color_val;
             });
         });
         self
     }
-    fn shadow(self, params: impl Into<Prop<(f32, f32, f32, u32)>>) -> Self where Self: Sized {
+    fn shadow(self, params: impl Into<Prop<(f32, f32, f32, u32)>>) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
-        apply_prop(id, params.into(), |node_id, (offset_x, offset_y, blur, color)| {
-            select_node(node_id);
-            push_command!(SHARED_BUFFER, SetShadow, node_id, offset_x, offset_y, blur, color);
-        });
+        apply_prop(
+            id,
+            params.into(),
+            |node_id, (offset_x, offset_y, blur, color)| {
+                select_node(node_id);
+                push_command!(
+                    SHARED_BUFFER,
+                    SetShadow,
+                    node_id,
+                    offset_x,
+                    offset_y,
+                    blur,
+                    color
+                );
+            },
+        );
         self
     }
-    fn blur(self, p: impl Into<Prop<f32>>) -> Self where Self: Sized {
+    fn blur(self, p: impl Into<Prop<f32>>) -> Self
+    where
+        Self: Sized,
+    {
         apply_prop(self.node_id(), p.into(), |id, radius| {
             select_node(id);
             push_command!(SHARED_BUFFER, SetBlur, id, radius.max(0.0));
-        }); self
-    }
-    fn clip_to_bounds(self, clip: impl Into<Prop<bool>>) -> Self where Self: Sized {
-        let id = self.node_id();
-        apply_prop(id, clip.into(), |node_id, clip_val| {
-            select_node(node_id);
-            push_command!(SHARED_BUFFER, SetClipToBounds, node_id, if clip_val { 1u8 } else { 0u8 });
         });
         self
     }
-    fn position(self, pos: impl Into<Prop<(f32, f32)>>) -> Self where Self: Sized {
+    fn clip_to_bounds(self, clip: impl Into<Prop<bool>>) -> Self
+    where
+        Self: Sized,
+    {
+        let id = self.node_id();
+        apply_prop(id, clip.into(), |node_id, clip_val| {
+            select_node(node_id);
+            push_command!(
+                SHARED_BUFFER,
+                SetClipToBounds,
+                node_id,
+                if clip_val { 1u8 } else { 0u8 }
+            );
+        });
+        self
+    }
+    fn position(self, pos: impl Into<Prop<(f32, f32)>>) -> Self
+    where
+        Self: Sized,
+    {
         let id = self.node_id();
         apply_prop(id, pos.into(), |node_id, (x, y)| {
             select_node(node_id);
@@ -699,33 +1219,89 @@ pub trait BaseView {
         });
         self
     }
-    fn child(self, child_id: u32) -> Self where Self: Sized { 
-        let parent_id = self.node_id();
-        select_node(parent_id); 
-        push_command!(SHARED_BUFFER, AddChild, parent_id, child_id);
-        // Note: PARENT_MAP removed - Host now handles event bubbling via HandlerRegistry
-        self 
+    fn border_width(self, width: impl Into<Prop<f32>>) -> Self
+    where
+        Self: Sized,
+    {
+        apply_prop(self.node_id(), width.into(), |id, w| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetBorderWidth, id, w.max(0.0));
+        });
+        self
     }
+    fn border_color(self, color: impl Into<Prop<(u8, u8, u8, u8)>>) -> Self
+    where
+        Self: Sized,
+    {
+        apply_prop(self.node_id(), color.into(), |id, (r, g, b, a)| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetBorderColor, id, r, g, b, a);
+        });
+        self
+    }
+    fn child(self, child_id: u32) -> Self
+    where
+        Self: Sized,
+    {
+        let parent_id = self.node_id();
+        select_node(parent_id);
+        push_command!(SHARED_BUFFER, AddChild, parent_id, child_id);
+        // Store parent-child relationship for gesture registration (TextInput needs this)
+        PARENT_MAP.with(|p| {
+            p.borrow_mut().insert(child_id, parent_id);
+        });
+        self
+    }
+}
+
+/// Get the parent node ID for a given child node
+pub fn get_parent_node(child_id: u32) -> Option<u32> {
+    PARENT_MAP.with(|p| p.borrow().get(&child_id).copied())
 }
 
 // ===== View Components =====
 
-pub struct View { pub id: u32 }
+pub struct View {
+    pub id: u32,
+}
 impl View {
     pub fn new() -> Self {
-        let id = NODE_COUNTER.fetch_add(1, Ordering::SeqCst); 
+        let id = NODE_COUNTER.fetch_add(1, Ordering::SeqCst);
         track_node(id);
         push_command!(SHARED_BUFFER, CreateNode, id);
-        unsafe { LAST_SELECTED_NODE = Some(id); } 
-        Self { id }
-            .width(Dimension::Auto)
-            .height(Dimension::Auto)
-            .flex_direction(FlexDirection::Row)
-            .justify_content(JustifyContent::FlexStart)
-            .align_items(AlignItems::FlexStart)
-            .flex_wrap(FlexWrap::Wrap)
+        unsafe {
+            LAST_SELECTED_NODE = Some(id);
+            // Debug: log buffer state after creating node
+            let current_cmd_len = SHARED_BUFFER.command_len;
+            let msg = format!("View::new id={}, cmd_len={}", id, current_cmd_len);
+            console_log(msg.as_ptr(), msg.len());
+        }
+
+        // Apply default flex properties directly via commands
+        select_node(id);
+        push_command!(
+            SHARED_BUFFER,
+            SetFlexDirection,
+            id,
+            FlexDirection::Row as u32
+        );
+        push_command!(
+            SHARED_BUFFER,
+            SetJustifyContent,
+            id,
+            JustifyContent::FlexStart as u32
+        );
+        push_command!(
+            SHARED_BUFFER,
+            SetAlignItems,
+            id,
+            AlignItems::FlexStart as u32
+        );
+        push_command!(SHARED_BUFFER, SetFlexWrap, id, FlexWrap::Wrap as u32);
+
+        Self { id }.width(Dimension::Auto).height(Dimension::Auto)
     }
-    
+
     /// Simple tap handler without coordinates (for convenience)
     pub fn on_tap_simple(self, mut handler: impl FnMut() + 'static) -> Self {
         let id = self.node_id();
@@ -739,9 +1315,9 @@ impl View {
         });
         self
     }
-    
+
     /// Configure a composite gesture (Sequence, Parallel, or Exclusive)
-    /// 
+    ///
     /// Example:
     /// ```rust
     /// View::new().gesture(
@@ -755,7 +1331,11 @@ impl View {
         config.apply_to(self)
     }
 }
-impl BaseView for View { fn node_id(&self) -> u32 { self.id } }
+impl BaseView for View {
+    fn node_id(&self) -> u32 {
+        self.id
+    }
+}
 
 /// Trait for gesture configurations that can be applied to a View
 pub trait GestureConfig {
@@ -999,15 +1579,27 @@ impl GestureConfig for crate::TapGesture {
                 let entry = handlers.entry(id).or_insert_with(TapHandlerEntry::new);
                 // Store in appropriate slot based on count
                 match count {
-                    1 => entry.single_tap = Some(Box::new(move |e| {
-                        if e.tap_count == count { on_ended(e); }
-                    })),
-                    2 => entry.double_tap = Some(Box::new(move |e| {
-                        if e.tap_count == count { on_ended(e); }
-                    })),
-                    _ => entry.multi_tap = Some(Box::new(move |e| {
-                        if e.tap_count == count { on_ended(e); }
-                    })),
+                    1 => {
+                        entry.single_tap = Some(Box::new(move |e| {
+                            if e.tap_count == count {
+                                on_ended(e);
+                            }
+                        }))
+                    }
+                    2 => {
+                        entry.double_tap = Some(Box::new(move |e| {
+                            if e.tap_count == count {
+                                on_ended(e);
+                            }
+                        }))
+                    }
+                    _ => {
+                        entry.multi_tap = Some(Box::new(move |e| {
+                            if e.tap_count == count {
+                                on_ended(e);
+                            }
+                        }))
+                    }
                 }
             });
         }
@@ -1016,18 +1608,21 @@ impl GestureConfig for crate::TapGesture {
     }
 }
 
-pub struct Text { pub id: u32 }
+pub struct Text {
+    pub id: u32,
+}
 impl Text {
     pub fn new() -> Self {
-        let id = NODE_COUNTER.fetch_add(1, Ordering::SeqCst); 
+        let id = NODE_COUNTER.fetch_add(1, Ordering::SeqCst);
         track_node(id);
         unsafe {
             push_command!(SHARED_BUFFER, CreateTextNode, id);
             LAST_SELECTED_NODE = Some(id);
         }
-        Self { id }
+        // Set default font_size and text color
+        Self { id }.font_size(16.0).text_color((0, 0, 0, 255)) // Black text
     }
-    pub fn value(self, p: impl Into<Prop<String>>) -> Self { 
+    pub fn value(self, p: impl Into<Prop<String>>) -> Self {
         apply_prop(self.id, p.into(), |id, s| {
             select_node(id);
             let len = s.len() as u32;
@@ -1035,89 +1630,78 @@ impl Text {
                 push_command!(SHARED_BUFFER, SetTextContent, id, len);
                 let offset = SHARED_BUFFER.command_len as usize;
                 if offset + s.len() <= MAX_COMMAND_BYTES {
-                    SHARED_BUFFER.command_data[offset..offset+s.len()].copy_from_slice(s.as_bytes());
+                    SHARED_BUFFER.command_data[offset..offset + s.len()]
+                        .copy_from_slice(s.as_bytes());
                     SHARED_BUFFER.command_len = (offset + s.len()) as u32;
                 }
             }
-        }); self 
-    }
-    pub fn font_size(self, p: impl Into<Prop<f32>>) -> Self { 
-        apply_prop(self.id, p.into(), |id, size| { select_node(id); push_command!(SHARED_BUFFER, SetFontSize, id, size); }); self 
-    }
-    pub fn font_weight(self, p: impl Into<Prop<u16>>) -> Self { 
-        apply_prop(self.id, p.into(), |id, weight| { select_node(id); push_command!(SHARED_BUFFER, SetTextWeight, id, weight); }); self 
-    }
-    pub fn text_color(self, p: impl Into<Prop<(u8,u8,u8,u8)>>) -> Self { 
-        apply_prop(self.id, p.into(), |id, (r,g,b,a)| { select_node(id); push_command!(SHARED_BUFFER, SetTextColor, id, r, g, b, a); }); self 
-    }
-}
-impl BaseView for Text { fn node_id(&self) -> u32 { self.id } }
-
-/// Column - vertical flex container (RSX-friendly)
-pub struct Column { view: View }
-impl Column {
-    pub fn new() -> Self {
-        let view = View::new()
-            .flex_direction(FlexDirection::Column);
-        Self { view }
-    }
-    pub fn spacing(self, _value: f32) -> Self {
-        // Note: spacing not directly supported, would need gap property
+        });
         self
     }
-}
-impl BaseView for Column {
-    fn node_id(&self) -> u32 { self.view.node_id() }
-}
-
-/// Row - horizontal flex container (RSX-friendly)
-pub struct Row { view: View }
-impl Row {
-    pub fn new() -> Self {
-        let view = View::new()
-            .flex_direction(FlexDirection::Row);
-        Self { view }
-    }
-    pub fn spacing(self, _value: f32) -> Self {
+    pub fn font_size(self, p: impl Into<Prop<f32>>) -> Self {
+        apply_prop(self.id, p.into(), |id, size| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetFontSize, id, size);
+        });
         self
     }
-}
-impl BaseView for Row {
-    fn node_id(&self) -> u32 { self.view.node_id() }
-}
-
-/// Button component (RSX-friendly)
-pub struct Button { view: View }
-impl Button {
-    pub fn new() -> Self {
-        let view = View::new()
-            .color((60u32, 120, 220, 255))
-            .padding((10.0, 20.0, 10.0, 20.0))
-            .border_radius(8.0);
-        Self { view }
+    pub fn font_weight(self, p: impl Into<Prop<u16>>) -> Self {
+        apply_prop(self.id, p.into(), |id, weight| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetTextWeight, id, weight);
+        });
+        self
     }
-    pub fn on_tap(self, handler: impl FnMut(GestureEvent) + 'static) -> Self {
-        let id = self.node_id();
-        select_node(id);
-        push_command!(SHARED_BUFFER, AttachClick, id);
-        push_command!(SHARED_BUFFER, RegisterTapHandler, id, 1u32); // Notify Host (count=1 for single tap)
-        TAP_HANDLERS.with(|h| {
-            let mut handlers = h.borrow_mut();
-            let entry = handlers.entry(id).or_insert_with(TapHandlerEntry::new);
-            entry.single_tap = Some(Box::new(handler));
+    pub fn text_color(self, p: impl Into<Prop<(u8, u8, u8, u8)>>) -> Self {
+        apply_prop(self.id, p.into(), |id, (r, g, b, a)| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetTextColor, id, r, g, b, a);
+        });
+        self
+    }
+    pub fn font_family(self, p: impl Into<Prop<String>>) -> Self {
+        apply_prop(self.id, p.into(), |id, family| {
+            select_node(id);
+            let len = family.len() as u32;
+            push_command!(SHARED_BUFFER, SetTextFontFamily, id, len);
+            unsafe {
+                let offset = SHARED_BUFFER.command_len as usize;
+                if offset + family.len() <= MAX_COMMAND_BYTES {
+                    SHARED_BUFFER.command_data[offset..offset + family.len()]
+                        .copy_from_slice(family.as_bytes());
+                    SHARED_BUFFER.command_len = (offset + family.len()) as u32;
+                }
+            }
+        });
+        self
+    }
+    pub fn text_align(self, p: impl Into<Prop<u8>>) -> Self {
+        apply_prop(self.id, p.into(), |id, align| {
+            select_node(id);
+            push_command!(SHARED_BUFFER, SetTextAlign, id, align);
         });
         self
     }
 }
-impl BaseView for Button {
-    fn node_id(&self) -> u32 { self.view.node_id() }
+impl BaseView for Text {
+    fn node_id(&self) -> u32 {
+        self.id
+    }
+}
+
+impl TextRenderable for Text {
+    fn text_node_id(&self) -> u32 {
+        self.id
+    }
 }
 
 // ===== Utilities =====
 
-pub fn force_layout() { 
-    push_command!(SHARED_BUFFER, UpdateLayout); 
-    unsafe { ui_force_layout(); } 
+pub fn force_layout() {
+    push_command!(SHARED_BUFFER, UpdateLayout);
+    unsafe {
+        ui_force_layout();
+    }
 }
 
 pub fn set_text(id: u32, text: &str) {
@@ -1128,7 +1712,7 @@ pub fn set_text(id: u32, text: &str) {
         let offset = SHARED_BUFFER.command_len as usize;
         let bytes = text.as_bytes();
         if offset + bytes.len() <= dyxel_shared::MAX_COMMAND_BYTES {
-            SHARED_BUFFER.command_data[offset..offset+bytes.len()].copy_from_slice(bytes);
+            SHARED_BUFFER.command_data[offset..offset + bytes.len()].copy_from_slice(bytes);
             SHARED_BUFFER.command_len = (offset + bytes.len()) as u32;
         }
     }
@@ -1136,9 +1720,17 @@ pub fn set_text(id: u32, text: &str) {
 
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
-extern "C" { 
+extern "C" {
     fn ui_force_layout();
     fn console_log(ptr: *const u8, len: usize);
+}
+
+/// Public wrapper for console_log
+#[cfg(target_arch = "wasm32")]
+pub fn log_to_console(msg: &str) {
+    unsafe {
+        console_log(msg.as_ptr(), msg.len());
+    }
 }
 
 // Stubs for non-WASM targets
@@ -1146,6 +1738,10 @@ extern "C" {
 unsafe fn ui_force_layout() {}
 #[cfg(not(target_arch = "wasm32"))]
 unsafe fn console_log(_ptr: *const u8, _len: usize) {}
+
+/// Public wrapper for console_log (non-WASM stub)
+#[cfg(not(target_arch = "wasm32"))]
+pub fn log_to_console(_msg: &str) {}
 
 /// Log message to host console
 pub fn log(msg: &str) {
