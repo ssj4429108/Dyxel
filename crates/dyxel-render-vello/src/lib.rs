@@ -1490,26 +1490,8 @@ fn render_node_recursive_with_transform(
                     if node.border_radius > 0.0 {
                         let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
                         scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
-                        if node.border_width > 0.0 {
-                            let r = ((node.border_color >> 16) & 0xFF) as u8;
-                            let g = ((node.border_color >> 8) & 0xFF) as u8;
-                            let b = (node.border_color & 0xFF) as u8;
-                            let a = ((node.border_color >> 24) & 0xFF) as u8;
-                            let border_color = vello::peniko::Color::from_rgba8(r, g, b, a);
-                            let stroke = kurbo::Stroke::new(node.border_width as f64);
-                            scene.stroke(&stroke, local_transform, border_color, None, &rounded);
-                        }
                     } else {
                         scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
-                        if node.border_width > 0.0 {
-                            let r = ((node.border_color >> 16) & 0xFF) as u8;
-                            let g = ((node.border_color >> 8) & 0xFF) as u8;
-                            let b = (node.border_color & 0xFF) as u8;
-                            let a = ((node.border_color >> 24) & 0xFF) as u8;
-                            let border_color = vello::peniko::Color::from_rgba8(r, g, b, a);
-                            let stroke = kurbo::Stroke::new(node.border_width as f64);
-                            scene.stroke(&stroke, local_transform, border_color, None, &rect);
-                        }
                     }
                 }
 
@@ -1521,7 +1503,7 @@ fn render_node_recursive_with_transform(
                     let (text_width, _) = editor.layout_size();
                     let available_width = node_width as f32;
 
-                    // Calculate x offset based on text alignment
+                    // Calculate x offset based on text alignment (horizontal)
                     let x_offset = match node.text_align {
                         dyxel_shared::TextAlign::Start => 0.0f64,
                         dyxel_shared::TextAlign::Center => {
@@ -1533,12 +1515,21 @@ fn render_node_recursive_with_transform(
                         dyxel_shared::TextAlign::Justified => 0.0f64, // TODO: implement justified
                     };
 
-                    // Apply alignment offset to transform
-                    let align_transform = if x_offset > 0.0 {
-                        local_transform * Affine::translate((x_offset, 0.0))
-                    } else {
-                        local_transform
+                    // Calculate y offset based on vertical alignment
+                    let (_, text_height) = editor.layout_size();
+                    let available_height = node_height as f32;
+                    let y_offset = match node.vertical_align {
+                        dyxel_shared::VerticalAlign::Top => 0.0f64,
+                        dyxel_shared::VerticalAlign::Center => {
+                            ((available_height - text_height) / 2.0).max(0.0) as f64
+                        }
+                        dyxel_shared::VerticalAlign::Bottom => {
+                            (available_height - text_height).max(0.0) as f64
+                        }
                     };
+
+                    // Apply alignment offset to transform
+                    let align_transform = local_transform * Affine::translate((x_offset, y_offset));
 
                     // === Handle TextInput rendering ===
                     log::debug!("Input node {}: text_input_states.len()={}, looking for state", id, text_input_states.len());

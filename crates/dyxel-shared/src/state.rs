@@ -32,6 +32,28 @@ impl TextAlign {
     }
 }
 
+/// Vertical alignment options for text
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerticalAlign {
+    /// Top aligned
+    Top = 0,
+    /// Center aligned (default)
+    #[default]
+    Center = 1,
+    /// Bottom aligned
+    Bottom = 2,
+}
+
+impl VerticalAlign {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => VerticalAlign::Top,
+            2 => VerticalAlign::Bottom,
+            _ => VerticalAlign::Center,
+        }
+    }
+}
+
 /// TextInput input types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
@@ -478,6 +500,8 @@ pub struct ViewNode {
     pub font_family: String,
     pub font_weight: u16,
     pub text_align: TextAlign,
+    /// Vertical text alignment within the node
+    pub vertical_align: VerticalAlign,
     pub border_radius: f32,
     /// Opacity (0.0 - 1.0, 1.0 = fully opaque)
     pub opacity: f32,
@@ -680,6 +704,7 @@ impl SharedState {
                 font_family: String::new(),
                 font_weight: 400,
                 text_align: TextAlign::Start,
+                vertical_align: VerticalAlign::Center,
                 border_radius: 0.0,
                 opacity: 1.0,
                 clip_to_bounds: false,
@@ -1139,6 +1164,7 @@ impl SharedState {
                 font_family: String::new(),
                 font_weight: 400,
                 text_align: TextAlign::Start,
+                vertical_align: VerticalAlign::Center,
                 border_radius: 0.0,
                 opacity: 1.0,
                 clip_to_bounds: false,
