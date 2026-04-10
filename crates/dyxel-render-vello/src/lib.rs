@@ -1582,6 +1582,8 @@ fn render_node_recursive_with_transform(
                                 .set_text_color(Color::from_rgba8(102, 102, 102, 204));
                             placeholder_editor.draw(scene, align_transform);
                         } else {
+                            // Set text color before drawing (editor was created with node.color which is background color)
+                            editor.set_text_color(Color::from_rgba8(0, 0, 0, 255)); // Default to black text
                             editor.draw(scene, align_transform);
                         }
 
