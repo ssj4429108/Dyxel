@@ -25,6 +25,56 @@
 
 ---
 
+## 2. 潜在风险与技术难点
+
+### 2.1 布局计算的复杂性 (P0)
+
+**风险:** 在 TextInput 中，内边距不仅影响容器外观，还直接影响文本绘制的起始坐标以及点击测试（Hit Testing）的偏移量。
+
+**缓解措施:**
+- 在 Host 端维护清晰的坐标系：
+  - 容器坐标系：原点在容器左上角
+  - 内容坐标系：原点在 padding 后的文本区域左上角
+- `text_origin` 计算公式必须在 `TextInputManager` 中明确定义
+- 任何 padding 变化必须触发重新计算
+
+### 2.2 性能开销 (P1)
+
+**风险:** 增加光标阴影（blur_radius）和圆角会增加 Vello 的渲染层级。如果一个界面有大量带阴影的输入框，可能会引起掉帧。
+
+**缓解措施:**
+- **条件渲染:** 阴影只在 `focused && cursor_visible` 时才进行昂贵的模糊计算
+- **缓存策略:** 使用 `generation` 机制，无变化时跳过阴影重新计算
+- **降级策略:** 在低性能设备上自动禁用阴影
+
+### 2.3 文本选择的一致性 (P2)
+
+**风险:** SelectableText 和 TextInput 共享渲染代码很好，但在交互逻辑上（例如双击选词、三击全选）可能存在细微差别。
+
+**缓解措施:**
+- 在 `dyxel-core` 层抽象出 `SelectionManager` 类（见 3.8 节）
+- 统一处理逻辑索引（usize）到屏幕坐标（f32）的转换
+- 渲染层只接收最终的选择区域矩形，不关心交互细节
+
+---
+
+## 3. 设计细节
+
+### 3.1 内边距支持
+
+- **TextInput 样式:** 内边距、光标自定义、颜色、边框
+- **Text 选择:** 为 Text 组件启用长按选择功能
+- **RSX 宏修复:** 确保显式设置的样式覆盖默认值
+
+### 1.2 非目标
+
+- 富文本编辑（单个输入框内的多种样式）
+- 复杂的输入验证
+- 自动完成/建议 UI
+- 多行文本输入扩展（TextArea 是未来的工作）
+
+---
+
 ## 2. 架构原则
 
 1. **复用现有基础设施:** 使用 `SetPadding` (OpCode 13) 实现容器内边距
@@ -40,6 +90,33 @@
 
 **决策:** 复用现有的 `SetPadding` 指令 (OpCode 13) 实现容器内边距。
 
+**重要区分:**
+- **Content Padding:** 文本绘制区域的内边距，影响 `text_origin` 计算
+- **Hit Area:** 点击测试区域，应覆盖整个容器（包括 padding 区域）
+
+**布局计算公式 (Host 端):**
+```rust
+// 容器总尺寸 (由 Taffy 布局计算)
+let container_size = layout.size;
+
+// 内容区域 = 容器 - padding
+let content_rect = Rect {
+    x: padding_left,
+    y: padding_top,
+    width: container_size.width - padding_left - padding_right,
+    height: container_size.height - padding_top - padding_bottom,
+};
+
+// 文本绘制起始坐标 (考虑基线对齐)
+let text_origin = Point {
+    x: content_rect.x,
+    y: content_rect.y + baseline_offset, // 垂直居中
+};
+
+// 点击测试区域 (整个容器)
+let hit_area = container_size.to_rect();
+```
+
 **WASM API:**
 ```rust
 impl TextInput {
@@ -52,6 +129,12 @@ impl TextInput {
 
 **默认值:** `(12.0, 16.0, 12.0, 16.0)` (上、右、下、左) - iOS 风格的舒适间距
 
+**布局同步机制:**
+当 font_size 或 placeholder_font_size 改变时，需要触发 Guest 端重新布局：
+1. Host 检测到样式变化 → 标记 layout_dirty
+2. 下帧同步时发送 `LayoutChanged` 事件到 Guest
+3. Guest 收到后重新查询布局信息
+
 ---
 
 ### 3.2 光标自定义
@@ -63,6 +146,7 @@ pub struct CursorStyle {
     pub color: [u8; 4],       // 默认: 继承文字颜色
     pub radius: f32,          // 默认: 0.0 (矩形), 典型值: 1.0-2.0
     pub blink_interval_ms: u64, // 默认: 530 (iOS 风格)
+    pub shadow: Option<ShadowStyle>, // 默认: None
 }
 
 pub struct ShadowStyle {
@@ -73,13 +157,19 @@ pub struct ShadowStyle {
 }
 ```
 
-**新增协议指令:**
+**新增协议指令 (原子化设计):**
 
-| OpCode | 名称 | 参数 |
-|--------|------|------------|
-| 134 | SetTextInputCursorStyle | id, width, radius, r, g, b, a |
-| 135 | SetTextInputCursorShadow | id, blur, offset_x, offset_y, r, g, b, a |
-| 136 | SetTextInputCursorBlinkInterval | id, interval_ms |
+| OpCode | 名称 | 参数 | 说明 |
+|--------|------|------------|------|
+| 134 | SetTextInputCursorStyle | id, width, radius | 光标几何样式 |
+| 134A | SetTextInputCursorColor | id, r, g, b, a | 光标颜色 (主题切换专用) |
+| 135 | SetTextInputCursorShadow | id, blur, offset_x, offset_y, r, g, b, a | 光标阴影 |
+| 136 | SetTextInputCursorBlinkInterval | id, interval_ms | 闪烁间隔 |
+
+**设计理由:**
+- **原子化:** 将颜色独立出来，方便 Dark/Light 主题切换时只更新颜色而不重新发送完整样式包
+- **性能优化:** 阴影只在 `focused && cursor_visible` 时才进行昂贵的模糊计算
+- **渲染实现:** 阴影作为独立绘图操作而非 Layer 效果，减少离屏渲染开销
 
 **WASM API:**
 ```rust
@@ -264,6 +354,50 @@ impl Text {
 **与 TextInput 共享:**
 两者在 Vello 后端使用相同的选择渲染代码。
 
+### 3.8 选择管理器 (SelectionManager)
+
+为统一 SelectableText 和 TextInput 的选择逻辑，在 `dyxel-core` 层抽象出 SelectionManager：
+
+```rust
+/// 处理文本选择的通用逻辑
+pub struct SelectionManager {
+    /// 逻辑索引 -> 屏幕坐标的转换
+    pub fn index_to_position(
+        &self,
+        text: &str,
+        index: usize,
+        layout: &TextLayout,
+    ) -> Point;
+
+    /// 屏幕坐标 -> 逻辑索引的转换
+    pub fn position_to_index(
+        &self,
+        text: &str,
+        position: Point,
+        layout: &TextLayout,
+    ) -> usize;
+
+    /// 双击选词
+    pub fn select_word(&self, text: &str, index: usize) -> (usize, usize);
+
+    /// 三击全选
+    pub fn select_all(&self, text: &str) -> (usize, usize);
+
+    /// 获取选区的屏幕矩形（用于高亮绘制）
+    pub fn selection_rects(
+        &self,
+        text: &str,
+        start: usize,
+        end: usize,
+        layout: &TextLayout,
+    ) -> Vec<Rect>;
+}
+```
+
+**共享逻辑:**
+- TextInput 和 SelectableText 都使用 SelectionManager 处理交互
+- 渲染层只接收最终的 `selection_rects` 进行绘制
+
 ---
 
 ## 4. 渲染状态更新
@@ -303,6 +437,14 @@ pub struct ContainerStyle {
     pub border_color: [u8; 4],
     pub border_radius: f32,
     pub padding: [f32; 4], // 上、右、下、左
+    pub hit_area: Rect,    // 点击测试区域（包含 padding 的整个容器）
+}
+
+/// 点击测试结果
+pub struct HitTestResult {
+    pub node_id: u32,
+    pub local_position: Point, // 相对于内容区域的坐标
+    pub in_content_area: bool, // 是否在内容区域内（用于光标定位）
 }
 ```
 
@@ -359,11 +501,18 @@ pub struct ContainerStyle {
 
 ---
 
-## 9. 待确认问题
+## 9. 待确认问题 (已解决)
 
-1. 光标阴影应该是 CursorStyle 的一部分还是独立的 Layer 效果?
-2. 是否需要独立于容器内边距的内容内边距?
-3. 选择手柄应该是平台原生还是自定义渲染?
+| 问题 | 决策 | 理由 |
+|------|------|------|
+| 光标阴影归属 | 作为 `CursorStyle` 的一部分 | Host 端将其实现为**独立绘图操作**而非 Layer 效果，减少离屏渲染开销 |
+| 内容内边距 | **暂不需要独立** | 当前 padding 方案足以覆盖 90% 的场景，保持简单性 |
+| 选择手柄 | **自定义渲染** | Dyxel 追求跨平台一致性，原生手柄在不同系统版本外观不一，且与 Vello 渲染管线集成困难 |
+
+**补充确认:**
+- 协议原子性：已将光标颜色独立为 `SetTextInputCursorColor` (134A)，方便主题切换
+- 点击区域：明确 `ContainerStyle.hit_area` 覆盖整个容器（含 padding）
+- 布局同步：样式改变后通过 `LayoutChanged` 事件触发 Guest 端重新布局
 
 ---
 
