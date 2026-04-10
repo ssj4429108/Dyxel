@@ -56,6 +56,15 @@
 - 统一处理逻辑索引（usize）到屏幕坐标（f32）的转换
 - 渲染层只接收最终的选择区域矩形，不关心交互细节
 
+### 2.4 光标边界剪裁 (P1)
+
+**风险:** 当文本达到容器最右侧且 `padding-right` 为 0 时，光标可能被容器边界剪裁（Clipped），导致用户看不到光标位置。
+
+**缓解措施:**
+- 在 `SelectionManager` 的坐标计算中增加 `cursor_width / 2.0` 的安全余量（见 3.9 节）
+- 实现自动水平滚动机制，当光标接近边界时滚动文本
+- 渲染时确保光标矩形不完全依赖内容区域，允许略微超出
+
 ---
 
 ## 3. 设计细节
@@ -394,9 +403,115 @@ pub struct SelectionManager {
 }
 ```
 
+**光标占位安全余量 (Cursor Inset):**
+```rust
+/// 计算文本绘制的安全区域，确保光标不被容器边界剪裁
+pub fn content_inset(&self, cursor_width: f32, padding: [f32; 4]
+) -> [f32; 4] {
+    let cursor_inset = cursor_width / 2.0; // 光标宽度的一半作为安全余量
+    [
+        padding[0],                      // top
+        padding[1] + cursor_inset,       // right (关键：右侧增加余量)
+        padding[2],                      // bottom
+        padding[3],                      // left
+    ]
+}
+```
+
+**组合键支持接口:**
+```rust
+/// 键盘修饰符状态
+pub struct KeyModifiers {
+    pub shift: bool,
+    pub ctrl: bool,   // Windows/Linux
+    pub alt: bool,
+    pub meta: bool,   // macOS Cmd
+}
+
+impl SelectionManager {
+    /// 处理带修饰符的方向键（Shift + 方向键选择）
+    pub fn handle_arrow_key(
+        &mut self,
+        direction: ArrowDirection,
+        modifiers: KeyModifiers,
+        current_selection: (usize, usize),
+    ) -> (usize, usize) {
+        if modifiers.shift {
+            // 扩展选区
+            self.extend_selection(direction, current_selection)
+        } else {
+            // 移动光标
+            self.move_cursor(direction, current_selection)
+        }
+    }
+
+    /// Ctrl/Cmd + A 全选
+    pub fn handle_select_all(&self, text: &str, modifiers: KeyModifiers
+    ) -> Option<(usize, usize)> {
+        if modifiers.ctrl || modifiers.meta {
+            Some(self.select_all(text))
+        } else {
+            None
+        }
+    }
+}
+```
+
 **共享逻辑:**
 - TextInput 和 SelectableText 都使用 SelectionManager 处理交互
 - 渲染层只接收最终的 `selection_rects` 进行绘制
+
+---
+
+### 3.9 光标占位与边界处理
+
+**问题:** 当文本到达容器最右侧且 `padding-right` 为 0 时，光标可能被容器边界剪裁。
+
+**解决方案:**
+
+```rust
+/// TextInput 渲染时的光标边界保护
+pub struct CursorBoundaryProtection {
+    /// 光标安全余量（默认 cursor_width / 2.0）
+    pub inset: f32,
+    /// 是否启用自动滚动（当光标接近边界时）
+    pub auto_scroll: bool,
+    /// 边界触发阈值（像素）
+    pub threshold: f32,
+}
+
+impl TextInputRenderState {
+    /// 计算实际内容区域（考虑光标占位）
+    pub fn effective_content_rect(&self,
+        container_rect: Rect,
+    ) -> Rect {
+        let inset = self.cursor_style.width / 2.0;
+        Rect {
+            x: container_rect.x + self.padding[3], // left
+            y: container_rect.y + self.padding[0], // top
+            width: container_rect.width
+                - self.padding[1] - self.padding[3] // right - left
+                - inset, // 光标安全余量
+            height: container_rect.height
+                - self.padding[0] - self.padding[2], // top - bottom
+        }
+    }
+
+    /// 检查光标是否接近右边界，需要自动滚动
+    pub fn should_auto_scroll(
+        &self,
+        cursor_x: f32,
+        visible_width: f32,
+    ) -> bool {
+        cursor_x > visible_width - self.cursor_boundary.threshold
+    }
+}
+```
+
+**渲染策略:**
+1. 计算 `effective_content_rect` 时右侧减去 `cursor_width / 2.0`
+2. 当光标位置接近边界时触发水平滚动
+3. 确保光标始终可见，不被容器边界剪裁
 
 ---
 
