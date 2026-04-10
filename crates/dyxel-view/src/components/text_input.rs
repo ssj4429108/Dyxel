@@ -5,7 +5,7 @@
 //!
 //! Implementation based on Task 4 plan (2026-04-09).
 
-use crate::focus;
+use crate::focus::{FocusCapability, FocusableView};
 use crate::Prop;
 use crate::{push_command, select_node, track_node, BaseView, TextRenderable, SHARED_BUFFER};
 use dyxel_shared::TextState;
@@ -36,16 +36,17 @@ impl TextInput {
         push_command!(SHARED_BUFFER, SetTextColor, id, 0u8, 0u8, 0u8, 255u8);
         push_command!(SHARED_BUFFER, SetFontSize, id, 16.0_f32);
 
-        // Register tap handler on SELF (v2 architecture handles hit testing properly)
-        let mut this = Self {
+        let this = Self {
             id,
             placeholder_text: None,
         };
 
-        // Default focus logic on tap
-        this = this.on_tap(|_| {});
+        // Register with focus manager - must be done explicitly before on_tap
+        let caps = this.focus_capabilities();
+        crate::focus::register_focusable(id, caps);
 
-        this
+        // Register tap handler for focus (empty user handler) and return
+        this.on_tap(|_| {})
     }
 
     /// Set the text state value (Responsive)
@@ -71,6 +72,8 @@ impl TextInput {
                         SHARED_BUFFER.command_len = (offset + text.len()) as u32;
                     }
                 }
+                // Keep local cache in sync so keyboard input appends correctly
+                crate::update_text_input_cache(self.id, text);
             }
             Prop::Dynamic(s) => {
                 let id = self.id;
@@ -94,6 +97,8 @@ impl TextInput {
                             SHARED_BUFFER.command_len = (offset + text.len()) as u32;
                         }
                     }
+                    // Keep local cache in sync so keyboard input appends correctly
+                    crate::update_text_input_cache(id, text);
                     async {}
                 });
                 crate::spawn(Box::pin(future));
@@ -155,14 +160,6 @@ impl TextInput {
         }
         self
     }
-
-    /// Focus management - request focus and show keyboard
-    pub fn handle_tap(&self) {
-        focus::request_focus(self.id);
-        select_node(self.id);
-        push_command!(SHARED_BUFFER, SetTextInputFocused, self.id, 1u8);
-        push_command!(SHARED_BUFFER, ShowTextInputKeyboard);
-    }
 }
 
 impl Default for TextInput {
@@ -176,23 +173,30 @@ impl BaseView for TextInput {
         self.id
     }
 
-    /// Overriding child to handle focus on tap
+    /// Override on_tap to handle focus
     fn on_tap(self, mut handler: impl FnMut(crate::gesture::GestureEvent) + 'static) -> Self
     where
         Self: Sized,
     {
         let id = self.id;
-        // Internal focus logic
+
+        // Internal focus handler
         let internal_handler = move |e: crate::gesture::GestureEvent| {
-            focus::request_focus(id);
-            select_node(id);
-            push_command!(SHARED_BUFFER, SetTextInputFocused, id, 1u8);
-            push_command!(SHARED_BUFFER, ShowTextInputKeyboard);
+            // Handle focus logic - request focus if not already focused
+            // Note: request_focus returns false if already focused or node not registered
+            let need_focus = !crate::focus::is_focused(id);
+            if need_focus {
+                if crate::focus::request_focus(id, FocusCapability::Keyboard) {
+                    select_node(id);
+                    push_command!(SHARED_BUFFER, SetTextInputFocused, id, 1u8);
+                    push_command!(SHARED_BUFFER, ShowTextInputKeyboard);
+                }
+            }
+            // Execute user handler
             handler(e);
         };
 
-        // Re-use BaseView's on_tap
-        let id = self.node_id();
+        // Register tap handler
         select_node(id);
         push_command!(SHARED_BUFFER, AttachClick, id);
         push_command!(SHARED_BUFFER, RegisterTapHandler, id, 1u32);
@@ -210,5 +214,19 @@ impl BaseView for TextInput {
 impl TextRenderable for TextInput {
     fn text_node_id(&self) -> u32 {
         self.id
+    }
+}
+
+impl FocusableView for TextInput {
+    fn focus_capabilities(&self) -> Vec<FocusCapability> {
+        vec![FocusCapability::Keyboard]
+    }
+
+    fn on_focus(&self, _capability: FocusCapability) {
+        // Focus is handled in on_tap to coordinate with command buffer
+    }
+
+    fn on_blur(&self, _capability: FocusCapability) {
+        // Blur is handled by the Host via bridge commands
     }
 }

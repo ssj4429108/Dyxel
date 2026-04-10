@@ -74,13 +74,14 @@ fn sync_text_input_states(_e: &RenderState) {
         TextInputManager::with(|manager| {
             // Get list of active node IDs
             let active_ids = manager.active_node_ids();
-            log::debug!("sync_text_input_states: active_ids={:?}", active_ids);
+            let focused_id = manager.focused_id();
+            log::info!("sync_text_input_states: active_ids={:?}, focused_id={}", active_ids, focused_id);
 
             // Clean up generations for removed inputs
             gens.retain(|id, _| active_ids.contains(id));
 
             for node_id in &active_ids {
-                log::debug!("sync_text_input_states: processing node_id={}", node_id);
+                log::info!("sync_text_input_states: processing node_id={}", node_id);
                 if let Some(state) = manager.get(*node_id) {
                     // Check if state has changed (generation mismatch)
                     let last_gen = gens.get(node_id).copied();
@@ -94,7 +95,7 @@ fn sync_text_input_states(_e: &RenderState) {
                         || state.focused;
 
                     if needs_sync {
-                        log::debug!("sync_text_input_states: node_id={} focused={} text_len={} placeholder_len={}",
+                        log::info!("sync_text_input_states: node_id={} focused={} text_len={} placeholder_len={}",
                             node_id, state.focused, state.text.len(), state.placeholder.len());
 
                         let render_state = TextInputRenderState {

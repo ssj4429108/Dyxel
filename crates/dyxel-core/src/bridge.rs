@@ -17,6 +17,7 @@ use crate::engine::{setup_engine, LogicState, RenderState};
 use crate::platform::{SafeWindowHandle, SurfaceId};
 use crate::renderer::render_frame;
 use crate::state::SharedState;
+use crate::text_input::sync_to_renderer;
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
 use dyxel_render_api::{DeviceHandle, QueueHandle, SharedMutex, SharedPtr};
@@ -79,6 +80,8 @@ pub enum LogicMessage {
     Pause,
     Resume,
     Shutdown,
+    /// Text input from keyboard (handled on main thread, sent to logic thread)
+    TextInput { node_id: u32, text: String },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -327,6 +330,7 @@ fn dispatch_gesture_event_v2(logic: &LogicState, event: dyxel_gesture::GestureEv
 
         // === Blur unfocused TextInputs when tapping outside ===
         // If this is a tap gesture and the target is NOT a TextInput, blur any focused TextInput
+        let mut blurred_id = 0u32;
         if matches!(event.event_type, GestureEventType::Tap) && !is_text_input {
             crate::text_input::TextInputManager::with(|m| {
                 let focused_id = m.focused_id();
@@ -337,8 +341,22 @@ fn dispatch_gesture_event_v2(logic: &LogicState, event: dyxel_gesture::GestureEv
                         focused_id
                     );
                     m.set_focused(focused_id, false);
+                    blurred_id = focused_id;
+
+                    // Sync to WASM: clear focus and hide keyboard
+                    push_command!(
+                        shared_buffer,
+                        SetTextInputFocused,
+                        focused_id,
+                        0u8
+                    );
+                    push_command!(shared_buffer, HideTextInputKeyboard);
                 }
             });
+            // Sync to renderer immediately after blur to ensure cursor and border disappear
+            if blurred_id != 0 {
+                sync_to_renderer();
+            }
         }
 
         // Encode payload based on gesture type
@@ -629,9 +647,54 @@ fn dispatch_pointer_event_v2(
     let target_node = registry.find_handler(bubble_path, ht);
     drop(registry);
 
+    // Get the actual hit test node (first in bubble path, or 0 if empty)
+    let hit_node = bubble_path.first().copied().unwrap_or(0);
+
+    // Check if hit_node is the currently focused TextInput
+    let is_hitting_focused_input = crate::text_input::TextInputManager::with(|m| {
+        let focused_id = m.focused_id();
+        focused_id != 0 && focused_id == hit_node
+    });
+
+    // If no handler registered (tapping blank area), trigger blur for focused TextInput
     let target_node = match target_node {
         Some(node) => node,
-        None => return, // No handler registered
+        None => {
+            // On PointerDown/PointerUp with no handler (touching blank area), blur any focused TextInput
+            // But only if we're not hitting the currently focused input itself
+            if !is_hitting_focused_input &&
+               matches!(event.event_type, PointerEventType::Down | PointerEventType::Up | PointerEventType::Cancel) {
+                crate::text_input::TextInputManager::with(|m| {
+                    let focused_id = m.focused_id();
+                    if focused_id != 0 {
+                        log::debug!(
+                            "Touch outside focused input (hit_node={}), blurring TextInput {}",
+                            hit_node,
+                            focused_id
+                        );
+                        m.set_focused(focused_id, false);
+
+                        // Sync to WASM: clear focus and hide keyboard
+                        unsafe {
+                            let mem = &mut *logic._rt.memory_mut();
+                            let shared_buffer =
+                                &mut *(mem.as_mut_ptr().add(bptr as usize) as *mut dyxel_shared::SharedBuffer);
+
+                            push_command!(
+                                shared_buffer,
+                                SetTextInputFocused,
+                                focused_id,
+                                0u8
+                            );
+                            push_command!(shared_buffer, HideTextInputKeyboard);
+                        }
+                    }
+                });
+                // Sync to renderer immediately after blur
+                crate::text_input::sync_to_renderer();
+            }
+            return;
+        }
     };
 
     // Send pointer event via GestureEventV2 with custom event type
@@ -931,6 +994,7 @@ impl DyxelHost {
                                 LogicMessage::Pause => log::debug!("LogicThread: msg type=Pause"),
                                 LogicMessage::Resume => log::debug!("LogicThread: msg type=Resume"),
                                 LogicMessage::Shutdown => log::info!("LogicThread: msg type=Shutdown"),
+                                LogicMessage::TextInput { node_id, text } => log::debug!("LogicThread: msg type=TextInput node_id={} text_len={}", node_id, text.len()),
                             }
                             match msg {
                                 LogicMessage::SetReady(l) => {
@@ -942,6 +1006,31 @@ impl DyxelHost {
                                 LogicMessage::Input(event) => {
                                     log::info!("LogicThread: Received Input event={:?}, logic_opt={}", event, logic_opt.is_some());
                                     if let Some(ref mut l) = logic_opt { process_input_internal(l, event); }
+                                }
+                                LogicMessage::TextInput { node_id, text } => {
+                                    log::info!("LogicThread: Received TextInput node_id={} text_len={}", node_id, text.len());
+                                    if let Some(ref mut l) = logic_opt {
+                                        // Get the shared buffer pointer and push text
+                                        if let Ok(state) = l.shared_state.lock() {
+                                            if let Some(buffer_ptr) = state.get_shared_buffer_ptr() {
+                                                if !buffer_ptr.is_null() {
+                                                    // SAFETY: We assume the pointer is valid when non-null
+                                                    let buffer = unsafe { &mut *buffer_ptr };
+                                                    // Push text to input buffer for the focused node
+                                                    buffer.push_input_text(node_id, &text);
+                                                    log::info!("LogicThread: Pushed text to input buffer for node_id={}", node_id);
+                                                } else {
+                                                    log::warn!("LogicThread: TextInput - shared buffer ptr is null");
+                                                }
+                                            } else {
+                                                log::warn!("LogicThread: TextInput - cannot get shared buffer ptr");
+                                            }
+                                        } else {
+                                            log::warn!("LogicThread: TextInput - failed to lock shared state");
+                                        }
+                                    } else {
+                                        log::warn!("LogicThread: TextInput - logic_opt is None");
+                                    }
                                 }
                                 LogicMessage::LoadWasm(path) => {
                                     log::info!("LogicThread: Processing LoadWasm...");
@@ -1213,6 +1302,13 @@ impl DyxelHost {
                         *self.instance.lock().unwrap() = Some(Box::new(v_ctx.instance.clone()));
                     }
 
+                    // Set the logic thread sender for the bridge (for keyboard input handling)
+                    // Note: init_bridge is called in setup_engine, so bridge is ready now
+                    if let Some(ref tx) = *self.logic_tx.lock().unwrap() {
+                        crate::set_bridge_logic_tx(tx.clone());
+                        log::info!("[DyxelHost] Bridge logic_tx set for keyboard input");
+                    }
+
                     if let Some(tx) = &*self.logic_tx.lock().unwrap() {
                         let _ = tx.send(LogicMessage::SetReady(logic));
                     }
@@ -1427,6 +1523,38 @@ impl DyxelHost {
         {
             let _ = &self.shared_state; // Silence unused warning
             None
+        }
+    }
+
+    /// Get the shared state for bridge initialization
+    /// This is needed for main thread input handling (e.g., keyboard events)
+    pub fn shared_state_for_bridge(&self) -> SharedPtr<SharedMutex<SharedState>> {
+        self.shared_state.clone()
+    }
+
+    /// Send text input to the logic thread for processing
+    /// Called from main thread when keyboard input is received
+    pub fn send_text_input(&self, node_id: u32, text: String) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            match tx.send(LogicMessage::TextInput { node_id, text }) {
+                Ok(_) => log::debug!("send_text_input: sent to logic thread"),
+                Err(e) => log::error!("send_text_input: Failed to send: {:?}", e),
+            }
+        } else {
+            log::warn!("send_text_input: logic_tx is None");
+        }
+    }
+
+    /// Setup bridge for main thread keyboard input handling
+    /// Must be called on the main thread after prepare_engine is complete
+    pub fn setup_main_thread_bridge(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            crate::set_bridge_logic_tx(tx.clone());
+            log::info!("[DyxelHost] Main thread bridge setup complete");
+        } else {
+            log::warn!("[DyxelHost] setup_main_thread_bridge: logic_tx is None");
         }
     }
 

@@ -672,3 +672,26 @@ pub struct SharedBuffer {
     /// Device information (read by WASM)
     pub device_info: crate::device::DeviceInfo,
 }
+
+impl SharedBuffer {
+    /// Push a text input event to the input buffer
+    /// Returns true on success, false if buffer is full
+    pub fn push_input_text(&mut self, node_id: u32, text: &str) -> bool {
+        use crate::input::{InputEventType, RawInputEvent};
+
+        if text.len() > 16 {
+            // Text too long for inline storage, truncate or handle differently
+            // For now, we just return false
+            log::warn!("Text input too long: {} bytes (max 16)", text.len());
+            return false;
+        }
+
+        if let Some(event) = RawInputEvent::new_text_input(InputEventType::TextInput, text, text.len() as u8) {
+            let mut event = event;
+            event.target_node_id = node_id;
+            self.input_buffer.push(event)
+        } else {
+            false
+        }
+    }
+}

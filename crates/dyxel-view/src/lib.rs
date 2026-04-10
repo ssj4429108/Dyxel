@@ -9,9 +9,11 @@
 
 pub mod components;
 pub mod focus;
+pub mod focus_manager;
 pub mod gesture;
 pub mod text_renderable;
 pub use components::*;
+pub use focus::{FocusableView, FocusExt, FocusCapability, FocusEvent};
 pub use gesture::*;
 pub use text_renderable::{TextOverflow, TextRenderable, TextRenderableExt};
 
@@ -368,6 +370,11 @@ fn process_host_commands() {
                                 composing: None, // TODO: Handle composing region if needed
                             };
 
+                            // Keep local cache in sync so keyboard input appends correctly
+                            TEXT_INPUT_STATES.with(|states| {
+                                states.borrow_mut().insert(id, state.text.clone());
+                            });
+
                             TEXT_INPUT_HANDLERS.with(|h| {
                                 if let Some(handler) = h.borrow_mut().get_mut(&id) {
                                     handler(state);
@@ -555,22 +562,31 @@ fn dispatch_v2_gesture_event(
 fn process_input_events() {
     unsafe {
         let input_buffer = &mut (*std::ptr::addr_of_mut!(SHARED_BUFFER)).input_buffer;
+        let event_count = input_buffer.len();
+        if event_count > 0 {
+            log(&format!("[WASM] process_input_events: {} events pending", event_count));
+        }
 
         // Process all pending input events
         while let Some(event) = input_buffer.pop() {
+            log(&format!("[WASM] Processing event type={} target={}", event.event_type, event.target_node_id));
             match event.event_type {
                 5 => {
                     // KeyDown
+                    log("[WASM] KeyDown event");
                     if let Some(key_data) = event.as_key_event() {
                         handle_key_down_event(key_data, event.target_node_id);
                     }
                 }
                 7 => {
                     // TextInput
+                    log("[WASM] TextInput event");
                     if let Some(text_data) = event.as_text_input() {
                         let len = text_data.len as usize;
+                        log(&format!("[WASM] TextInput: len={}", len));
                         if len > 0 && len <= 16 {
                             let text = String::from_utf8_lossy(&text_data.text[..len]);
+                            log(&format!("[WASM] TextInput: text='{}'", text));
                             handle_text_input_event(&text, event.target_node_id);
                         }
                     }
@@ -585,7 +601,9 @@ fn process_input_events() {
 
 /// Handle text input event from Host
 fn handle_text_input_event(text: &str, target_node_id: u32) {
+    log(&format!("[WASM] handle_text_input_event: text='{}' target={}", text, target_node_id));
     if target_node_id == 0 {
+        log("[WASM] handle_text_input_event: target_node_id is 0, returning");
         return;
     }
 
@@ -624,6 +642,29 @@ fn handle_text_input_event(text: &str, target_node_id: u32) {
 
         // Update cache
         states.insert(target_node_id, new_text.clone());
+
+        // Sync text state to Host for rendering
+        log(&format!("[WASM] Syncing text state to Host: text='{}' cursor={}", new_text, cursor_pos));
+        unsafe {
+            use dyxel_shared::OpCode::SyncTextState;
+            push_command!(
+                SHARED_BUFFER,
+                SyncTextState,
+                target_node_id,
+                new_text.len() as u32,
+                cursor_pos as u32,
+                cursor_pos as u32
+            );
+            let offset = SHARED_BUFFER.command_len as usize;
+            if offset + new_text.len() <= dyxel_shared::MAX_COMMAND_BYTES {
+                SHARED_BUFFER.command_data[offset..offset + new_text.len()]
+                    .copy_from_slice(new_text.as_bytes());
+                SHARED_BUFFER.command_len = (offset + new_text.len()) as u32;
+                log(&format!("[WASM] SyncTextState sent: len={} command_len={}", new_text.len(), SHARED_BUFFER.command_len));
+            } else {
+                log("[WASM] SyncTextState FAILED: buffer overflow");
+            }
+        }
 
         // Trigger the TextInput's on_change callback
         TEXT_INPUT_HANDLERS.with(|handlers| {
@@ -1792,5 +1833,14 @@ pub fn log(msg: &str) {
 pub fn spawn(task: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>) {
     EXECUTOR.with(|ex| {
         ex.borrow_mut().push(task);
+    });
+}
+
+/// Update the local text input state cache.
+/// Must be called whenever a TextInput's value is set programmatically,
+/// so that subsequent keyboard input appends correctly instead of overwriting.
+pub(crate) fn update_text_input_cache(node_id: u32, text: String) {
+    TEXT_INPUT_STATES.with(|states| {
+        states.borrow_mut().insert(node_id, text);
     });
 }

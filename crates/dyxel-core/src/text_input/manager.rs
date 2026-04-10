@@ -88,7 +88,7 @@ impl TextInputManager {
 
     /// Set input focus
     pub fn set_focused(&mut self, node_id: u32, focused: bool) {
-        log::debug!("Setting focus for node {} to {}", node_id, focused);
+        log::info!("Setting focus for node {} to {}", node_id, focused);
         self.registry.set_focused(node_id, focused);
 
         if let Some(keyboard) = &self.keyboard {

@@ -59,13 +59,21 @@ impl TextInputRegistry {
 
     /// Set focused input
     pub fn set_focused(&mut self, node_id: u32, focused: bool) {
+        log::info!("Registry::set_focused: node_id={}, focused={}, current_focused_id={}", node_id, focused, self.focused_id);
         if focused {
             // Unfocus previous
             if self.focused_id != 0 && self.focused_id != node_id {
+                log::info!("Registry::set_focused: unfocusing previous node {}", self.focused_id);
                 if let Some(prev) = self.inputs.get_mut(&self.focused_id) {
                     prev.focused = false;
                     prev.cursor_visible = false;
+                    prev.generation = prev.generation.wrapping_add(1);
+                    log::info!("Registry::set_focused: node {} is now focused=false, generation incremented", self.focused_id);
+                } else {
+                    log::warn!("Registry::set_focused: previous node {} not found in inputs", self.focused_id);
                 }
+            } else {
+                log::info!("Registry::set_focused: no need to unfocus, condition: focused_id!=0={}, focused_id!=node_id={}", self.focused_id != 0, self.focused_id != node_id);
             }
             self.focused_id = node_id;
             if let Some(state) = self.inputs.get_mut(&node_id) {

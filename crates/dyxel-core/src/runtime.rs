@@ -843,9 +843,14 @@ fn apply_command_immediate(
                 let text_end = text_start + len;
                 if text_end <= payload.len() {
                     let text = String::from_utf8_lossy(&payload[text_start..text_end]).to_string();
+                    log::info!("[HOST] SyncTextState: wasm_id={}, id={}, text='{}'", wasm_id, id, text);
                     crate::text_input::set_text(id, text);
                     crate::text_input::set_selection(id, start, end);
+                } else {
+                    log::warn!("[HOST] SyncTextState: text_end {} > payload.len() {}", text_end, payload.len());
                 }
+            } else {
+                log::warn!("[HOST] SyncTextState: payload too short {}", payload.len());
             }
         }
         OpCode::SetTextInputCursor => {

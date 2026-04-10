@@ -58,7 +58,12 @@ pub fn clear_text_input_states_global() {
 
 /// Get all text input states as a HashMap
 pub fn get_all_text_input_states() -> HashMap<u32, TextInputRenderState> {
-    TEXT_INPUT_STATES.with(|s| s.borrow().clone())
+    let states = TEXT_INPUT_STATES.with(|s| s.borrow().clone());
+    log::info!("get_all_text_input_states: {} inputs", states.len());
+    for (id, state) in &states {
+        log::debug!("  Input {}: focused={}, cursor_visible={}", id, state.focused, state.cursor_visible);
+    }
+    states
 }
 
 use dyxel_editor::Editor;
@@ -1563,8 +1568,7 @@ fn render_node_recursive_with_transform(
                             secure_editor.set_text(&dot_text);
                             secure_editor.set_text_color(node.color);
                             secure_editor.draw(scene, align_transform);
-                        } else if editor.text().is_empty()
-                            && !text_input.focused
+                        } else if text_input.text.is_empty()
                             && !text_input.placeholder.is_empty()
                         {
                             let mut placeholder_editor = dyxel_editor::Editor::new(node.font_size);

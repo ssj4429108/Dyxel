@@ -29,6 +29,11 @@ fn main() -> anyhow::Result<()> {
 
     let host = DyxelHost::new();
 
+    // Initialize bridge for main thread keyboard input handling
+    // Note: The bridge is also initialized in the logic thread during engine setup,
+    // but keyboard events arrive on the main thread, so we need it here too
+    dyxel_core::init_bridge(host.shared_state_for_bridge());
+
     // Initialize TextInput context menu integration
     TextInputManager::with(|manager| {
         manager.set_context_menu_integration(Box::new(MacContextMenu::new()));
@@ -70,6 +75,10 @@ fn main() -> anyhow::Result<()> {
             }
             Event::AboutToWait => {
                 if !surface_setup_done && host.is_ready() {
+                    // Setup bridge for main thread keyboard input
+                    // This must be done on main thread since BRIDGE is thread_local
+                    host.setup_main_thread_bridge();
+
                     let h = host.clone();
                     let w = window.clone();
                     let size = w.inner_size();
@@ -218,9 +227,11 @@ fn main() -> anyhow::Result<()> {
 
                 // Check if there's a focused text input
                 let focused = dyxel_core::text_input::focused_id();
+                log::info!("[MACOS] Keyboard event: focused_id={}, text={:?}", focused, text);
                 if focused != 0 {
                     // There is a focused text input - send text input events
                     if let Some(t) = text {
+                        log::info!("[MACOS] Sending text input: '{}'", t);
                         dyxel_core::handle_text_input(&t);
                     } else {
                         // Handle special keys (Backspace, Enter, Delete, etc.)

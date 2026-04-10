@@ -86,6 +86,9 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
         (env, rt)
     };
 
+    // Initialize the bridge for input event handling
+    crate::init_bridge(shared_state.clone());
+
     let logic = LogicState {
         shared_state: shared_state.clone(),
         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
