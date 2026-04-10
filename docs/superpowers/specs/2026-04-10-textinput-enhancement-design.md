@@ -565,7 +565,113 @@ pub struct HitTestResult {
 
 ---
 
-## 5. 实施计划摘要
+## 5. 给 Claude Code 的实施提示
+
+### 5.1 Vello 渲染注意事项
+
+**光标阴影实现:**
+在 `render_cursor` 函数中绘制阴影时，使用 `vello::kurbo::Rect` 的 `inset` 方法来配合定义的 `cursor_radius`：
+
+```rust
+fn render_cursor_with_shadow(
+    builder: &mut Scene,
+    transform: Affine,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    radius: f64,
+    color: Color,
+    shadow: &ShadowStyle,
+) {
+    // 1. 先绘制阴影（在光标下方）
+    let shadow_rect = RoundedRect::new(
+        x + shadow.offset_x as f64,
+        y + shadow.offset_y as f64,
+        x + width + shadow.offset_x as f64,
+        y + height + shadow.offset_y as f64,
+        radius,
+    );
+    // 使用 blur 效果渲染阴影
+    
+    // 2. 绘制光标主体
+    let cursor_rect = RoundedRect::new(x, y, x + width, y + height, radius);
+    builder.fill(Fill::NonZero, transform, color, None, &cursor_rect);
+}
+```
+
+**关键要点:**
+- 阴影必须在光标主体之前绘制（ painters algorithm ）
+- 使用 `inset` 确保圆角矩形正确缩进
+- 阴影只在 `focused && cursor_visible` 时计算，避免不必要的性能开销
+
+### 5.2 SelectionManager 实施顺序
+
+**建议采用 TDD 方式：**
+
+1. **先在 `dyxel-core` 中独立实现 `SelectionManager`**
+   - 不依赖任何 UI 库或渲染代码
+   - 纯数学逻辑：逻辑索引 (usize) ↔ 屏幕坐标 (f32)
+
+2. **编写全量单元测试**
+   ```rust
+   #[cfg(test)]
+   mod tests {
+       use super::*;
+       
+       #[test]
+       fn test_index_to_position_ascii() {
+           // 测试 ASCII 文本索引转换
+       }
+       
+       #[test]
+       fn test_index_to_position_cjk() {
+           // 测试中日韩文本（多字节字符）
+       }
+       
+       #[test]
+       fn test_position_to_index_boundary() {
+           // 测试边界条件：行首、行尾、空文本
+       }
+       
+       #[test]
+       fn test_select_word() {
+           // 测试双击选词：标点、空格、换行符处理
+       }
+       
+       #[test]
+       fn test_cursor_inset_calculation() {
+           // 测试光标安全余量计算
+           let sm = SelectionManager::new();
+           let inset = sm.content_inset(2.0, [12.0, 16.0, 12.0, 16.0]);
+           assert_eq!(inset[1], 16.0 + 1.0); // right padding + cursor_width/2
+       }
+   }
+   ```
+
+3. **数学逻辑 100% 验证后再集成到渲染管线**
+   - 使用属性测试（property-based testing）验证反函数性质：
+     `position_to_index(index_to_position(i)) == i`
+
+### 5.3 开发顺序建议
+
+```
+Phase 0: SelectionManager (纯数学逻辑 + 全量测试)
+    ↓
+Phase 1: RSX 修复 + Padding 支持
+    ↓
+Phase 2: 基础光标样式（宽、色、圆角）
+    ↓
+Phase 3: 阴影 + Placeholder 样式
+    ↓
+Phase 4: 容器样式 + 选区颜色
+    ↓
+Phase 5: Text 选择模式 + 组合键支持
+```
+
+---
+
+## 6. 实施计划摘要
 
 ### 阶段 1: 核心修复 (P0)
 1. 修复 RSX 宏 - 延迟应用默认值
@@ -585,7 +691,7 @@ pub struct HitTestResult {
 
 ---
 
-## 6. 文件变更清单
+## 7. 文件变更清单
 
 | 文件 | 变更 |
 |------|--------|
@@ -598,7 +704,7 @@ pub struct HitTestResult {
 
 ---
 
-## 7. 向后兼容性
+## 8. 向后兼容性
 
 所有新功能都是增量的:
 - 新 OpCodes 不影响现有指令处理
@@ -607,7 +713,7 @@ pub struct HitTestResult {
 
 ---
 
-## 8. 测试策略
+## 9. 测试策略
 
 1. **单元测试:** 协议编码/解码
 2. **集成测试:** WASM API 生成正确的指令序列
@@ -616,7 +722,7 @@ pub struct HitTestResult {
 
 ---
 
-## 9. 待确认问题 (已解决)
+## 10. 待确认问题 (已解决)
 
 | 问题 | 决策 | 理由 |
 |------|------|------|
@@ -631,7 +737,7 @@ pub struct HitTestResult {
 
 ---
 
-## 10. 参考资料
+## 11. 参考资料
 
 - Flutter TextField: https://api.flutter.dev/flutter/material/TextField-class.html
 - Flutter InputDecoration: https://api.flutter.dev/flutter/material/InputDecoration-class.html
