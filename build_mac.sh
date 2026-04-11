@@ -20,4 +20,4 @@ cargo build -p dyxel-mac --release
 # 4. Run
 echo "Running dyxel-mac with RUST_LOG=info..."
 cp target/mac_dist/guest.wasm .
-RUST_LOG=info ./target/release/dyxel-mac
+RUST_LOG=info DYXEL_DEBUG_FRAMES=1 ./target/release/dyxel-mac

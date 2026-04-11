@@ -20,6 +20,8 @@ pub struct Editor {
     cursor_visible: bool,
     /// Track the current layout width to avoid unnecessary re-layouts.
     current_width: Option<f32>,
+    /// Text color
+    text_color: Color,
 }
 
 impl Editor {
@@ -27,19 +29,19 @@ impl Editor {
     pub fn new(font_size: f32) -> Self {
         let mut editor = PlainEditor::new(font_size);
         editor.set_scale(1.0);
-        
-        // Set default styles
+
+        // Set default styles (no default brush - will be set by caller)
         let styles = editor.edit_styles();
-        styles.insert(StyleProperty::Brush(Brush::Solid(Color::WHITE)));
         // Set default font family to system UI font for consistent metrics
         styles.insert(StyleProperty::FontStack(FontStack::Single(GenericFamily::SystemUi.into())));
-        
+
         Self {
             font_cx: FontContext::default(),
             layout_cx: LayoutContext::default(),
             editor,
             cursor_visible: false,
             current_width: None,
+            text_color: Color::BLACK,
         }
     }
     
@@ -66,7 +68,11 @@ impl Editor {
     
     /// Set text color
     pub fn set_text_color(&mut self, color: Color) {
+        self.text_color = color;
         self.editor.edit_styles().insert(StyleProperty::Brush(Brush::Solid(color)));
+        // Force layout refresh to apply new color
+        let text = self.editor.text().to_string();
+        self.editor.set_text(&text);
     }
     
     /// Set layout width (for line wrapping).
@@ -366,10 +372,10 @@ impl Editor {
                     }
                 });
                 
-                // Draw glyphs with Vello
+                // Draw glyphs with Vello - use stored text_color
                 scene
                     .draw_glyphs(font)
-                    .brush(&style.brush)
+                    .brush(Brush::Solid(self.text_color))
                     .hint(true)
                     .transform(transform)
                     .font_size(font_size)

@@ -203,47 +203,58 @@ pub fn LayerEffectsDemo() -> impl BaseView {
 
             View { width: "100%", height: 20.0 }
 
-            // 4. Blur
+            // 4. Blur / Frosted Glass
             Text {
-                value: "4. Blur Effect",
+                value: "4. Frosted Glass",
                 fontSize: 16.0,
                 textColor: (80u8, 80, 80, 255),
             }
+            // Colorful background to make blur visible
             View {
                 width: "100%",
                 height: 120.0,
-                color: (230u32, 235, 240, 255),
+                color: (80u32, 60, 140, 255),
                 flexDirection: FlexDirection::Row,
                 justifyContent: JustifyContent::SpaceEvenly,
                 alignItems: AlignItems::Center,
 
+                // No blur - solid white frosted card for reference
                 View {
                     width: 100.0,
                     height: 80.0,
-                    color: (255u32, 255, 255, 255),
-                    blur: 0.0,
-                    Text { value: "Sharp", fontSize: 14.0, textColor: (100u8, 100, 100, 255) }
+                    color: (255u32, 255, 255, 200),
+                    borderRadius: 8.0,
+                    Text { value: "No Blur", fontSize: 12.0, textColor: (60u8, 60, 60, 255) }
                 }
+                // Light frosted glass
                 View {
                     width: 100.0,
                     height: 80.0,
-                    color: (255u32, 255, 255, 255),
-                    blur: 2.0,
-                    Text { value: "Light", fontSize: 14.0, textColor: (100u8, 100, 100, 255) }
+                    color: (255u32, 255, 255, 180),
+                    borderRadius: 8.0,
+                    blur: 8.0,
+                    opacity: 0.99,
+                    Text { value: "Light", fontSize: 12.0, textColor: (60u8, 60, 60, 255) }
                 }
+                // Medium frosted glass
                 View {
                     width: 100.0,
                     height: 80.0,
-                    color: (255u32, 255, 255, 255),
-                    blur: 5.0,
-                    Text { value: "Medium", fontSize: 14.0, textColor: (100u8, 100, 100, 255) }
+                    color: (255u32, 255, 255, 180),
+                    borderRadius: 8.0,
+                    blur: 20.0,
+                    opacity: 0.99,
+                    Text { value: "Medium", fontSize: 12.0, textColor: (60u8, 60, 60, 255) }
                 }
+                // Heavy frosted glass - iOS systemMaterial style
                 View {
                     width: 100.0,
                     height: 80.0,
-                    color: (255u32, 255, 255, 255),
-                    blur: 10.0,
-                    Text { value: "Heavy", fontSize: 14.0, textColor: (100u8, 100, 100, 255) }
+                    color: (255u32, 255, 255, 150),
+                    borderRadius: 8.0,
+                    blur: 40.0,
+                    opacity: 0.99,
+                    Text { value: "Heavy", fontSize: 12.0, textColor: (60u8, 60, 60, 255) }
                 }
             }
 
@@ -290,15 +301,15 @@ pub fn LayerEffectsDemo() -> impl BaseView {
                     height: 120.0,
                     color: (255u32, 255, 255, 180),
                     borderRadius: 12.0,
-                    opacity: 0.7,
-                    blur: 8.0,
+                    // opacity: 0.7,
+                    blur: 10.0,
                     shadow: (0.0, 4.0, 12.0, 0x30000000u32),
                     flexDirection: FlexDirection::Column,
                     alignItems: AlignItems::Center,
                     justifyContent: JustifyContent::Center,
 
-                    Text { value: "Frosted", fontSize: 12.0, textColor: (80u8, 80, 80, 255) }
-                    Text { value: "Glass", fontSize: 10.0, textColor: (120u8, 120, 120, 255) }
+                    Text { value: "Frosted", fontSize: 12.0, textColor: (0u8, 0, 0, 255) }
+                    Text { value: "Glass", fontSize: 10.0, textColor: (50u8, 50, 50, 255) }
                 }
 
                 // All effects combined

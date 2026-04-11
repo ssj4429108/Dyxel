@@ -206,6 +206,7 @@ define_protocol! {
     [94] SetBlur(id: u32, radius: f32),               // Gaussian blur radius
     [95] SetClipToBounds(id: u32, clip: u8),          // 0=false, 1=true
     [96] SetPosition(id: u32, x: f32, y: f32),        // Absolute position offset
+    [97] SetBlurStyle(id: u32, style: u8),            // 0=Light, 1=Dark, 2=ExtraLight, 3=Prominent
 }
 
 #[repr(C)]

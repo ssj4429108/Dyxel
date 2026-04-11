@@ -829,6 +829,14 @@ pub trait BaseView {
             push_command!(SHARED_BUFFER, SetBlur, id, radius.max(0.0));
         }); self
     }
+    /// Set the blur style for frosted glass effect.
+    /// 0=Light, 1=Dark, 2=ExtraLight, 3=Prominent
+    fn blur_style(self, style: u8) -> Self where Self: Sized {
+        let id = self.node_id();
+        select_node(id);
+        push_command!(SHARED_BUFFER, SetBlurStyle, id, style);
+        self
+    }
     fn clip_to_bounds(self, clip: impl Into<Prop<bool>>) -> Self where Self: Sized {
         let id = self.node_id();
         apply_prop(id, clip.into(), |node_id, clip_val| {

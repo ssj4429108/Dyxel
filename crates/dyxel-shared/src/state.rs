@@ -7,9 +7,11 @@ use peniko::Color;
 use crate::types::{ViewType, Role};
 use crate::{NodeHandle, MAX_CAPACITY, INITIAL_CAPACITY};
 
-pub struct ViewNode { 
-    pub taffy_node: NodeId, 
-    pub color: Color, 
+pub struct ViewNode {
+    pub taffy_node: NodeId,
+    pub color: Color,
+    /// Text color for Text nodes (RGBA)
+    pub text_color: Color,
     pub children: Vec<u32>, 
     /// Parent node ID (0 means no parent/root)
     pub parent_id: u32,
@@ -34,6 +36,8 @@ pub struct ViewNode {
     pub shadow_color: u32,
     /// Blur radius for the node itself
     pub blur_radius: f32,
+    /// Blur style: 0=Light, 1=Dark, 2=ExtraLight, 3=Prominent
+    pub blur_style: u8,
     /// Position offset for absolute positioning
     pub position_x: f32,
     pub position_y: f32,
@@ -205,9 +209,10 @@ impl SharedState {
 
         }
         
-        self.nodes.insert(host_id, ViewNode { 
-            taffy_node, 
-            color: Color::WHITE, 
+        self.nodes.insert(host_id, ViewNode {
+            taffy_node,
+            color: Color::WHITE,
+            text_color: Color::BLACK,
             children: vec![], 
             parent_id: 0,
             z_index: 0, 
@@ -224,6 +229,7 @@ impl SharedState {
             shadow_blur: 0.0,
             shadow_color: 0xFF000000, // Black shadow default
             blur_radius: 0.0,
+            blur_style: 0, // 0=Light (default)
             position_x: 0.0,
             position_y: 0.0,
             role: Role::None,
@@ -281,6 +287,11 @@ impl SharedState {
         if let Some(node) = self.nodes.get_mut(&id) { node.color = Color::from_rgb8(r, g, b); } 
     }
     
+    pub fn set_text_color(&mut self, wasm_id: u32, r: u8, g: u8, b: u8, a: u8) {
+        let id = self.resolve_id(wasm_id);
+        if let Some(node) = self.nodes.get_mut(&id) { node.text_color = Color::from_rgba8(r, g, b, a); }
+    }
+
     pub fn set_width(&mut self, wasm_id: u32, dt: u32, v: f32) { 
         let id = self.resolve_id(wasm_id);
         if let Some(node) = self.nodes.get(&id) { 
@@ -417,6 +428,16 @@ impl SharedState {
     pub fn set_blur(&mut self, wasm_id: u32, radius: f32) {
         let id = self.resolve_id(wasm_id);
         if let Some(node) = self.nodes.get_mut(&id) { node.blur_radius = radius; }
+    }
+
+    pub fn set_blur_style(&mut self, wasm_id: u32, style: u8) {
+        let id = self.resolve_id(wasm_id);
+        if let Some(node) = self.nodes.get_mut(&id) {
+            // Only update if changed (avoid unnecessary state churn)
+            if node.blur_style != style {
+                node.blur_style = style;
+            }
+        }
     }
 
     pub fn set_position(&mut self, wasm_id: u32, x: f32, y: f32) {
@@ -590,6 +611,7 @@ impl SharedState {
         self.nodes.insert(slot, ViewNode {
             taffy_node,
             color: Color::WHITE,
+            text_color: Color::BLACK,
             children: vec![],
             parent_id: 0,
             z_index: 0,
@@ -606,6 +628,7 @@ impl SharedState {
             shadow_blur: 0.0,
             shadow_color: 0xFF000000,
             blur_radius: 0.0,
+            blur_style: 0, // 0=Light (default)
             position_x: 0.0,
             position_y: 0.0,
             role: Role::None,

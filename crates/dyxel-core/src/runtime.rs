@@ -310,7 +310,8 @@ fn apply_staged_command(state: &mut SharedState, cmd: &StagedCommand, ctx: &mut 
                 let r = cmd.payload[0];
                 let g = cmd.payload[1];
                 let b = cmd.payload[2];
-                state.set_color(cmd.node_id, r, g, b);
+                let a = cmd.payload[3];
+                state.set_color_rgba(cmd.node_id, r, g, b, a);
             }
         }
         OpCode::SetWidthCompact => {
@@ -377,7 +378,8 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
                     let r = payload[0];
                     let g = payload[1];
                     let b = payload[2];
-                    state.set_color(id, r, g, b);
+                    let a = payload[3];
+                    state.set_color_rgba(id, r, g, b, a);
                 }
             }
         }
@@ -538,7 +540,7 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
                 let g = payload[5];
                 let b = payload[6];
                 let a = payload[7];
-                state.set_color_rgba(id, r, g, b, a);
+                state.set_text_color(id, r, g, b, a);
             }
         }
         OpCode::SetTextWeight => {
@@ -740,6 +742,13 @@ fn apply_command_immediate(state: &mut SharedState, opcode: &OpCode, payload: &[
                 let x = f32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                 let y = f32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
                 state.set_position(id, x, y);
+            }
+        }
+        OpCode::SetBlurStyle => {
+            if payload.len() >= 5 {
+                let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let style = payload[4];
+                state.set_blur_style(id, style);
             }
         }
         _ => {

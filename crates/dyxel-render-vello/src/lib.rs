@@ -66,6 +66,8 @@ struct BlurredTextureEntry {
     view_id: u32,
     /// Blur radius
     blur_radius: f32,
+    /// Blur style: 0=Light, 1=Dark, 2=ExtraLight, 3=Prominent
+    blur_style: u8,
 }
 
 /// Vello render backend implementation
@@ -154,6 +156,135 @@ impl VelloBackend {
         }
     }
     
+    /// Save texture to PNG file for debugging
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_texture_to_png(&self, device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture, path: &str) {
+        let size = texture.size();
+        let format = texture.format();
+
+        // wgpu requires bytes_per_row to be a multiple of 256
+        let bytes_per_pixel = match format {
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm => 4,
+            _ => 4,
+        };
+        let bytes_per_row_unaligned = size.width * bytes_per_pixel;
+        let bytes_per_row = ((bytes_per_row_unaligned + 255) / 256) * 256;
+        let buffer_size = (bytes_per_row * size.height) as u64;
+
+        log::info!("[DebugSave] Saving {}: {}x{} format={:?} bytes_per_row={}",
+            path, size.width, size.height, format, bytes_per_row);
+
+        // Create buffer to read back
+        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Readback Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Copy texture to buffer
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(size.height),
+                },
+            },
+            size,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        // Map and save
+        let buffer_slice = readback_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        // Poll device until mapping completes
+        while rx.try_recv().is_err() {
+            let _ = device.poll(wgpu::PollType::Poll);
+        }
+
+        {
+            let data = buffer_slice.get_mapped_range();
+            let rgba_data: &[u8] = &data;
+
+            // Check first few pixels to see if texture is empty
+            let first_pixels: Vec<[u8; 4]> = rgba_data.chunks(4).take(4)
+                .filter_map(|c| c.try_into().ok()).collect();
+            log::info!("[DebugSave] First 4 pixels: {:?}", first_pixels);
+
+            // Debug: Sample pixels at multiple locations
+            for (sx, sy) in [(763u32, 598u32), (1185u32, 598u32), (1606u32, 598u32)] {
+                let sample_offset = (sy * bytes_per_row + sx * bytes_per_pixel) as usize;
+                if sample_offset + 3 < rgba_data.len() {
+                    let r = rgba_data[sample_offset];
+                    let g = rgba_data[sample_offset + 1];
+                    let b = rgba_data[sample_offset + 2];
+                    let a = rgba_data[sample_offset + 3];
+                    log::info!("[DebugSave] Scene pixel at ({},{}): RGBA=({},{},{},{})", sx, sy, r, g, b, a);
+                }
+            }
+
+            // Copy row by row to handle alignment
+            let mut img_data = Vec::with_capacity((size.width * size.height * 3) as usize);
+            for row in 0..size.height {
+                let row_start = (row * bytes_per_row) as usize;
+                for col in 0..size.width {
+                    let pixel_offset = row_start + (col * bytes_per_pixel) as usize;
+                    if pixel_offset + 2 < rgba_data.len() {
+                        // Handle BGRA vs RGBA
+                        if format == wgpu::TextureFormat::Bgra8Unorm {
+                            img_data.push(rgba_data[pixel_offset + 2]); // R (from B)
+                            img_data.push(rgba_data[pixel_offset + 1]); // G
+                            img_data.push(rgba_data[pixel_offset]);     // B (from R)
+                        } else {
+                            img_data.push(rgba_data[pixel_offset]);     // R
+                            img_data.push(rgba_data[pixel_offset + 1]); // G
+                            img_data.push(rgba_data[pixel_offset + 2]); // B
+                        }
+                    }
+                }
+            }
+
+            let img = image::RgbImage::from_raw(size.width, size.height, img_data);
+            if let Some(img) = img {
+                if let Err(e) = img.save(path) {
+                    log::warn!("Failed to save debug image {}: {}", path, e);
+                } else {
+                    log::info!("Saved debug image: {}", path);
+                }
+            } else {
+                log::warn!("Failed to create image from raw data");
+            }
+        }
+        readback_buffer.unmap();
+    }
+
+    /// Check if debug frame saving is enabled
+    #[cfg(not(target_arch = "wasm32"))]
+    fn debug_frames_enabled(&self) -> bool {
+        std::env::var("DYXEL_DEBUG_FRAMES").is_ok()
+    }
+
+    /// Get debug output directory
+    #[cfg(not(target_arch = "wasm32"))]
+    fn debug_output_dir(&self) -> std::path::PathBuf {
+        let dir = std::env::var("DYXEL_DEBUG_DIR").unwrap_or_else(|_| "debug_frames".to_string());
+        let path = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&path).ok();
+        path
+    }
+
     /// Enable performance overlay
     pub fn enable_perf_overlay(&self) {
         self.perf_monitor.lock().unwrap().toggle_overlay();
@@ -559,13 +690,27 @@ impl VelloBackend {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // Premultiplied alpha blending: shader outputs premultiplied colors
+                    // src_factor=One because RGB is already multiplied by alpha
+                    // This correctly composites frosted glass over the main scene
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
             depth_stencil: None,
@@ -681,7 +826,8 @@ impl VelloBackend {
                     let editor = editors.entry(id).or_insert_with(|| {
                         let mut ed = Editor::new(node.font_size);
                         ed.set_text(&node.text);
-                        ed.set_text_color(node.color);
+                        log::info!("[Editor] Creating editor for node {} with text_color: {:?}", id, node.text_color);
+                        ed.set_text_color(node.text_color);
                         ed
                     });
                     
@@ -801,6 +947,7 @@ impl VelloBackend {
         
         let mut scene = Scene::new();
 
+
         if let Some(id) = rid {
             let g = shared_state.lock().unwrap();
             let mut editors = self.editors.lock().unwrap();
@@ -891,7 +1038,7 @@ impl VelloBackend {
                 sample_count: 1, 
                 dimension: wgpu::TextureDimension::D2, 
                 format: wgpu::TextureFormat::Rgba8Unorm, 
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC, 
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC, 
                 view_formats: &[] 
             });
             let view = texture.create_view(&Default::default());
@@ -938,6 +1085,28 @@ impl VelloBackend {
         ).map_err(|e| anyhow::anyhow!("Vello render error: {:?}", e))?;
         stage_timer.mark("gpu_render");
 
+        // IMPORTANT: Submit and wait for scene rendering to complete before copying
+        // This ensures the scene texture has valid content for Pass 2 blur sampling
+        queue.submit(None);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+
+        // Debug: Save scene texture after Pass 1
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.debug_frames_enabled() {
+            let frame_num = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let debug_dir = self.debug_output_dir();
+            if let Some((scene_tex, _, _)) = offscreen_texture.as_ref() {
+                let path = debug_dir.join(format!("frame_{:06}_pass1_scene.png", frame_num % 1000));
+                self.save_texture_to_png(device, queue, scene_tex, path.to_str().unwrap());
+
+                // Debug: Sample pixels at blur card locations (expected to show purple background)
+                log::info!("[Debug] Sampling scene texture at blur card locations (expected purple bg)");
+            }
+        }
+
         // === PASS 2: Process blur textures from scene ===
         // For each blur view, sample from scene texture and apply blur
         {
@@ -956,6 +1125,7 @@ impl VelloBackend {
 
                         log::info!("[Blur] Copying region: src=({:.0},{:.0}) size={:.0}x{:.0} to blur texture {}x{}",
                             src_x, src_y, src_w, src_h, entry.width, entry.height);
+                        log::info!("[Blur] Checking scene content at src=({:.0},{:.0}) - parent bg is at y=578 (id=37)", src_x, src_y);
 
                         // Create a command encoder for copy and blur operations
                         let mut enc = device.create_command_encoder(
@@ -963,21 +1133,49 @@ impl VelloBackend {
                                 label: Some("Blur Pass 2 Encoder"),
                             });
 
+                        // Clear blur texture to transparent before copying background
+                        // Use clear_texture (explicit zeroing) instead of empty render pass
+                        // since Metal may optimize away render passes with no draw calls
+                        enc.clear_texture(
+                            &entry.texture,
+                            &wgpu::ImageSubresourceRange {
+                                aspect: wgpu::TextureAspect::All,
+                                base_mip_level: 0,
+                                mip_level_count: None,
+                                base_array_layer: 0,
+                                array_layer_count: None,
+                            },
+                        );
+
                         // Copy region from scene texture to blur texture
                         // Note: We need to account for padding in the blur texture
-                        // Also need to flip Y coordinate because Vello uses Y-up but wgpu uses Y-down
+                        // On macOS/iOS: src_y is already Y-down (Taffy coordinate), use directly
+                        // On Android: src_y is Vello Y-up, needs flipping
                         let padding = ((entry.width as f32 - src_w) / 2.0) as u32;
 
-                        // Flip Y coordinate: Vello Y=0 is bottom, wgpu Y=0 is top
-                        let flipped_y = (h as f32 - src_y - src_h).max(0.0) as u32;
+                        // Y coordinate handling:
+                        // - macOS/iOS: src_y is Y-down from top (Taffy), matches wgpu
+                        // - Android: src_y is Y-up from bottom (Vello), needs flip
+                        #[cfg(target_os = "android")]
+                        let src_origin_y = (h as f32 - src_y - src_h).max(0.0) as u32;
+                        #[cfg(not(target_os = "android"))]
+                        let src_origin_y = src_y.max(0.0) as u32;
+
+                        // Validate coordinates
+                        let src_origin_x = src_x.max(0.0) as u32;
+                        let copy_width = src_w as u32;
+                        let copy_height = src_h as u32;
+
+                        log::info!("[Blur] Copy params: src=({}, {}) dst=({}, {}) size={}x{}",
+                            src_origin_x, src_origin_y, padding, padding, copy_width, copy_height);
 
                         enc.copy_texture_to_texture(
                             wgpu::TexelCopyTextureInfo {
                                 texture: scene_texture,
                                 mip_level: 0,
                                 origin: wgpu::Origin3d {
-                                    x: src_x.max(0.0) as u32,
-                                    y: flipped_y,
+                                    x: src_origin_x,
+                                    y: src_origin_y,
                                     z: 0,
                                 },
                                 aspect: wgpu::TextureAspect::All,
@@ -993,33 +1191,64 @@ impl VelloBackend {
                                 aspect: wgpu::TextureAspect::All,
                             },
                             wgpu::Extent3d {
-                                width: src_w.min(src_x.max(0.0) + src_w).max(0.0) as u32,
-                                height: src_h.min(src_y.max(0.0) + src_h).max(0.0) as u32,
+                                width: copy_width,
+                                height: copy_height,
                                 depth_or_array_layers: 1,
                             },
                         );
 
                         queue.submit(Some(enc.finish()));
 
-                        // Now apply blur to the copied content
-                        // Use the blur radius from the view
+                        // IMPORTANT: Wait for copy to complete before blur
+                        // Use Wait (blocking) to ensure GPU copy is done before Kawase reads the texture
+                        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+
+                        // Debug: Check if copy succeeded (texture should not be red anymore)
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if self.debug_frames_enabled() {
+                            let frame_num = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let debug_dir = self.debug_output_dir();
+                            let path = debug_dir.join(format!("frame_{:06}_pass2_after_copy_view_{}.png", frame_num % 1000, entry.view_id));
+                            self.save_texture_to_png(device, queue, &entry.texture, path.to_str().unwrap());
+                        }
+
+                        // Now apply frosted glass effect using Dual Kawase large-radius blur
                         let blur_radius = entry.blur_radius;
 
                         if blur_radius > 0.0 {
-                            if let Err(e) = pipeline.apply_blur(
+                            log::info!("[Blur] Applying Kawase frosted glass: radius={}", blur_radius);
+
+                            if let Err(e) = pipeline.apply_frosted_glass_kawase(
                                 &entry.texture,
                                 &entry.texture,
                                 blur_radius,
                             ) {
-                                log::warn!("[Blur] Failed to apply blur in pass 2: {:?}", e);
+                                log::warn!("[Blur] Failed to apply Kawase frosted glass: {:?}", e);
+                            } else {
+                                log::info!("[Blur] Kawase frosted glass applied successfully");
                             }
+                        }
+
+                        // Debug: Save blur texture after Pass 2
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if self.debug_frames_enabled() {
+                            let frame_num = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let debug_dir = self.debug_output_dir();
+                            let path = debug_dir.join(format!("frame_{:06}_pass2_blur_view_{}.png", frame_num % 1000, entry.view_id));
+                            self.save_texture_to_png(device, queue, &entry.texture, path.to_str().unwrap());
                         }
                     }
                 }
             }
         }
 
-        // === PASS 3: Render deferred children ===
+        // === PASS 3: Render deferre d children ===
         // === PASS 3: Render deferred children to separate texture ===
         // Create a texture for children that will be drawn AFTER blur textures
         // This ensures children appear sharp on top of the blurred background
@@ -1038,11 +1267,10 @@ impl VelloBackend {
                 let g = shared_state.lock().unwrap();
                 let mut editors = self.editors.lock().unwrap();
 
-                // Calculate global position from transform
-                let affine = entry.transform;
-                let mat = affine.as_coeffs();
-                let global_x = mat[4];
-                let global_y = mat[5];
+                // Use source_rect to get the blur node's actual screen position
+                // entry.transform includes a -padding offset, so we use source_rect directly
+                let global_x = entry.source_rect.0 as f64;
+                let global_y = entry.source_rect.1 as f64;
 
                 // Render each deferred child
                 for &child_id in &entry.deferred_children {
@@ -1059,6 +1287,7 @@ impl VelloBackend {
 
         // Create or update children texture
         let children_texture = if has_children {
+            log::info!("[Blur] Pass 3: Rendering children texture");
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Children Texture"),
                 size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -1090,6 +1319,17 @@ impl VelloBackend {
                 log::warn!("[Blur] Failed to render children texture: {:?}", e);
                 None
             } else {
+                // Debug: Save children texture
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.debug_frames_enabled() {
+                    let frame_num = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let debug_dir = self.debug_output_dir();
+                    let path = debug_dir.join(format!("frame_{:06}_pass3_children.png", frame_num % 1000));
+                    self.save_texture_to_png(device, queue, &texture, path.to_str().unwrap());
+                }
                 Some((texture, view))
             }
         } else {
@@ -1099,12 +1339,52 @@ impl VelloBackend {
         // Single present: blit the combined result (main scene + optional overlay) to screen
         match v_surface_surface.surface.get_current_texture() {
             Ok(st) => {
+                // Debug: Get frame number before render pass
+                #[cfg(not(target_arch = "wasm32"))]
+                let debug_frame_num = if self.debug_frames_enabled() {
+                    let frame_num = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    Some(frame_num % 1000)
+                } else { None };
+
+                // Debug: Create capture texture if needed
+                #[cfg(not(target_arch = "wasm32"))]
+                let capture_texture = if self.debug_frames_enabled() && debug_frame_num.is_some() {
+                    let capture_tex = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Capture Texture"),
+                        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: st.texture.format(),
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    });
+                    Some(capture_tex)
+                } else {
+                    None
+                };
+
+                // Determine render target
+                #[cfg(not(target_arch = "wasm32"))]
+                let render_target_view = if let Some(ref capture_tex) = capture_texture {
+                    capture_tex.create_view(&Default::default())
+                } else {
+                    st.texture.create_view(&Default::default())
+                };
+                #[cfg(target_arch = "wasm32")]
+                let render_target_view = st.texture.create_view(&Default::default());
+
                 let mut enc = device.create_command_encoder(&Default::default());
+                // Track whether we rendered any blur textures this frame
+                let mut had_blur_textures = false;
                 {
                     let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Vello Blit Pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &st.texture.create_view(&Default::default()),
+                            view: &render_target_view,
                             resolve_target: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -1121,31 +1401,83 @@ impl VelloBackend {
                     rp.draw(0..3, 0..1);
 
                     // Draw blurred textures using composite pipeline
+                    log::info!("[Blur] About to lock blurred_textures for compositing");
                     let blurred_textures = self.blurred_textures.lock().unwrap();
+                    log::info!("[Blur] Locked blurred_textures, count = {}", blurred_textures.len());
                     if !blurred_textures.is_empty() {
-                        log::debug!("[Blur] Drawing {} blurred textures", blurred_textures.len());
+                        log::info!("[Blur] COMPOSITING {} blurred textures", blurred_textures.len());
 
                         // Create pipeline with correct surface format if needed
                         // Must match the render pass format (Bgra8Unorm on macOS)
                         let surface_format = v_surface_surface.config.format;
-                        {
-                            let pipeline_opt = self.blur_composite_pipeline.lock().unwrap();
-                            let needs_creation = pipeline_opt.is_none();
-                            drop(pipeline_opt);
-                            if needs_creation {
-                                log::info!("[Blur] Creating composite pipeline with format {:?}", surface_format);
-                                self.create_blur_composite_pipeline(device, surface_format);
+                        log::info!("[Blur] Surface config format: {:?}", surface_format);
+
+                        // Create pipeline only if it doesn't exist (avoid expensive recreation every frame)
+                        log::info!("[Blur] Checking if pipeline needs creation...");
+                        let needs_pipeline = {
+                            let guard = self.blur_composite_pipeline.lock();
+                            match guard {
+                                Ok(g) => g.is_none(),
+                                Err(e) => {
+                                    log::error!("[Blur] Pipeline mutex poisoned: {}", e);
+                                    e.into_inner().is_none()
+                                }
                             }
+                            // Lock released here at end of block
+                        };
+                        log::info!("[Blur] needs_pipeline = {}", needs_pipeline);
+                        if needs_pipeline {
+                            log::info!("[Blur] Creating composite pipeline with surface format {:?}", surface_format);
+                            self.create_blur_composite_pipeline(device, surface_format);
+                            log::info!("[Blur] Pipeline creation complete");
                         }
 
-                        // Get the blur composite pipeline
-                        let blur_pipeline = self.blur_composite_pipeline.lock().unwrap();
-                        let blur_bg_layout = self.blur_composite_bind_group_layout.lock().unwrap();
-                        let uniform_buffer = self.blur_composite_uniforms.lock().unwrap();
-                        let overlay_uniform_buffer = self.blur_composite_overlay_uniforms.lock().unwrap();
+                        // Get the blur composite pipeline (handle poisoned mutex)
+                        log::info!("[Blur] Acquiring pipeline lock...");
+                        let blur_pipeline = match self.blur_composite_pipeline.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                log::warn!("[Blur] Pipeline mutex poisoned, recovering");
+                                e.into_inner()
+                            }
+                        };
+                        let blur_bg_layout = match self.blur_composite_bind_group_layout.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                log::warn!("[Blur] Layout mutex poisoned, recovering");
+                                e.into_inner()
+                            }
+                        };
+                        let uniform_buffer = match self.blur_composite_uniforms.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                log::warn!("[Blur] Uniforms mutex poisoned, recovering");
+                                e.into_inner()
+                            }
+                        };
+                        let overlay_uniform_buffer = match self.blur_composite_overlay_uniforms.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                log::warn!("[Blur] Overlay mutex poisoned, recovering");
+                                e.into_inner()
+                            }
+                        };
+                        log::info!("[Blur] Got all locks");
 
-                        if let (Some(pipeline), Some(layout), Some(uniforms), Some(overlay_uniforms)) =
+                        let pipeline_ready = blur_pipeline.is_some();
+                        let layout_ready = blur_bg_layout.is_some();
+                        let uniforms_ready = uniform_buffer.is_some();
+                        let overlay_ready = overlay_uniform_buffer.is_some();
+
+                        if !(pipeline_ready && layout_ready && uniforms_ready && overlay_ready) {
+                            log::warn!("[Blur] Resources not ready: pipeline={}, layout={}, uniforms={}, overlay={}",
+                                pipeline_ready, layout_ready, uniforms_ready, overlay_ready);
+                        }
+
+                        if let (Some(pipeline), Some(layout), _, _) =
                             (blur_pipeline.as_ref(), blur_bg_layout.as_ref(), uniform_buffer.as_ref(), overlay_uniform_buffer.as_ref()) {
+
+                            log::info!("[Blur] All resources ready, starting draw loop for {} textures", blurred_textures.len());
 
                             // Create sampler
                             let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1174,14 +1506,33 @@ impl VelloBackend {
                                 // Transform matrix components
                                 // We want to transform from (0,0)-(1,1) UV space to clip space
                                 // But also apply the affine transform from Vello
-                                // Simplified: just pass the transform that converts from
-                                // texture-local space to clip space
+                                //
+                                // IMPORTANT: The UV space (0,1) needs to be scaled by texture size
+                                // to get pixel coordinates in local space, then apply Vello transform,
+                                // then convert to clip space.
+                                //
+                                // Correct formula:
+                                //   local_pos = uv * texture_size
+                                //   screen_pos = M * local_pos + T
+                                //   clip_pos = screen_pos * clip_scale + clip_offset
+                                //
+                                // So: clip_pos = (M * uv * texture_size + T) * clip_scale + clip_offset
+                                //              = (M * texture_size * clip_scale) * uv + (T * clip_scale + clip_offset)
+
+                                let tex_width = entry.width as f32;
+                                let tex_height = entry.height as f32;
 
                                 let uniform_data: [f32; 12] = [
                                     // Row 0: m00, m01, pad, pad
-                                    mat[0] as f32 * scale_x, mat[2] as f32 * scale_x, 0.0, 0.0,
+                                    // m00 scales UV x (0..1) to screen x, considering texture width and clip scale
+                                    mat[0] as f32 * tex_width * scale_x,
+                                    mat[2] as f32 * tex_width * scale_x,
+                                    0.0, 0.0,
                                     // Row 1: m10, m11, pad, pad
-                                    mat[1] as f32 * scale_y, mat[3] as f32 * scale_y, 0.0, 0.0,
+                                    // m11 scales UV y (0..1) to screen y, considering texture height and clip scale
+                                    mat[1] as f32 * tex_height * scale_y,
+                                    mat[3] as f32 * tex_height * scale_y,
+                                    0.0, 0.0,
                                     // Row 2: tx, ty, opacity, pad
                                     mat[4] as f32 * scale_x + offset_x,
                                     mat[5] as f32 * scale_y + offset_y,
@@ -1189,31 +1540,51 @@ impl VelloBackend {
                                     0.0,
                                 ];
 
-                                queue.write_buffer(uniforms, 0, bytemuck::cast_slice(&uniform_data));
+                                // Create per-entry uniform buffer to avoid data races
+                                let entry_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some(&format!("Blur Uniform Buffer {}", entry.view_id)),
+                                    size: 48, // 12 * 4 bytes
+                                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                                    mapped_at_creation: false,
+                                });
+                                queue.write_buffer(&entry_uniforms, 0, bytemuck::cast_slice(&uniform_data));
 
                                 // Write overlay uniform data
-                                // Convert color to premultiplied linear RGB
-                                let color = entry.overlay_color;
-                                let [r, g, b, a] = color.components;
-
+                                // Use the node's overlay_color for tint
+                                let overlay_color = entry.overlay_color;
                                 let overlay_data: [f32; 8] = [
-                                    // Row 0: color_r, color_g, color_b, color_a (premultiplied)
-                                    r * a, g * a, b * a, a,
-                                    // Row 1: border_radius, view_width, view_height, pad
+                                    // Row 0: color_r, color_g, color_b, color_a
+                                    // AlphaColor stores components as [r, g, b, a] in f32
+                                    overlay_color.components[0],
+                                    overlay_color.components[1],
+                                    overlay_color.components[2],
+                                    overlay_color.components[3],
+                                    // Row 1: border_radius, view_width, view_height, color_mode
                                     entry.border_radius as f32,
                                     entry.width as f32,
                                     entry.height as f32,
-                                    0.0,
+                                    if entry.blur_style == 1 || entry.blur_style == 3 { 1.0f32 } else { 0.0f32 },
                                 ];
 
-                                queue.write_buffer(overlay_uniforms, 0, bytemuck::cast_slice(&overlay_data));
+                                // Create per-entry overlay uniform buffer
+                                let entry_overlay_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some(&format!("Blur Overlay Uniform Buffer {}", entry.view_id)),
+                                    size: 32, // 8 * 4 bytes
+                                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                                    mapped_at_creation: false,
+                                });
+                                queue.write_buffer(&entry_overlay_uniforms, 0, bytemuck::cast_slice(&overlay_data));
+
+                                log::info!("[Blur] Uniform data: {:?}", uniform_data);
+                                log::info!("[Blur] Overlay data: {:?}", overlay_data);
+                                log::info!("[Blur] Texture size: {}x{}", entry.width, entry.height);
 
                                 let texture_view = entry.texture.create_view(
                                     &wgpu::TextureViewDescriptor::default());
 
                                 let bind_group = device.create_bind_group(
                                     &wgpu::BindGroupDescriptor {
-                                        label: Some("Blur Composite Bind Group"),
+                                        label: Some(&format!("Blur Composite Bind Group {}", entry.view_id)),
                                         layout,
                                         entries: &[
                                             wgpu::BindGroupEntry {
@@ -1226,21 +1597,29 @@ impl VelloBackend {
                                             },
                                             wgpu::BindGroupEntry {
                                                 binding: 2,
-                                                resource: uniforms.as_entire_binding(),
+                                                resource: entry_uniforms.as_entire_binding(),
                                             },
                                             wgpu::BindGroupEntry {
                                                 binding: 3,
-                                                resource: overlay_uniforms.as_entire_binding(),
+                                                resource: entry_overlay_uniforms.as_entire_binding(),
                                             },
                                         ],
                                     });
 
+                                log::info!("[Blur] Compositing view_id={} transform={:?} alpha={} screen={}x{}",
+                                    entry.view_id, mat, entry.opacity, w, h);
+
                                 rp.set_pipeline(pipeline);
                                 rp.set_bind_group(0, &bind_group, &[]);
-                                rp.draw(0..4, 0..1); // 4 vertices for quad
+                                log::info!("[Blur] About to draw view_id={}", entry.view_id);
+                                rp.draw(0..6, 0..1); // 6 vertices for quad (2 triangles)
+                                log::info!("[Blur] Drew view_id={}", entry.view_id);
                             }
                         }
                     }
+                    // Capture whether we had blur textures before clearing
+                    had_blur_textures = !blurred_textures.is_empty();
+                    log::info!("[Debug] had_blur_textures = {} (count = {})", had_blur_textures, blurred_textures.len());
                     // Clear blurred textures after drawing
                     drop(blurred_textures);
                     self.blurred_textures.lock().unwrap().clear();
@@ -1280,11 +1659,86 @@ impl VelloBackend {
                     }
                 }
 
-                queue.submit(Some(enc.finish())); 
+                // If using capture texture, blit it to surface before present
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(ref capture_tex) = capture_texture {
+                    // Create bind group for capture texture blit
+                    let capture_bind_group = device.create_bind_group(
+                        &wgpu::BindGroupDescriptor {
+                            label: Some("Capture Blit Bind Group"),
+                            layout: self.blit_bind_group_layout.lock().unwrap().as_ref().unwrap(),
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &capture_tex.create_view(&Default::default())
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        self.sampler.lock().unwrap().as_ref().unwrap()
+                                    ),
+                                },
+                            ],
+                        });
+
+                    {
+                        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Capture Blit Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &st.texture.create_view(&Default::default()),
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store
+                                },
+                                depth_slice: None
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None
+                        });
+                        rp.set_pipeline(blit_pipeline);
+                        rp.set_bind_group(0, &capture_bind_group, &[]);
+                        rp.draw(0..3, 0..1);
+                    }
+                }
+
+                // Debug: Save composite frame when we have blur textures
+                // NOTE: We handle submission inside the block to avoid double-submit
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    log::info!("[Debug] Checking had_blur_textures = {}", had_blur_textures);
+                    if had_blur_textures && self.debug_frames_enabled() {
+                        // IMPORTANT: Submit encoder first to ensure all drawing is complete
+                        queue.submit(Some(enc.finish()));
+
+                        if let Some(capture_tex) = &capture_texture {
+                            let debug_dir = self.debug_output_dir();
+                            let frame_num = debug_frame_num.unwrap_or(0);
+                            let capture_path = debug_dir.join(format!("frame_{:06}_pass0_composite.png", frame_num));
+                            log::info!("[DebugSave] AFTER SUBMIT - Saving composite frame to {:?}", capture_path);
+                            self.save_texture_to_png(device, queue, capture_tex, capture_path.to_str().unwrap());
+                        }
+
+                        // Create new encoder for present (since we submitted the old one)
+                        enc = device.create_command_encoder(&Default::default());
+                    } else {
+                        // Submit normally
+                        queue.submit(Some(enc.finish()));
+                    }
+                }
+
+                #[cfg(target_arch = "wasm32")]
+                {
+                    queue.submit(Some(enc.finish()));
+                }
                 stage_timer.mark("blit_submit");
+
                 st.present();
                 stage_timer.mark("present_return");
-                
+
                 // After first successful render, save the pipeline cache
                 // This ensures cache is complete with all compiled shaders
                 static FIRST_RENDER_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1383,10 +1837,12 @@ impl VelloBackend {
 pub fn platform_correction(viewport_height: f64) -> Affine {
     #[cfg(target_os = "android")]
     {
+        // Android: Vello renders Y-up, need flip to match screen Y-down
         Affine::translate((0.0, viewport_height)) * Affine::scale_non_uniform(1.0, -1.0)
     }
     #[cfg(not(target_os = "android"))]
     {
+        // macOS/iOS: Vello's render_to_texture already produces Y-down output
         let _ = viewport_height;
         Affine::IDENTITY
     }
@@ -1440,7 +1896,8 @@ fn render_with_blur(
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::STORAGE_BINDING
-            | wgpu::TextureUsages::COPY_DST,
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     };
 
@@ -1464,12 +1921,24 @@ fn render_with_blur(
 
     // Calculate source rectangle in scene coordinates for two-pass rendering
     // This will be used in the second pass to sample from the scene texture
+    // Note: On macOS/iOS, Taffy Y-down needs to be converted to Vello Y-up for correct sampling
     let source_x = local_transform.as_coeffs()[4] as f32;  // translation x
-    let source_y = local_transform.as_coeffs()[5] as f32;  // translation y
+    let source_y_taffy = local_transform.as_coeffs()[5] as f32;  // translation y (Taffy Y-down)
+
+    // Get viewport height from scene transform (stored in _state)
+    // For Y-down to Y-up conversion: vello_y = viewport_height - taffy_y - node_height
+    // But we need viewport height which isn't directly available here
+    // Instead, we'll store the Taffy Y value and let the copy code handle the conversion
 
     // Collect deferred children - they will be rendered after the blurred background
     let deferred_children: Vec<u32> = node.children.clone();
 
+    // Store the source rectangle
+    // On macOS/iOS: source_y_taffy is Y-down from top, so we store it directly
+    // The copy code will handle platform-specific Y coordinate conversion
+    log::info!("[Blur] view_id={} source_rect=({:.1},{:.1}) size={:.1}x{:.1} parent_bg_check: y={:.1} h={:.1}",
+        id, source_x, source_y_taffy, node_width, node_height,
+        local_transform.as_coeffs()[5] - node_height, node_height);
     blurred_textures.push(BlurredTextureEntry {
         texture: offscreen_texture,
         width: texture_width,
@@ -1478,11 +1947,18 @@ fn render_with_blur(
         opacity: node.opacity,
         overlay_color: node.color,
         border_radius: node.border_radius as f64,
-        source_rect: (source_x, source_y, node_width as f32, node_height as f32),
+        source_rect: (source_x, source_y_taffy, node_width as f32, node_height as f32),
         deferred_children,
         view_id: id,
         blur_radius: node.blur_radius,
+        blur_style: node.blur_style,
     });
+
+    // NOTE: For proper frosted glass effect, we do NOT draw the node's background
+    // to the main scene. Instead, we want to blur the content BEHIND the node.
+    // The blurred background will be composited later with a translucent tint.
+    //
+    // This ensures the frosted glass shows the blurred background, not its own color.
 
     // Children are deferred - don't render them here
     // They will be rendered after the blurred background is composited
@@ -1620,10 +2096,28 @@ fn render_node_recursive_with_transform(
         // Determine if we need layer effects
         let needs_layer = node.opacity < 1.0 || node.clip_to_bounds || node.blur_radius > 0.0;
         let has_shadow = node.shadow_blur > 0.0 && (node.shadow_offset_x != 0.0 || node.shadow_offset_y != 0.0 || node.shadow_blur > 0.0);
+        let has_blur = node.blur_radius > 0.0;
+
+        // NOTE: When blur is enabled, we skip layer creation here because:
+        // 1. The node's background should NOT be drawn to the main scene
+        // 2. Blur effect handles opacity and compositing separately
+        let needs_layer_without_blur = needs_layer && !has_blur;
+
+        // Debug: Log blur node info
+        if has_blur {
+            log::info!("[Debug] Blur node id={} color={:?} blur_radius={} opacity={}",
+                id, node.color, node.blur_radius, node.opacity);
+            log::info!("[Debug] Position: taffy=({:.1},{:.1}) global=({:.1},{:.1}) size={:.1}x{:.1}",
+                taffy_x, taffy_y, global_pos.x, global_pos.y, node_width, node_height);
+            log::info!("[Debug] BEFORE check: id={} needs_layer={} has_blur={} needs_layer_without_blur={}",
+                id, needs_layer, has_blur, needs_layer_without_blur);
+        }
 
         // === Step 1: Draw Shadow (if any, using blur) ===
         // Xilem pattern: Draw shadow first, then content on top
-        if has_shadow {
+        // NOTE: When blur is enabled, skip shadow in Pass 1. Shadow will be handled
+        // by the blur compositing pipeline to avoid double-rendering.
+        if has_shadow && !has_blur {
             let shadow_x = node.shadow_offset_x as f64;
             let shadow_y = node.shadow_offset_y as f64;
             let blur_radius = node.shadow_blur as f64;
@@ -1658,7 +2152,11 @@ fn render_node_recursive_with_transform(
         }
 
         // === Step 2: Push Layer (if needed for alpha/blur/clip) ===
-        if needs_layer {
+        // NOTE: When blur is enabled, we skip layer creation here because:
+        // 1. The node's background should NOT be drawn to the main scene
+        // 2. Blur effect handles opacity and compositing separately
+
+        if needs_layer_without_blur {
             // Convert opacity to layer alpha
             let alpha = node.opacity.clamp(0.0, 1.0);
 
@@ -1686,7 +2184,6 @@ fn render_node_recursive_with_transform(
 
         // === Step 3: Handle Blur Effect ===
         // If blur is enabled, render to offscreen texture and apply blur
-        let has_blur = node.blur_radius > 0.0;
         let blur_applied = if has_blur && filter_pipeline.is_some() {
             render_with_blur(
                 node,
@@ -1721,6 +2218,10 @@ fn render_node_recursive_with_transform(
                 // Render rectangle at local position
                 let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
 
+                // Debug: Log fill operations for non-text nodes
+                log::info!("[DebugFill] id={} color={:?} size={}x{} transform={:?}",
+                    id, node.color, node_width, node_height, local_transform);
+
                 if node.border_radius > 0.0 {
                     let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
                     scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
@@ -1734,9 +2235,14 @@ fn render_node_recursive_with_transform(
         // For blur views: skip children in Pass 1, they will be rendered to
         // a separate texture in Pass 3 and composited on top of blur in blit pass.
         // For non-blur views: render children normally.
+        // DEBUG: Log children traversal
+        if !node.children.is_empty() {
+            log::info!("[DebugChildren] id={} has {} children: {:?}", id, node.children.len(), node.children);
+        }
         if !blur_applied {
             let local_pos = global_pos + pos_offset;
             for &child_id in &node.children {
+                log::info!("[DebugChildren] id={} rendering child_id={}", id, child_id);
                 render_node_recursive_with_transform(
                     child_id,
                     state,
@@ -1754,8 +2260,8 @@ fn render_node_recursive_with_transform(
         }
 
         // === Step 6: Pop Layer (if pushed) ===
-        // Layer is always popped here, regardless of blur (blur doesn't pop layer anymore)
-        if needs_layer {
+        // Only pop layer if we pushed it (when blur is NOT enabled)
+        if needs_layer_without_blur {
             scene.pop_layer();
         }
     }
@@ -2176,5 +2682,120 @@ impl Default for VelloBackend {
 impl Default for VelloBackendFactory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test coordinate transformation for blur sampling
+    /// Verifies that source rectangle is calculated correctly for two-pass blur
+    #[test]
+    fn test_blur_source_rect_calculation() {
+        // Simulate a view at position (100, 200) with size 120x120
+        let local_transform = Affine::translate((100.0, 200.0));
+        let node_width = 120.0;
+        let node_height = 120.0;
+
+        // Extract translation (same logic as render_with_blur)
+        let mat = local_transform.as_coeffs();
+        let source_x = mat[4] as f32; // translation x
+        let source_y = mat[5] as f32; // translation y
+
+        assert_eq!(source_x, 100.0);
+        assert_eq!(source_y, 200.0);
+
+        // Verify source_rect tuple
+        let source_rect = (source_x, source_y, node_width as f32, node_height as f32);
+        assert_eq!(source_rect, (100.0, 200.0, 120.0, 120.0));
+    }
+
+    /// Test Y-coordinate flipping for wgpu texture copy
+    /// Vello uses Y-up, wgpu uses Y-down
+    #[test]
+    fn test_y_flip_calculation() {
+        let screen_height = 800u32;
+        let src_y = 200.0f32;
+        let src_h = 120.0f32;
+
+        // Flip Y coordinate: Vello Y=0 is bottom, wgpu Y=0 is top
+        let flipped_y = (screen_height as f32 - src_y - src_h).max(0.0) as u32;
+
+        // Expected: 800 - 200 - 120 = 480
+        assert_eq!(flipped_y, 480);
+    }
+
+    /// Test padding calculation for blur bleed
+    #[test]
+    fn test_blur_padding_calculation() {
+        let blur_radius = 10.0f64;
+        let padding = (blur_radius * 2.5).ceil() as u32;
+
+        // Expected: 10.0 * 2.5 = 25.0, ceil = 25
+        assert_eq!(padding, 25);
+
+        let texture_width = (120.0f64 as u32 + padding * 2).max(1);
+        let texture_height = (120.0f64 as u32 + padding * 2).max(1);
+
+        // Expected: 120 + 25*2 = 170
+        assert_eq!(texture_width, 170);
+        assert_eq!(texture_height, 170);
+    }
+
+    /// Test transform adjustment for padding offset
+    #[test]
+    fn test_transform_with_padding_offset() {
+        let local_transform = Affine::translate((100.0, 200.0));
+        let blur_radius = 10.0f64;
+        let padding = (blur_radius * 2.5).ceil() as u32;
+
+        // Adjust transform to account for padding offset
+        let final_transform = local_transform * Affine::translate((-(padding as f64), -(padding as f64)));
+        let final_mat = final_transform.as_coeffs();
+
+        // Translation should be offset by padding
+        assert_eq!(final_mat[4], 100.0 - padding as f64); // x: 100 - 25 = 75
+        assert_eq!(final_mat[5], 200.0 - padding as f64); // y: 200 - 25 = 175
+    }
+
+    /// Test that padding is consistent between texture creation and transform
+    #[test]
+    fn test_padding_consistency() {
+        let blur_radius = 10.0;
+        let node_width = 120.0;
+        let node_height = 120.0;
+
+        // Calculate padding (same as render_with_blur)
+        let padding = (blur_radius as f64 * 2.5).ceil() as u32;
+
+        // Texture size with padding
+        let texture_width = (node_width as u32 + padding * 2).max(1);
+        let texture_height = (node_height as u32 + padding * 2).max(1);
+
+        // Verify padding is applied equally on both sides
+        let inner_width = texture_width - padding * 2;
+        let inner_height = texture_height - padding * 2;
+
+        assert_eq!(inner_width, node_width as u32);
+        assert_eq!(inner_height, node_height as u32);
+    }
+
+    /// Test frosted glass color extraction
+    #[test]
+    fn test_frosted_glass_color() {
+        // Color from layer_effects_demo.rs: (255u32, 255, 255, 180)
+        let color = (255u32, 255, 255, 180);
+
+        // Convert to f32 premultiplied (as done in blur_composite.wgsl)
+        let alpha = color.3 as f32 / 255.0;
+        let r = (color.0 as f32 / 255.0) * alpha;
+        let g = (color.1 as f32 / 255.0) * alpha;
+        let b = (color.2 as f32 / 255.0) * alpha;
+
+        // White with 180/255 alpha should have premultiplied values
+        assert!((r - 0.705).abs() < 0.01, "R should be ~0.705, got {}", r);
+        assert!((g - 0.705).abs() < 0.01, "G should be ~0.705, got {}", g);
+        assert!((b - 0.705).abs() < 0.01, "B should be ~0.705, got {}", b);
     }
 }

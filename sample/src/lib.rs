@@ -10,7 +10,7 @@
 // mod state_binding_demo;
 
 // Gesture API Demo (Tap, DoubleTap, LongPress, Pan with state display)
-// mod gesture_demo;
+mod gesture_demo;
 
 // Layer Effects Demo - Vello Native Layer Rendering
-mod layer_effects_demo;
+// mod layer_effects_demo;
