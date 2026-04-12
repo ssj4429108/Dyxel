@@ -12,7 +12,7 @@ struct BlurParams {
     pass_index: u32,
     // Total number of passes
     pass_count: u32,
-    // Direction: 0 = downsample, 1 = upsample
+    // Direction: 0 = downsample, 1 = Kawase blur, 2 = upsample
     direction: u32,
     // Padding to 16 bytes
     _padding: u32,
@@ -63,20 +63,28 @@ fn blur_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var result: vec4<f32>;
 
     if (params.direction == 0u) {
-        // Downsample pass
-        // Use larger offset for early passes to achieve bigger blur
-        let scale = 1.0 + f32(params.pass_index) * 0.5;
-        let offset = input_texel_size * scale;
-
-        // 4-sample box filter with offset (simulating bilinear sampling)
+        // Downsample pass: 4-tap box filter with 1-texel offset for pre-blur (suppresses aliasing)
+        let offset = input_texel_size * 1.0;
         result = vec4<f32>(0.0);
         result += sample_bilinear(input_texture, uv + vec2<f32>(-offset.x, -offset.y), params.input_size);
         result += sample_bilinear(input_texture, uv + vec2<f32>( offset.x, -offset.y), params.input_size);
         result += sample_bilinear(input_texture, uv + vec2<f32>(-offset.x,  offset.y), params.input_size);
         result += sample_bilinear(input_texture, uv + vec2<f32>( offset.x,  offset.y), params.input_size);
         result *= 0.25;
+    } else if (params.direction == 1u) {
+        // Kawase blur pass: 8-tap kernel, offset grows with iteration for large-radius blur
+        let half = input_texel_size * (f32(params.pass_index) + 0.5);
+        result = vec4<f32>(0.0);
+        result += sample_bilinear(input_texture, uv + vec2<f32>(-half.x, -half.y), params.input_size) * 0.125;
+        result += sample_bilinear(input_texture, uv + vec2<f32>( half.x, -half.y), params.input_size) * 0.125;
+        result += sample_bilinear(input_texture, uv + vec2<f32>(-half.x,  half.y), params.input_size) * 0.125;
+        result += sample_bilinear(input_texture, uv + vec2<f32>( half.x,  half.y), params.input_size) * 0.125;
+        result += sample_bilinear(input_texture, uv + vec2<f32>(-half.x * 2.0, 0.0), params.input_size) * 0.125;
+        result += sample_bilinear(input_texture, uv + vec2<f32>( half.x * 2.0, 0.0), params.input_size) * 0.125;
+        result += sample_bilinear(input_texture, uv + vec2<f32>(0.0, -half.y * 2.0), params.input_size) * 0.125;
+        result += sample_bilinear(input_texture, uv + vec2<f32>(0.0,  half.y * 2.0), params.input_size) * 0.125;
     } else {
-        // Upsample pass
+        // Upsample pass: 4-tap bilinear for smooth reconstruction
         let offset = input_texel_size;
         result = vec4<f32>(0.0);
         result += sample_bilinear(input_texture, uv + vec2<f32>(-offset.x, -offset.y), params.input_size) * 0.25;

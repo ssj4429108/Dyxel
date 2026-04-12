@@ -227,10 +227,10 @@ define_protocol! {
     [94] SetBlur(id: u32, radius: f32),               // Gaussian blur radius
     [95] SetClipToBounds(id: u32, clip: u8),          // 0=false, 1=true
     [96] SetPosition(id: u32, x: f32, y: f32),        // Absolute position offset
-
     // === Border / Stroke (97-98) ===
     [97] SetBorderWidth(id: u32, width: f32),         // Border stroke width
     [98] SetBorderColor(id: u32, r: u8, g: u8, b: u8, a: u8), // Border color RGBA
+    [99] SetBlurStyle(id: u32, style: u8),            // 0=Light, 1=Dark, 2=ExtraLight, 3=Prominent
 }
 
 #[repr(C)]

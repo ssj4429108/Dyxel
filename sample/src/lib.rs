@@ -3,6 +3,8 @@
 // Gesture & State Validation Demo
 // mod stress_test;
 
+// mod final_demo;
+
 // Gesture Orchestration Demo (RSX Gesture DSL)
 // mod gesture_orchestration;
 
