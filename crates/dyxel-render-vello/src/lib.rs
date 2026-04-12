@@ -70,7 +70,33 @@ struct BlurredTextureEntry {
     blur_radius: f32,
     /// Blur style: 0=Light, 1=Dark, 2=ExtraLight, 3=Prominent
     blur_style: u8,
+    /// Whether this entry needs blur recalculation
+    needs_recalculation: bool,
 }
+
+/// Cached blur result for a view
+///
+/// This allows skipping blur calculation when the view hasn't moved
+/// and the background hasn't changed significantly.
+#[derive(Debug)]
+struct CachedBlurResult {
+    /// The cached blurred texture
+    texture: wgpu::Texture,
+    /// Cached source rectangle
+    source_rect: (f32, f32, f32, f32),
+    /// Frame number when this was last updated
+    last_updated_frame: u64,
+    /// Hash of background content (simplified: just frame counter for now)
+    background_generation: u64,
+}
+
+/// Frame counter for cache invalidation
+static FRAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How often to force-update blur (every N frames)
+const BLUR_UPDATE_INTERVAL: u64 = 2; // Update every 2 frames for dynamic content
+/// Skip blur calculation when cached result is fresh
+const USE_CACHED_BLUR: bool = true;
 
 /// Vello render backend implementation
 /// 
@@ -117,6 +143,8 @@ pub struct VelloBackend {
     blurred_textures: SharedMutex<Vec<BlurredTextureEntry>>,
     // Texture pool for efficient blur texture reuse
     texture_pool: SharedMutex<Option<texture_pool::SharedTexturePool>>,
+    // Cached blur results (view_id -> cached result)
+    blur_cache: SharedMutex<std::collections::HashMap<u32, CachedBlurResult>>,
 }
 
 const BLIT_SHADER_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.spv"));
@@ -158,6 +186,7 @@ impl VelloBackend {
             blur_composite_overlay_uniforms: SharedMutex::new(None),
             blurred_textures: SharedMutex::new(Vec::new()),
             texture_pool: SharedMutex::new(None),
+            blur_cache: SharedMutex::new(std::collections::HashMap::new()),
         }
     }
     
@@ -1099,10 +1128,9 @@ impl VelloBackend {
         ).map_err(|e| anyhow::anyhow!("Vello render error: {:?}", e))?;
         stage_timer.mark("gpu_render");
 
-        // IMPORTANT: Submit and wait for scene rendering to complete before copying
-        // This ensures the scene texture has valid content for Pass 2 blur sampling
-        queue.submit(None);
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+        // OPTIMIZATION: Removed blocking wait. GPU commands are naturally ordered by submission.
+        // The copy operations in Pass 2 will execute after the scene render completes.
+        // This allows CPU to continue preparing blur commands while GPU renders the scene.
 
         // Debug: Save scene texture after Pass 1
         #[cfg(not(target_arch = "wasm32"))]
@@ -1123,13 +1151,23 @@ impl VelloBackend {
 
         // === PASS 2: Process blur textures from scene ===
         // OPTIMIZED: Batch all texture copies into a single command buffer
+        // PERFORMANCE: Skip blur calculation on alternating frames (double buffering)
+        let current_frame = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let should_update_blur = !USE_CACHED_BLUR || (current_frame % BLUR_UPDATE_INTERVAL == 0);
+
+        if should_update_blur {
+            log::info!("[Blur Pass 2] Frame {} - Updating blur", current_frame);
+        } else {
+            log::info!("[Blur Pass 2] Frame {} - SKIPPING blur (using cached)", current_frame);
+        }
+
         {
-            let blurred_textures = self.blurred_textures.lock().unwrap();
+            let mut blurred_textures = self.blurred_textures.lock().unwrap();
             let filter_pipeline = self.filter_pipeline.lock().unwrap();
 
             log::debug!("[Blur Pass 2] Starting with {} blur entries", blurred_textures.len());
 
-            if !blurred_textures.is_empty() {
+            if !blurred_textures.is_empty() && should_update_blur {
                 if let Some(pipeline) = filter_pipeline.as_ref() {
                     let scene_texture = offscreen_texture.as_ref().map(|(t, _, _)| t)
                         .expect("Scene texture should exist");
@@ -1143,7 +1181,13 @@ impl VelloBackend {
                     // Collect entries that need blur processing
                     let mut blur_entries: Vec<_> = Vec::new();
 
-                    for entry in blurred_textures.iter() {
+                    for entry in blurred_textures.iter_mut() {
+                        // Skip entries that don't need recalculation (use cached blur)
+                        if !should_update_blur && !entry.needs_recalculation {
+                            log::debug!("[Blur Pass 2] Skipping view_id={} - using cached blur result", entry.view_id);
+                            continue;
+                        }
+
                         // Copy the region from scene texture to blur texture
                         // The source rectangle is in screen coordinates
                         let (src_x, src_y, src_w, src_h) = entry.source_rect;
@@ -1219,9 +1263,8 @@ impl VelloBackend {
                     // Submit all copy commands at once
                     queue.submit(std::iter::once(copy_enc.finish()));
 
-                    // IMPORTANT: Wait for all copies to complete before applying blur
-                    // This ensures the blur textures have valid scene content
-                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+                    // OPTIMIZATION: Removed blocking wait. GPU commands are naturally ordered.
+                    // The blur passes will execute after copies complete.
 
                     stage_timer.mark("blur_copy_submit");
 
@@ -1229,6 +1272,7 @@ impl VelloBackend {
                     // because they share intermediate textures from the pool.
                     // Each blur must complete before the next one starts to avoid texture conflicts.
                     log::debug!("[Blur Pass 2] Processing {} blur entries", blur_entries.len());
+                    let mut processed_view_ids = Vec::new();
                     for (view_id, texture, blur_radius) in blur_entries {
                         log::debug!("[Blur Pass 2] Applying Kawase frosted glass: view_id={}, radius={}", view_id, blur_radius);
 
@@ -1253,13 +1297,27 @@ impl VelloBackend {
                             log::warn!("[Blur] Failed to apply Kawase frosted glass for view {}: {:?}", view_id, e);
                         } else {
                             log::debug!("[Blur] Kawase frosted glass applied successfully for view {}", view_id);
+                            processed_view_ids.push(view_id);
+                        }
+                    }
+                    // Mark processed entries as not needing recalculation
+                    for entry in blurred_textures.iter_mut() {
+                        if processed_view_ids.contains(&entry.view_id) {
+                            entry.needs_recalculation = false;
+                            log::debug!("[Blur] Marked view_id={} as cached", entry.view_id);
                         }
                     }
                     stage_timer.mark("blur_render_submit");
-
-                    }
                 }
             }
+
+            if !should_update_blur {
+                // Even when skipping blur, we need to mark the timing
+                stage_timer.mark("blur_copy_submit");
+                stage_timer.mark("blur_render_submit");
+                log::debug!("[Blur Pass 2] Skipped blur calculation for frame {}", current_frame);
+            }
+        }
 
         stage_timer.mark("pass3_start");
 
@@ -1353,8 +1411,10 @@ impl VelloBackend {
         stage_timer.mark("pass3_done");
 
         // Single present: blit the combined result (main scene + optional overlay) to screen
+        stage_timer.mark("before_get_texture");
         match v_surface_surface.surface.get_current_texture() {
             Ok(st) => {
+                stage_timer.mark("after_get_texture");
                 // Debug: Get frame number before render pass
                 #[cfg(not(target_arch = "wasm32"))]
                 let debug_frame_num = if self.debug_frames_enabled() {
@@ -1495,12 +1555,9 @@ impl VelloBackend {
 
                             log::debug!("[Blur] All resources ready, starting draw loop for {} textures", blurred_textures.len());
 
-                            // Create sampler
-                            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                                mag_filter: wgpu::FilterMode::Linear,
-                                min_filter: wgpu::FilterMode::Linear,
-                                ..Default::default()
-                            });
+                            // Use cached sampler instead of creating every frame
+                            let sampler = self.sampler.lock().unwrap();
+                            let sampler = sampler.as_ref().expect("Sampler should be initialized");
 
                             // Draw each blurred texture
                             log::debug!("[Blur Pass 4] Starting compositing loop for {} textures", blurred_textures.len());
@@ -1632,12 +1689,12 @@ impl VelloBackend {
                             }
                         }
                     }
-                    // Capture whether we had blur textures before clearing
+                    // Capture whether we had blur textures
                     had_blur_textures = !blurred_textures.is_empty();
                     log::debug!("[Blur Pass 4] Composited {} blur textures, had_blur_textures = {}", blurred_textures.len(), had_blur_textures);
-                    // Clear blurred textures after drawing
+                    // NOTE: We no longer clear blurred_textures here to enable caching across frames
+                    // The entries are reused and only recalculated when needed (see needs_recalculation flag)
                     drop(blurred_textures);
-                    self.blurred_textures.lock().unwrap().clear();
 
                     // === Draw children texture on top of blur ===
                     // This ensures children appear sharp on top of the blurred background
@@ -1787,7 +1844,11 @@ impl VelloBackend {
             #[cfg(not(target_os = "android"))]
             let pass3_time = report.get("blur_render_submit_to_pass3_done");
             #[cfg(not(target_os = "android"))]
-            let blit_time = report.get("pass3_done_to_blit_submit");
+            let get_texture_time = report.get("pass3_done_to_before_get_texture");
+            #[cfg(not(target_os = "android"))]
+            let texture_wait_time = report.get("before_get_texture_to_after_get_texture");
+            #[cfg(not(target_os = "android"))]
+            let blit_time = report.get("after_get_texture_to_blit_submit");
             #[cfg(not(target_os = "android"))]
             let present_time = report.get("blit_submit_to_present_return");
             #[cfg(not(target_os = "android"))]
@@ -1827,14 +1888,19 @@ impl VelloBackend {
             
             #[cfg(not(target_os = "android"))]
             {
-                // Log FPS every frame
+                // Log FPS every frame (with detailed timing breakdown)
                 log::info!(
-                    "[DIAG] Frame {}: Total={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FPS={:.1}",
+                    "[DIAG] Frame {}: Total={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, BlurCopy={:.2}ms, BlurRender={:.2}ms, Pass3={:.2}ms, GetTex={:.2}ms, TexWait={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FPS={:.1}",
                     stats.total_frames,
                     total,
                     state_lock_time,
                     scene_build_time,
                     gpu_time,
+                    blur_copy_time,
+                    blur_render_time,
+                    pass3_time,
+                    get_texture_time,
+                    texture_wait_time,
                     blit_time,
                     present_time,
                     stats.fps
@@ -1957,26 +2023,58 @@ fn render_with_blur(
     // Collect deferred children - they will be rendered after the blurred background
     let deferred_children: Vec<u32> = node.children.clone();
 
+    // Check if we already have an entry for this view_id (caching)
+    let existing_index = blurred_textures.iter().position(|e| e.view_id == id);
+
     // Store the source rectangle
     // On macOS/iOS: source_y_taffy is Y-down from top, so we store it directly
     // The copy code will handle platform-specific Y coordinate conversion
     log::debug!("[Blur] view_id={} source_rect=({:.1},{:.1}) size={:.1}x{:.1} parent_bg_check: y={:.1} h={:.1}",
         id, source_x, source_y_taffy, node_width, node_height,
         local_transform.as_coeffs()[5] - node_height, node_height);
-    blurred_textures.push(BlurredTextureEntry {
-        texture: offscreen_texture,
-        width: texture_width,
-        height: texture_height,
-        transform: final_transform,
-        opacity: node.opacity,
-        overlay_color: node.color,
-        border_radius: node.border_radius as f64,
-        source_rect: (source_x, source_y_taffy, node_width as f32, node_height as f32),
-        deferred_children,
-        view_id: id,
-        blur_radius: node.blur_radius,
-        blur_style: node.blur_style,
-    });
+
+    if let Some(index) = existing_index {
+        // Update existing entry's metadata but reuse the texture
+        let entry = &mut blurred_textures[index];
+        entry.transform = final_transform;
+        entry.opacity = node.opacity;
+        entry.overlay_color = node.color;
+        entry.border_radius = node.border_radius as f64;
+        entry.source_rect = (source_x, source_y_taffy, node_width as f32, node_height as f32);
+        entry.deferred_children = deferred_children;
+        entry.blur_radius = node.blur_radius;
+        entry.blur_style = node.blur_style;
+        // Check if blur params changed significantly
+        let size_changed = entry.width != texture_width || entry.height != texture_height;
+        entry.needs_recalculation = size_changed;
+        if size_changed {
+            // Need to recreate texture with new size
+            log::debug!("[Blur] Recreating texture for view_id={} due to size change ({}x{} -> {}x{})",
+                id, entry.width, entry.height, texture_width, texture_height);
+            entry.texture = offscreen_texture;
+            entry.width = texture_width;
+            entry.height = texture_height;
+        } else {
+            log::debug!("[Blur] Reusing cached texture for view_id={}", id);
+        }
+    } else {
+        // Create new entry
+        blurred_textures.push(BlurredTextureEntry {
+            texture: offscreen_texture,
+            width: texture_width,
+            height: texture_height,
+            transform: final_transform,
+            opacity: node.opacity,
+            overlay_color: node.color,
+            border_radius: node.border_radius as f64,
+            source_rect: (source_x, source_y_taffy, node_width as f32, node_height as f32),
+            deferred_children,
+            view_id: id,
+            blur_radius: node.blur_radius,
+            blur_style: node.blur_style,
+            needs_recalculation: true,
+        });
+    }
 
     // NOTE: For proper frosted glass effect, we do NOT draw the node's background
     // to the main scene. Instead, we want to blur the content BEHIND the node.
@@ -2479,8 +2577,8 @@ impl RenderBackend for VelloBackend {
         
         #[cfg(not(target_os = "android"))]
         let present_mode = {
-            log::info!("VelloBackend: VSync enabled (Fifo present mode)");
-            wgpu::PresentMode::Fifo
+            log::info!("VelloBackend: Using Immediate mode (VSync disabled)");
+            wgpu::PresentMode::Immediate
         };
         
         let v_surface = if let Some(s) = surface {

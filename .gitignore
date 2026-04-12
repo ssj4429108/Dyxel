@@ -1,3 +1,5 @@
 /target
 .aider*
-.vscode*
+.vscode*check_refresh_rate.py
+
+check_refresh_rate.py

@@ -58,10 +58,12 @@ struct KawaseTexturePool {
 
 impl KawaseTexturePool {
     fn create(device: &wgpu::Device, full_width: u32, full_height: u32) -> Self {
+        // OPTIMIZATION: Use 1/8 resolution instead of 1/4 for significant performance gain
+        // Pixel fill rate: 1/64 of original vs 1/16 of 1/4 resolution
         let half_w = (full_width / 2).max(1);
         let half_h = (full_height / 2).max(1);
-        let quarter_w = (full_width / 4).max(1);
-        let quarter_h = (full_height / 4).max(1);
+        let quarter_w = (full_width / 8).max(1);
+        let quarter_h = (full_height / 8).max(1);
 
         let make = |w: u32, h: u32, label: &'static str| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -979,8 +981,10 @@ impl FilterPipeline {
         let pool_ref = self.kawase_pool.borrow();
         let internal_pool = pool_ref.as_ref().unwrap();
 
-        // N = number of Kawase iterations, clamped to [2, 6]
-        let kawase_n = ((blur_radius / 15.0).ceil() as u32).max(2).min(6);
+        // N = number of Kawase iterations, clamped to [2, 4]
+        // OPTIMIZATION: Reduced max from 6 to 4, increased divisor from 15 to 25
+        // for fewer passes while maintaining quality
+        let kawase_n = ((blur_radius / 25.0).ceil() as u32).max(2).min(4);
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Kawase Blur Encoder"),
@@ -1199,8 +1203,10 @@ impl FilterPipeline {
         let pool_ref = self.kawase_pool.borrow();
         let internal_pool = pool_ref.as_ref().unwrap();
 
-        // N = number of Kawase iterations, clamped to [2, 6]
-        let kawase_n = ((blur_radius / 15.0).ceil() as u32).max(2).min(6);
+        // N = number of Kawase iterations, clamped to [2, 4]
+        // OPTIMIZATION: Reduced max from 6 to 4, increased divisor from 15 to 25
+        // for fewer passes while maintaining quality
+        let kawase_n = ((blur_radius / 25.0).ceil() as u32).max(2).min(4);
 
         // Helper: run one Kawase render pass (source → target)
         let run_pass = |encoder: &mut wgpu::CommandEncoder,
