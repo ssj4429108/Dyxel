@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use crate::texture_pool::SharedTexturePool;
+
 /// Filter error types
 #[derive(Debug, Clone)]
 pub enum FilterError {
@@ -947,16 +949,24 @@ impl FilterPipeline {
     ///
     /// N (Kawase iterations) = clamp(ceil(blur_radius / 15.0), 2, 6)
     ///   N=2 ≈ 30px,  N=4 ≈ 50px,  N=6 ≈ 80px equivalent blur radius
+    ///
+    /// If `external_pool` is provided, textures will be acquired from the pool for efficient reuse.
+    /// Otherwise, internal textures are used (and recreated on resolution change).
     pub fn apply_frosted_glass_kawase(
         &self,
         input: &wgpu::Texture,
         output: &wgpu::Texture,
         blur_radius: f32,
+        external_pool: Option<&SharedTexturePool>,
     ) -> Result<(), FilterError> {
         let full_w = input.width();
         let full_h = input.height();
 
-        // Ensure texture pool matches current resolution
+        // Use external pool if provided, otherwise use internal pool
+        let _using_external_pool = external_pool.is_some();
+        let external_tex_set = external_pool.map(|pool| pool.acquire_kawase_set(full_w, full_h));
+
+        // Ensure internal texture pool matches current resolution (for fallback or full_tex)
         {
             let mut pool_ref = self.kawase_pool.borrow_mut();
             let needs_rebuild = pool_ref.as_ref().map_or(true, |p| !p.matches(full_w, full_h));
@@ -967,7 +977,7 @@ impl FilterPipeline {
         }
 
         let pool_ref = self.kawase_pool.borrow();
-        let pool = pool_ref.as_ref().unwrap();
+        let internal_pool = pool_ref.as_ref().unwrap();
 
         // N = number of Kawase iterations, clamped to [2, 6]
         let kawase_n = ((blur_radius / 15.0).ceil() as u32).max(2).min(6);
@@ -1015,25 +1025,32 @@ impl FilterPipeline {
             rpass.draw(0..3, 0..1);
         };
 
+        // Use external pool textures if available, otherwise internal
+        let (half_tex, quarter_tex, ping_tex, pong_tex) = if let Some(ref tex_set) = external_tex_set {
+            (tex_set.ds_half.texture(), tex_set.ds_quarter.texture(), tex_set.ping.texture(), tex_set.pong.texture())
+        } else {
+            (&internal_pool.half, &internal_pool.quarter, &internal_pool.ping, &internal_pool.pong)
+        };
+
         // 1. Downsample full → half
         run_pass(
             &mut encoder,
             &input.create_view(&Default::default()),
-            &pool.half.create_view(&Default::default()),
+            &half_tex.create_view(&Default::default()),
             0, 0,
         );
 
         // 2. Downsample half → quarter
         run_pass(
             &mut encoder,
-            &pool.half.create_view(&Default::default()),
-            &pool.quarter.create_view(&Default::default()),
+            &half_tex.create_view(&Default::default()),
+            &quarter_tex.create_view(&Default::default()),
             0, 0,
         );
 
         // 3. Kawase blur iterations (ping-pong between quarter and ping/pong)
         // src alternates: quarter → ping → pong → ... final result in last dst
-        let textures = [&pool.quarter, &pool.ping, &pool.pong];
+        let textures = [quarter_tex, ping_tex, pong_tex];
         let mut src_idx: usize = 0; // index into textures[] for source
         // dst starts at ping (index 1), then alternates ping/pong
         let kawase_dsts: [usize; 6] = [1, 2, 1, 2, 1, 2]; // ping=1, pong=2
@@ -1056,7 +1073,7 @@ impl FilterPipeline {
         run_pass(
             &mut encoder,
             &textures[last_dst_idx].create_view(&Default::default()),
-            &pool.half.create_view(&Default::default()),
+            &half_tex.create_view(&Default::default()),
             2, 0,
         );
 
@@ -1082,7 +1099,7 @@ impl FilterPipeline {
 
         run_pass(
             &mut encoder,
-            &pool.half.create_view(&Default::default()),
+            &half_tex.create_view(&Default::default()),
             &full_tex.create_view(&Default::default()),
             2, 0,
         );
@@ -1140,6 +1157,208 @@ impl FilterPipeline {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        Ok(())
+    }
+
+    /// Encode frosted glass Kawase blur commands into an existing encoder.
+    ///
+    /// This method allows batching multiple blur effects into a single command buffer
+    /// for better GPU utilization and reduced CPU-GPU synchronization overhead.
+    ///
+    /// # Arguments
+    /// * `encoder` - The command encoder to record commands into
+    /// * `input` - Input texture (scene texture to blur from)
+    /// * `output` - Output texture (blur entry texture to write to)
+    /// * `blur_radius` - Blur radius in pixels
+    /// * `external_pool` - Optional texture pool for efficient texture reuse
+    /// * `uniforms_offset` - Byte offset for uniform buffer to avoid conflicts when batching
+    pub fn encode_frosted_glass_kawase(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::Texture,
+        output: &wgpu::Texture,
+        blur_radius: f32,
+        external_pool: Option<&SharedTexturePool>,
+        _uniforms_offset: u64, // Reserved for future use if we need per-entry uniforms
+    ) -> Result<(), FilterError> {
+        let full_w = input.width();
+        let full_h = input.height();
+
+        // Use external pool if provided, otherwise use internal pool
+        let external_tex_set = external_pool.map(|pool| pool.acquire_kawase_set(full_w, full_h));
+
+        // Ensure internal texture pool matches current resolution (for fallback or full_tex)
+        {
+            let mut pool_ref = self.kawase_pool.borrow_mut();
+            let needs_rebuild = pool_ref.as_ref().map_or(true, |p| !p.matches(full_w, full_h));
+            if needs_rebuild {
+                *pool_ref = Some(KawaseTexturePool::create(&self.device, full_w, full_h));
+            }
+        }
+
+        let pool_ref = self.kawase_pool.borrow();
+        let internal_pool = pool_ref.as_ref().unwrap();
+
+        // N = number of Kawase iterations, clamped to [2, 6]
+        let kawase_n = ((blur_radius / 15.0).ceil() as u32).max(2).min(6);
+
+        // Helper: run one Kawase render pass (source → target)
+        let run_pass = |encoder: &mut wgpu::CommandEncoder,
+                        src_view: &wgpu::TextureView,
+                        dst_view: &wgpu::TextureView,
+                        mode: u32,
+                        pass_index: u32| {
+            let uniforms = KawaseUniforms { mode, pass_index, _pad0: 0, _pad1: 0 };
+            self.queue.write_buffer(&self.kawase_uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Kawase Pass BindGroup"),
+                layout: &self.kawase_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.kawase_uniforms.as_entire_binding() },
+                ],
+            });
+
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Kawase Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.kawase_pipeline);
+            rpass.set_bind_group(0, &bind_group, &[]);
+            rpass.draw(0..3, 0..1);
+        };
+
+        // Use external pool textures if available, otherwise internal
+        let (half_tex, quarter_tex, ping_tex, pong_tex) = if let Some(ref tex_set) = external_tex_set {
+            (tex_set.ds_half.texture(), tex_set.ds_quarter.texture(), tex_set.ping.texture(), tex_set.pong.texture())
+        } else {
+            (&internal_pool.half, &internal_pool.quarter, &internal_pool.ping, &internal_pool.pong)
+        };
+
+        // 1. Downsample full → half
+        run_pass(
+            encoder,
+            &input.create_view(&Default::default()),
+            &half_tex.create_view(&Default::default()),
+            0, 0,
+        );
+
+        // 2. Downsample half → quarter
+        run_pass(
+            encoder,
+            &half_tex.create_view(&Default::default()),
+            &quarter_tex.create_view(&Default::default()),
+            0, 0,
+        );
+
+        // 3. Kawase blur iterations (ping-pong between quarter and ping/pong)
+        let textures = [quarter_tex, ping_tex, pong_tex];
+        let mut src_idx: usize = 0;
+        let kawase_dsts: [usize; 6] = [1, 2, 1, 2, 1, 2];
+        let mut last_dst_idx = 0usize;
+        for i in 0..kawase_n {
+            let dst_idx = kawase_dsts[i as usize];
+            run_pass(
+                encoder,
+                &textures[src_idx].create_view(&Default::default()),
+                &textures[dst_idx].create_view(&Default::default()),
+                1, i,
+            );
+            src_idx = dst_idx;
+            last_dst_idx = dst_idx;
+        }
+
+        // 4. Upsample quarter-res result → half
+        run_pass(
+            encoder,
+            &textures[last_dst_idx].create_view(&Default::default()),
+            &half_tex.create_view(&Default::default()),
+            2, 0,
+        );
+
+        // 5. Create temporary full-res texture for final upsample
+        let full_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Kawase Full Res Temp"),
+            size: wgpu::Extent3d { width: full_w, height: full_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        run_pass(
+            encoder,
+            &half_tex.create_view(&Default::default()),
+            &full_tex.create_view(&Default::default()),
+            2, 0,
+        );
+
+        // 6. Blit Rgba16Float full_tex → Rgba8Unorm output using frosted pipeline
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct FrostedUniforms {
+            direction: [f32; 2],
+            radius: f32,
+            noise_strength: f32,
+            padding: f32,
+            tint_color: [f32; 4],
+        }
+        let blit_uniforms = FrostedUniforms {
+            direction: [1.0, 0.0],
+            radius: 0.0,
+            noise_strength: 0.0,
+            padding: 0.0,
+            tint_color: [0.0, 0.0, 0.0, 0.0],
+        };
+        self.queue.write_buffer(&self.frosted_uniforms, 0, bytemuck::bytes_of(&blit_uniforms));
+
+        let blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Kawase Final Blit BindGroup"),
+            layout: &self.frosted_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&full_tex.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.frosted_uniforms.as_entire_binding() },
+            ],
+        });
+
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Kawase Final Blit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output.create_view(&Default::default()),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&self.frosted_pipeline);
+            rpass.set_bind_group(0, &blit_bind_group, &[]);
+            rpass.draw(0..3, 0..1);
+        }
+
+        // NOTE: Caller is responsible for submitting the encoder
         Ok(())
     }
 

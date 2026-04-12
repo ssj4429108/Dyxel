@@ -66,7 +66,9 @@ impl SpatialHitTester {
     /// Internal sync implementation
     fn do_sync(&mut self) {
         unsafe {
-            let current_max = (*self.shared_buffer_ptr).max_node_id;
+            // Use unaligned read to avoid alignment issues with #[repr(C, align(16))]
+            let max_node_id_ptr = std::ptr::addr_of!((*self.shared_buffer_ptr).max_node_id);
+            let current_max = std::ptr::read_unaligned(max_node_id_ptr);
             
             // Sync spatial index with shared buffer
             

@@ -3,6 +3,7 @@
 
 use std::any::Any;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use vello::{Renderer, RendererOptions, Scene, peniko::{Color, Fill}};
 use dyxel_render_api::{
     RenderBackend, SurfaceState, LifecycleEvent, RenderContext, 
@@ -34,6 +35,7 @@ pub mod staged_loader;
 pub mod two_stage_init;
 pub mod scene_adapter;
 pub mod filter_pipeline;
+pub mod texture_pool;
 
 /// Vello render backend implementation
 /// 
@@ -113,6 +115,8 @@ pub struct VelloBackend {
     blur_composite_overlay_uniforms: SharedMutex<Option<wgpu::Buffer>>,
     // Blurred textures to composite (cleared each frame)
     blurred_textures: SharedMutex<Vec<BlurredTextureEntry>>,
+    // Texture pool for efficient blur texture reuse
+    texture_pool: SharedMutex<Option<texture_pool::SharedTexturePool>>,
 }
 
 const BLIT_SHADER_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.spv"));
@@ -153,6 +157,7 @@ impl VelloBackend {
             blur_composite_uniforms: SharedMutex::new(None),
             blur_composite_overlay_uniforms: SharedMutex::new(None),
             blurred_textures: SharedMutex::new(Vec::new()),
+            texture_pool: SharedMutex::new(None),
         }
     }
     
@@ -171,7 +176,7 @@ impl VelloBackend {
         let bytes_per_row = ((bytes_per_row_unaligned + 255) / 256) * 256;
         let buffer_size = (bytes_per_row * size.height) as u64;
 
-        log::info!("[DebugSave] Saving {}: {}x{} format={:?} bytes_per_row={}",
+        log::debug!("[DebugSave] Saving {}: {}x{} format={:?} bytes_per_row={}",
             path, size.width, size.height, format, bytes_per_row);
 
         // Create buffer to read back
@@ -221,7 +226,7 @@ impl VelloBackend {
             // Check first few pixels to see if texture is empty
             let first_pixels: Vec<[u8; 4]> = rgba_data.chunks(4).take(4)
                 .filter_map(|c| c.try_into().ok()).collect();
-            log::info!("[DebugSave] First 4 pixels: {:?}", first_pixels);
+            log::debug!("[DebugSave] First 4 pixels: {:?}", first_pixels);
 
             // Debug: Sample pixels at multiple locations
             for (sx, sy) in [(763u32, 598u32), (1185u32, 598u32), (1606u32, 598u32)] {
@@ -231,7 +236,7 @@ impl VelloBackend {
                     let g = rgba_data[sample_offset + 1];
                     let b = rgba_data[sample_offset + 2];
                     let a = rgba_data[sample_offset + 3];
-                    log::info!("[DebugSave] Scene pixel at ({},{}): RGBA=({},{},{},{})", sx, sy, r, g, b, a);
+                    log::debug!("[DebugSave] Scene pixel at ({},{}): RGBA=({},{},{},{})", sx, sy, r, g, b, a);
                 }
             }
 
@@ -273,7 +278,7 @@ impl VelloBackend {
     /// Check if debug frame saving is enabled
     #[cfg(not(target_arch = "wasm32"))]
     fn debug_frames_enabled(&self) -> bool {
-        std::env::var("DYXEL_DEBUG_FRAMES").is_ok()
+        false // Disabled: was std::env::var("DYXEL_DEBUG_FRAMES").is_ok()
     }
 
     /// Get debug output directory
@@ -508,7 +513,7 @@ impl VelloBackend {
 
     fn save_cache(&self) {
         if self.cache_saved.load(std::sync::atomic::Ordering::SeqCst) { 
-            log::debug!("[ColdStart] Cache already saved, skipping");
+            log::info!("[ColdStart] Cache already saved, skipping");
             return; 
         }
         let cache_lock = self.pipeline_cache.lock().unwrap();
@@ -724,7 +729,7 @@ impl VelloBackend {
         *self.blur_composite_uniforms.lock().unwrap() = Some(uniform_buffer);
         *self.blur_composite_overlay_uniforms.lock().unwrap() = Some(overlay_uniform_buffer);
 
-        log::info!("[Blur] Composite pipeline initialized");
+        log::debug!("[Blur] Composite pipeline initialized");
     }
 
     /// Clear surface with a simple color (fallback when renderer is loading)
@@ -794,9 +799,13 @@ impl VelloBackend {
         // Check if renderer is ready
         let mut renderer_lock = self.renderer.lock().unwrap();
         let renderer = match renderer_lock.as_mut() {
-            Some(r) => r,
+            Some(r) => {
+                log::info!("[DIAG] Renderer ready");
+                r
+            }
             None => {
                 // Renderer not ready yet - clear surface and return
+                log::info!("[DIAG] Renderer not ready, clearing surface");
                 // This keeps the main loop at 60fps while shader compiles in background
                 drop(renderer_lock); // Release lock before calling clear_surface
                 return self.clear_surface(device, queue, v_surface_surface);
@@ -810,6 +819,11 @@ impl VelloBackend {
             monitor.should_show_overlay()
         };
         stage_timer.mark("perf_start");
+
+        // Collect returned textures from previous frame
+        if let Some(ref pool) = *self.texture_pool.lock().unwrap() {
+            pool.collect_returns();
+        }
 
         let w = v_surface_surface.config.width;
         let h = v_surface_surface.config.height;
@@ -1070,7 +1084,7 @@ impl VelloBackend {
         };
         
         // Single render: main scene + overlay (if enabled) to offscreen texture
-        log::info!("[Blur] Rendering scene to texture {}x{}", w, h);
+        log::debug!("[Blur] Rendering scene to texture {}x{}", w, h);
         renderer.render_to_texture(
             device,
             queue,
@@ -1103,40 +1117,53 @@ impl VelloBackend {
                 self.save_texture_to_png(device, queue, scene_tex, path.to_str().unwrap());
 
                 // Debug: Sample pixels at blur card locations (expected to show purple background)
-                log::info!("[Debug] Sampling scene texture at blur card locations (expected purple bg)");
+                log::debug!("[Debug] Sampling scene texture at blur card locations (expected purple bg)");
             }
         }
 
         // === PASS 2: Process blur textures from scene ===
-        // For each blur view, sample from scene texture and apply blur
+        // OPTIMIZED: Batch all texture copies into a single command buffer
         {
             let blurred_textures = self.blurred_textures.lock().unwrap();
             let filter_pipeline = self.filter_pipeline.lock().unwrap();
+
+            log::debug!("[Blur Pass 2] Starting with {} blur entries", blurred_textures.len());
 
             if !blurred_textures.is_empty() {
                 if let Some(pipeline) = filter_pipeline.as_ref() {
                     let scene_texture = offscreen_texture.as_ref().map(|(t, _, _)| t)
                         .expect("Scene texture should exist");
 
+                    // Create a single encoder for all copy operations
+                    let mut copy_enc = device.create_command_encoder(
+                        &wgpu::CommandEncoderDescriptor {
+                            label: Some("Blur Pass 2 - Batch Copy Encoder"),
+                        });
+
+                    // Collect entries that need blur processing
+                    let mut blur_entries: Vec<_> = Vec::new();
+
                     for entry in blurred_textures.iter() {
                         // Copy the region from scene texture to blur texture
                         // The source rectangle is in screen coordinates
                         let (src_x, src_y, src_w, src_h) = entry.source_rect;
 
-                        log::info!("[Blur] Copying region: src=({:.0},{:.0}) size={:.0}x{:.0} to blur texture {}x{}",
+                        log::debug!("[Blur] Copying region: src=({:.0},{:.0}) size={:.0}x{:.0} to blur texture {}x{}",
                             src_x, src_y, src_w, src_h, entry.width, entry.height);
-                        log::info!("[Blur] Checking scene content at src=({:.0},{:.0}) - parent bg is at y=578 (id=37)", src_x, src_y);
+                        log::debug!("[Blur] Checking scene content at src=({:.0},{:.0}) - parent bg is at y=578 (id=37)", src_x, src_y);
 
-                        // Create a command encoder for copy and blur operations
-                        let mut enc = device.create_command_encoder(
-                            &wgpu::CommandEncoderDescriptor {
-                                label: Some("Blur Pass 2 Encoder"),
-                            });
+                        // Collect entries that need blur processing
+                        if entry.blur_radius > 0.0 {
+                            log::debug!("[Blur Pass 2] Collecting view_id={} for blur processing, radius={}", entry.view_id, entry.blur_radius);
+                            blur_entries.push((
+                                entry.view_id,
+                                &entry.texture,
+                                entry.blur_radius,
+                            ));
+                        }
 
                         // Clear blur texture to transparent before copying background
-                        // Use clear_texture (explicit zeroing) instead of empty render pass
-                        // since Metal may optimize away render passes with no draw calls
-                        enc.clear_texture(
+                        copy_enc.clear_texture(
                             &entry.texture,
                             &wgpu::ImageSubresourceRange {
                                 aspect: wgpu::TextureAspect::All,
@@ -1147,29 +1174,20 @@ impl VelloBackend {
                             },
                         );
 
-                        // Copy region from scene texture to blur texture
-                        // Note: We need to account for padding in the blur texture
-                        // On macOS/iOS: src_y is already Y-down (Taffy coordinate), use directly
-                        // On Android: src_y is Vello Y-up, needs flipping
+                        // Calculate padding and coordinates
                         let padding = ((entry.width as f32 - src_w) / 2.0) as u32;
 
-                        // Y coordinate handling:
-                        // - macOS/iOS: src_y is Y-down from top (Taffy), matches wgpu
-                        // - Android: src_y is Y-up from bottom (Vello), needs flip
                         #[cfg(target_os = "android")]
                         let src_origin_y = (h as f32 - src_y - src_h).max(0.0) as u32;
                         #[cfg(not(target_os = "android"))]
                         let src_origin_y = src_y.max(0.0) as u32;
 
-                        // Validate coordinates
                         let src_origin_x = src_x.max(0.0) as u32;
                         let copy_width = src_w as u32;
                         let copy_height = src_h as u32;
 
-                        log::info!("[Blur] Copy params: src=({}, {}) dst=({}, {}) size={}x{}",
-                            src_origin_x, src_origin_y, padding, padding, copy_width, copy_height);
-
-                        enc.copy_texture_to_texture(
+                        // Queue copy command
+                        copy_enc.copy_texture_to_texture(
                             wgpu::TexelCopyTextureInfo {
                                 texture: scene_texture,
                                 mip_level: 0,
@@ -1196,57 +1214,54 @@ impl VelloBackend {
                                 depth_or_array_layers: 1,
                             },
                         );
+                    }
 
-                        queue.submit(Some(enc.finish()));
+                    // Submit all copy commands at once
+                    queue.submit(std::iter::once(copy_enc.finish()));
 
-                        // IMPORTANT: Wait for copy to complete before blur
-                        // Use Wait (blocking) to ensure GPU copy is done before Kawase reads the texture
-                        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+                    // IMPORTANT: Wait for all copies to complete before applying blur
+                    // This ensures the blur textures have valid scene content
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
 
-                        // Debug: Check if copy succeeded (texture should not be red anymore)
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if self.debug_frames_enabled() {
-                            let frame_num = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            let debug_dir = self.debug_output_dir();
-                            let path = debug_dir.join(format!("frame_{:06}_pass2_after_copy_view_{}.png", frame_num % 1000, entry.view_id));
-                            self.save_texture_to_png(device, queue, &entry.texture, path.to_str().unwrap());
-                        }
+                    stage_timer.mark("blur_copy_submit");
 
-                        // Now apply frosted glass effect using Dual Kawase large-radius blur
-                        let blur_radius = entry.blur_radius;
+                    // NOTE: We cannot batch multiple blur operations into a single encoder
+                    // because they share intermediate textures from the pool.
+                    // Each blur must complete before the next one starts to avoid texture conflicts.
+                    log::debug!("[Blur Pass 2] Processing {} blur entries", blur_entries.len());
+                    for (view_id, texture, blur_radius) in blur_entries {
+                        log::debug!("[Blur Pass 2] Applying Kawase frosted glass: view_id={}, radius={}", view_id, blur_radius);
 
-                        if blur_radius > 0.0 {
-                            log::info!("[Blur] Applying Kawase frosted glass: radius={}", blur_radius);
-
-                            if let Err(e) = pipeline.apply_frosted_glass_kawase(
-                                &entry.texture,
-                                &entry.texture,
+                        let pool_guard = self.texture_pool.lock().unwrap();
+                        let result = if let Some(ref pool) = *pool_guard {
+                            pipeline.apply_frosted_glass_kawase(
+                                texture,
+                                texture,
                                 blur_radius,
-                            ) {
-                                log::warn!("[Blur] Failed to apply Kawase frosted glass: {:?}", e);
-                            } else {
-                                log::info!("[Blur] Kawase frosted glass applied successfully");
-                            }
-                        }
+                                Some(pool),
+                            )
+                        } else {
+                            pipeline.apply_frosted_glass_kawase(
+                                texture,
+                                texture,
+                                blur_radius,
+                                None,
+                            )
+                        };
 
-                        // Debug: Save blur texture after Pass 2
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if self.debug_frames_enabled() {
-                            let frame_num = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            let debug_dir = self.debug_output_dir();
-                            let path = debug_dir.join(format!("frame_{:06}_pass2_blur_view_{}.png", frame_num % 1000, entry.view_id));
-                            self.save_texture_to_png(device, queue, &entry.texture, path.to_str().unwrap());
+                        if let Err(e) = result {
+                            log::warn!("[Blur] Failed to apply Kawase frosted glass for view {}: {:?}", view_id, e);
+                        } else {
+                            log::debug!("[Blur] Kawase frosted glass applied successfully for view {}", view_id);
                         }
+                    }
+                    stage_timer.mark("blur_render_submit");
+
                     }
                 }
             }
-        }
+
+        stage_timer.mark("pass3_start");
 
         // === PASS 3: Render deferre d children ===
         // === PASS 3: Render deferred children to separate texture ===
@@ -1287,7 +1302,7 @@ impl VelloBackend {
 
         // Create or update children texture
         let children_texture = if has_children {
-            log::info!("[Blur] Pass 3: Rendering children texture");
+            log::debug!("[Blur] Pass 3: Rendering children texture");
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Children Texture"),
                 size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -1335,6 +1350,7 @@ impl VelloBackend {
         } else {
             None
         };
+        stage_timer.mark("pass3_done");
 
         // Single present: blit the combined result (main scene + optional overlay) to screen
         match v_surface_surface.surface.get_current_texture() {
@@ -1401,19 +1417,19 @@ impl VelloBackend {
                     rp.draw(0..3, 0..1);
 
                     // Draw blurred textures using composite pipeline
-                    log::info!("[Blur] About to lock blurred_textures for compositing");
+                    log::debug!("[Blur Pass 4] About to lock blurred_textures for compositing");
                     let blurred_textures = self.blurred_textures.lock().unwrap();
-                    log::info!("[Blur] Locked blurred_textures, count = {}", blurred_textures.len());
+                    log::debug!("[Blur Pass 4] Locked blurred_textures, count = {}", blurred_textures.len());
                     if !blurred_textures.is_empty() {
-                        log::info!("[Blur] COMPOSITING {} blurred textures", blurred_textures.len());
+                        log::debug!("[Blur] COMPOSITING {} blurred textures", blurred_textures.len());
 
                         // Create pipeline with correct surface format if needed
                         // Must match the render pass format (Bgra8Unorm on macOS)
                         let surface_format = v_surface_surface.config.format;
-                        log::info!("[Blur] Surface config format: {:?}", surface_format);
+                        log::debug!("[Blur] Surface config format: {:?}", surface_format);
 
                         // Create pipeline only if it doesn't exist (avoid expensive recreation every frame)
-                        log::info!("[Blur] Checking if pipeline needs creation...");
+                        log::debug!("[Blur] Checking if pipeline needs creation...");
                         let needs_pipeline = {
                             let guard = self.blur_composite_pipeline.lock();
                             match guard {
@@ -1425,15 +1441,15 @@ impl VelloBackend {
                             }
                             // Lock released here at end of block
                         };
-                        log::info!("[Blur] needs_pipeline = {}", needs_pipeline);
+                        log::debug!("[Blur] needs_pipeline = {}", needs_pipeline);
                         if needs_pipeline {
-                            log::info!("[Blur] Creating composite pipeline with surface format {:?}", surface_format);
+                            log::debug!("[Blur] Creating composite pipeline with surface format {:?}", surface_format);
                             self.create_blur_composite_pipeline(device, surface_format);
-                            log::info!("[Blur] Pipeline creation complete");
+                            log::debug!("[Blur] Pipeline creation complete");
                         }
 
                         // Get the blur composite pipeline (handle poisoned mutex)
-                        log::info!("[Blur] Acquiring pipeline lock...");
+                        log::debug!("[Blur] Acquiring pipeline lock...");
                         let blur_pipeline = match self.blur_composite_pipeline.lock() {
                             Ok(g) => g,
                             Err(e) => {
@@ -1462,7 +1478,7 @@ impl VelloBackend {
                                 e.into_inner()
                             }
                         };
-                        log::info!("[Blur] Got all locks");
+                        log::debug!("[Blur] Got all locks");
 
                         let pipeline_ready = blur_pipeline.is_some();
                         let layout_ready = blur_bg_layout.is_some();
@@ -1477,7 +1493,7 @@ impl VelloBackend {
                         if let (Some(pipeline), Some(layout), _, _) =
                             (blur_pipeline.as_ref(), blur_bg_layout.as_ref(), uniform_buffer.as_ref(), overlay_uniform_buffer.as_ref()) {
 
-                            log::info!("[Blur] All resources ready, starting draw loop for {} textures", blurred_textures.len());
+                            log::debug!("[Blur] All resources ready, starting draw loop for {} textures", blurred_textures.len());
 
                             // Create sampler
                             let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1487,6 +1503,7 @@ impl VelloBackend {
                             });
 
                             // Draw each blurred texture
+                            log::debug!("[Blur Pass 4] Starting compositing loop for {} textures", blurred_textures.len());
                             for entry in blurred_textures.iter() {
                                 // Convert transform to matrix
                                 // Vello uses [xx, yx, xy, yy, x0, y0] order
@@ -1575,9 +1592,9 @@ impl VelloBackend {
                                 });
                                 queue.write_buffer(&entry_overlay_uniforms, 0, bytemuck::cast_slice(&overlay_data));
 
-                                log::info!("[Blur] Uniform data: {:?}", uniform_data);
-                                log::info!("[Blur] Overlay data: {:?}", overlay_data);
-                                log::info!("[Blur] Texture size: {}x{}", entry.width, entry.height);
+                                log::debug!("[Blur] Uniform data: {:?}", uniform_data);
+                                log::debug!("[Blur] Overlay data: {:?}", overlay_data);
+                                log::debug!("[Blur] Texture size: {}x{}", entry.width, entry.height);
 
                                 let texture_view = entry.texture.create_view(
                                     &wgpu::TextureViewDescriptor::default());
@@ -1606,20 +1623,18 @@ impl VelloBackend {
                                         ],
                                     });
 
-                                log::info!("[Blur] Compositing view_id={} transform={:?} alpha={} screen={}x{}",
-                                    entry.view_id, mat, entry.opacity, w, h);
+                                    log::debug!("[Blur Pass 4] Compositing view_id={} alpha={}", entry.view_id, entry.opacity);
 
                                 rp.set_pipeline(pipeline);
                                 rp.set_bind_group(0, &bind_group, &[]);
-                                log::info!("[Blur] About to draw view_id={}", entry.view_id);
                                 rp.draw(0..6, 0..1); // 6 vertices for quad (2 triangles)
-                                log::info!("[Blur] Drew view_id={}", entry.view_id);
+                                log::debug!("[Blur Pass 4] Drew view_id={}", entry.view_id);
                             }
                         }
                     }
                     // Capture whether we had blur textures before clearing
                     had_blur_textures = !blurred_textures.is_empty();
-                    log::info!("[Debug] had_blur_textures = {} (count = {})", had_blur_textures, blurred_textures.len());
+                    log::debug!("[Blur Pass 4] Composited {} blur textures, had_blur_textures = {}", blurred_textures.len(), had_blur_textures);
                     // Clear blurred textures after drawing
                     drop(blurred_textures);
                     self.blurred_textures.lock().unwrap().clear();
@@ -1709,7 +1724,7 @@ impl VelloBackend {
                 // NOTE: We handle submission inside the block to avoid double-submit
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    log::info!("[Debug] Checking had_blur_textures = {}", had_blur_textures);
+                    log::debug!("[Debug] Checking had_blur_textures = {}", had_blur_textures);
                     if had_blur_textures && self.debug_frames_enabled() {
                         // IMPORTANT: Submit encoder first to ensure all drawing is complete
                         queue.submit(Some(enc.finish()));
@@ -1718,7 +1733,7 @@ impl VelloBackend {
                             let debug_dir = self.debug_output_dir();
                             let frame_num = debug_frame_num.unwrap_or(0);
                             let capture_path = debug_dir.join(format!("frame_{:06}_pass0_composite.png", frame_num));
-                            log::info!("[DebugSave] AFTER SUBMIT - Saving composite frame to {:?}", capture_path);
+                            log::debug!("[DebugSave] AFTER SUBMIT - Saving composite frame to {:?}", capture_path);
                             self.save_texture_to_png(device, queue, capture_tex, capture_path.to_str().unwrap());
                         }
 
@@ -1753,20 +1768,26 @@ impl VelloBackend {
             }
         }
         
-        // Log detailed frame timing every 60 frames for diagnostics
+        // Log detailed frame timing for diagnostics
         let stats = self.perf_monitor.lock().unwrap().get_stats();
-        if stats.total_frames % 60 == 0 {
+        {
             let report = stage_timer.report();
             
             // Calculate stage durations
             #[cfg(not(target_os = "android"))]
-            let state_lock_time = report.get("init_done_to_perf_start") + report.get("perf_start_to_state_lock");
+            let state_lock_time = report.get("init_check_to_perf_start") + report.get("perf_start_to_state_lock");
             #[cfg(not(target_os = "android"))]
             let scene_build_time = report.get("state_lock_to_scene_build");
             #[cfg(not(target_os = "android"))]
             let gpu_time = report.get("scene_build_to_gpu_render");
             #[cfg(not(target_os = "android"))]
-            let blit_time = report.get("gpu_render_to_blit_submit");
+            let blur_copy_time = report.get("gpu_render_to_blur_copy_submit");
+            #[cfg(not(target_os = "android"))]
+            let blur_render_time = report.get("blur_copy_submit_to_blur_render_submit");
+            #[cfg(not(target_os = "android"))]
+            let pass3_time = report.get("blur_render_submit_to_pass3_done");
+            #[cfg(not(target_os = "android"))]
+            let blit_time = report.get("pass3_done_to_blit_submit");
             #[cfg(not(target_os = "android"))]
             let present_time = report.get("blit_submit_to_present_return");
             #[cfg(not(target_os = "android"))]
@@ -1805,17 +1826,20 @@ impl VelloBackend {
             }
             
             #[cfg(not(target_os = "android"))]
-            log::debug!(
-                "[DIAG] Frame {}: Total={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FPS={:.1}",
-                stats.total_frames,
-                total,
-                state_lock_time,
-                scene_build_time,
-                gpu_time,
-                blit_time,
-                present_time,
-                stats.fps
-            );
+            {
+                // Log FPS every frame
+                log::info!(
+                    "[DIAG] Frame {}: Total={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FPS={:.1}",
+                    stats.total_frames,
+                    total,
+                    state_lock_time,
+                    scene_build_time,
+                    gpu_time,
+                    blit_time,
+                    present_time,
+                    stats.fps
+                );
+            }
 
             // Print full breakdown every 300 frames (5 seconds at 60 FPS)
             // Note: Only printed when debug logging is enabled
@@ -1936,7 +1960,7 @@ fn render_with_blur(
     // Store the source rectangle
     // On macOS/iOS: source_y_taffy is Y-down from top, so we store it directly
     // The copy code will handle platform-specific Y coordinate conversion
-    log::info!("[Blur] view_id={} source_rect=({:.1},{:.1}) size={:.1}x{:.1} parent_bg_check: y={:.1} h={:.1}",
+    log::debug!("[Blur] view_id={} source_rect=({:.1},{:.1}) size={:.1}x{:.1} parent_bg_check: y={:.1} h={:.1}",
         id, source_x, source_y_taffy, node_width, node_height,
         local_transform.as_coeffs()[5] - node_height, node_height);
     blurred_textures.push(BlurredTextureEntry {
@@ -2105,11 +2129,11 @@ fn render_node_recursive_with_transform(
 
         // Debug: Log blur node info
         if has_blur {
-            log::info!("[Debug] Blur node id={} color={:?} blur_radius={} opacity={}",
+            log::debug!("[Debug] Blur node id={} color={:?} blur_radius={} opacity={}",
                 id, node.color, node.blur_radius, node.opacity);
-            log::info!("[Debug] Position: taffy=({:.1},{:.1}) global=({:.1},{:.1}) size={:.1}x{:.1}",
+            log::debug!("[Debug] Position: taffy=({:.1},{:.1}) global=({:.1},{:.1}) size={:.1}x{:.1}",
                 taffy_x, taffy_y, global_pos.x, global_pos.y, node_width, node_height);
-            log::info!("[Debug] BEFORE check: id={} needs_layer={} has_blur={} needs_layer_without_blur={}",
+            log::debug!("[Debug] BEFORE check: id={} needs_layer={} has_blur={} needs_layer_without_blur={}",
                 id, needs_layer, has_blur, needs_layer_without_blur);
         }
 
@@ -2219,7 +2243,7 @@ fn render_node_recursive_with_transform(
                 let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
 
                 // Debug: Log fill operations for non-text nodes
-                log::info!("[DebugFill] id={} color={:?} size={}x{} transform={:?}",
+                log::debug!("[DebugFill] id={} color={:?} size={}x{} transform={:?}",
                     id, node.color, node_width, node_height, local_transform);
 
                 if node.border_radius > 0.0 {
@@ -2237,12 +2261,12 @@ fn render_node_recursive_with_transform(
         // For non-blur views: render children normally.
         // DEBUG: Log children traversal
         if !node.children.is_empty() {
-            log::info!("[DebugChildren] id={} has {} children: {:?}", id, node.children.len(), node.children);
+            log::debug!("[DebugChildren] id={} has {} children: {:?}", id, node.children.len(), node.children);
         }
         if !blur_applied {
             let local_pos = global_pos + pos_offset;
             for &child_id in &node.children {
-                log::info!("[DebugChildren] id={} rendering child_id={}", id, child_id);
+                log::debug!("[DebugChildren] id={} rendering child_id={}", id, child_id);
                 render_node_recursive_with_transform(
                     child_id,
                     state,
@@ -2394,7 +2418,7 @@ impl RenderBackend for VelloBackend {
         match filter_pipeline::FilterPipeline::new(device_arc, queue_arc) {
             Ok(pipeline) => {
                 *self.filter_pipeline.lock().unwrap() = Some(pipeline);
-                log::info!("[Blur] Filter pipeline initialized successfully");
+                log::debug!("[Blur] Filter pipeline initialized successfully");
             }
             Err(e) => {
                 log::warn!("[Blur] Failed to initialize filter pipeline: {}", e);
@@ -2404,6 +2428,17 @@ impl RenderBackend for VelloBackend {
 
         // Note: Blur composite pipeline is created lazily on first use
         // with the correct surface format to avoid format mismatch
+
+        // Initialize texture pool for efficient blur texture reuse
+        {
+            let device_arc = Arc::new(device.clone());
+            let pool = texture_pool::SharedTexturePool::new(
+                device_arc,
+                texture_pool::TexturePoolConfig::default(),
+            );
+            *self.texture_pool.lock().unwrap() = Some(pool);
+            log::info!("[TexturePool] Initialized blur texture pool");
+        }
 
         // Store info for deferred renderer initialization (includes cache stage)
         *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache, cache_stage));
@@ -2444,8 +2479,8 @@ impl RenderBackend for VelloBackend {
         
         #[cfg(not(target_os = "android"))]
         let present_mode = {
-            log::info!("VelloBackend: VSync disabled by default (Immediate present mode)");
-            wgpu::PresentMode::Immediate
+            log::info!("VelloBackend: VSync enabled (Fifo present mode)");
+            wgpu::PresentMode::Fifo
         };
         
         let v_surface = if let Some(s) = surface {
@@ -2623,7 +2658,7 @@ impl RenderBackend for VelloBackend {
         });
         
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(_) => log::debug!("VelloBackend: sync_gpu completed successfully"),
+            Ok(_) => log::info!("VelloBackend: sync_gpu completed successfully"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 log::warn!("VelloBackend: sync_gpu timed out, GPU may be unresponsive");
             }

@@ -399,7 +399,7 @@ mod tests {
             enable_fps: true,
             enable_cpu: false,
             enable_memory: false,
-            enable_overlay: false,
+            enable_overlay: true,
             fps_sample_count: 10,
             system_sample_interval_ms: 1000,
             overlay_position: (0.0, 0.0),
