@@ -92,7 +92,7 @@ pub struct TexturePool {
     device: Arc<wgpu::Device>,
     config: TexturePoolConfig,
     // Buckets indexed by (width/64, height/64, format) for efficient lookup
-    buckets: HashMap<(u8, u8, u8), Vec<(wgpu::Texture, wgpu::TextureView)>>,
+    buckets: HashMap<(u32, u32, u8), Vec<(wgpu::Texture, wgpu::TextureView)>>,
     // Return channel receiver
     return_receiver: std::sync::mpsc::Receiver<TextureReturn>,
     // Return channel sender (cloned for each PooledTexture)
@@ -111,12 +111,10 @@ fn format_index(format: wgpu::TextureFormat) -> u8 {
     }
 }
 
-// Calculate bucket key (quantize sizes to 64-pixel buckets to reduce fragmentation)
-fn bucket_key(width: u32, height: u32, format: wgpu::TextureFormat) -> (u8, u8, u8) {
-    let w_bucket = ((width + 63) / 64).min(255) as u8;
-    let h_bucket = ((height + 63) / 64).min(255) as u8;
-    let f_bucket = format_index(format);
-    (w_bucket, h_bucket, f_bucket)
+// Calculate bucket key using exact dimensions to prevent texture size mismatches
+// in blur pipelines where exact texel dimensions affect shader sampling.
+fn bucket_key(width: u32, height: u32, format: wgpu::TextureFormat) -> (u32, u32, u8) {
+    (width, height, format_index(format))
 }
 
 // Calculate texture size in bytes
@@ -146,7 +144,11 @@ impl TexturePool {
     /// Process returned textures (call at start of frame)
     pub fn collect_returns(&mut self) {
         while let Ok(ret) = self.return_receiver.try_recv() {
-            let key = bucket_key(ret.size.0, ret.size.1, ret.format);
+            // Use ACTUAL texture dimensions for the bucket key, not the requested size,
+            // to ensure mismatched textures from the old 64px-bucket era are sorted correctly.
+            let actual_w = ret.texture.width();
+            let actual_h = ret.texture.height();
+            let key = bucket_key(actual_w, actual_h, ret.format);
             let bucket = self.buckets.entry(key).or_default();
 
             // Only keep if under capacity
@@ -154,7 +156,7 @@ impl TexturePool {
                 bucket.push((ret.texture, ret.view));
             } else {
                 // Drop excess (texture will be destroyed)
-                self.current_bytes -= texture_bytes(ret.size.0, ret.size.1, ret.format);
+                self.current_bytes -= texture_bytes(actual_w, actual_h, ret.format);
             }
         }
     }
@@ -163,16 +165,21 @@ impl TexturePool {
     pub fn acquire(&mut self, width: u32, height: u32, format: wgpu::TextureFormat) -> PooledTexture {
         let key = bucket_key(width, height, format);
 
-        // Try to get from bucket
+        // Try to get from bucket, validating actual dimensions match exactly.
+        // Discard any mismatched leftovers from previous coarse-bucket behavior.
         if let Some(bucket) = self.buckets.get_mut(&key) {
-            if let Some((texture, view)) = bucket.pop() {
-                return PooledTexture {
-                    texture: Some(texture),
-                    view: Some(view),
-                    size: (width, height),
-                    format,
-                    return_sender: Some(self.return_sender.clone()),
-                };
+            while let Some((texture, view)) = bucket.pop() {
+                if texture.width() == width && texture.height() == height {
+                    return PooledTexture {
+                        texture: Some(texture),
+                        view: Some(view),
+                        size: (width, height),
+                        format,
+                        return_sender: Some(self.return_sender.clone()),
+                    };
+                }
+                // Mismatch: destroy the stale texture
+                self.current_bytes -= texture_bytes(texture.width(), texture.height(), format);
             }
         }
 
@@ -277,8 +284,8 @@ mod tests {
 
     #[test]
     fn test_bucket_key() {
-        assert_eq!(bucket_key(64, 64, wgpu::TextureFormat::Rgba8Unorm), (1, 1, 0));
-        assert_eq!(bucket_key(65, 128, wgpu::TextureFormat::Rgba16Float), (2, 2, 1));
-        assert_eq!(bucket_key(256, 256, wgpu::TextureFormat::Bgra8Unorm), (4, 4, 2));
+        assert_eq!(bucket_key(64, 64, wgpu::TextureFormat::Rgba8Unorm), (64, 64, 0));
+        assert_eq!(bucket_key(65, 128, wgpu::TextureFormat::Rgba16Float), (65, 128, 1));
+        assert_eq!(bucket_key(256, 256, wgpu::TextureFormat::Bgra8Unorm), (256, 256, 2));
     }
 }

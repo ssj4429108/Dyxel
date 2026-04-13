@@ -966,7 +966,29 @@ impl FilterPipeline {
 
         // Use external pool if provided, otherwise use internal pool
         let _using_external_pool = external_pool.is_some();
-        let external_tex_set = external_pool.map(|pool| pool.acquire_kawase_set(full_w, full_h));
+        let mut external_tex_set = external_pool.map(|pool| pool.acquire_kawase_set(full_w, full_h));
+
+        // Validate external pool textures have the expected exact dimensions.
+        // If they don't match, fallback to the internal pool to avoid sampling artifacts.
+        if let Some(ref set) = external_tex_set {
+            let expected_half_w = (full_w / 2).max(1);
+            let expected_half_h = (full_h / 2).max(1);
+            let expected_quarter_w = (full_w / 4).max(1);
+            let expected_quarter_h = (full_h / 4).max(1);
+
+            let valid = set.ds_half.texture().width() == expected_half_w
+                && set.ds_half.texture().height() == expected_half_h
+                && set.ds_quarter.texture().width() == expected_quarter_w
+                && set.ds_quarter.texture().height() == expected_quarter_h
+                && set.ping.texture().width() == expected_quarter_w
+                && set.ping.texture().height() == expected_quarter_h
+                && set.pong.texture().width() == expected_quarter_w
+                && set.pong.texture().height() == expected_quarter_h;
+
+            if !valid {
+                external_tex_set = None;
+            }
+        }
 
         // Ensure internal texture pool matches current resolution (for fallback or full_tex)
         {
@@ -985,7 +1007,6 @@ impl FilterPipeline {
         // OPTIMIZATION: Reduced max from 6 to 4, increased divisor from 15 to 25
         // for fewer passes while maintaining quality
         let kawase_n = ((blur_radius / 25.0).ceil() as u32).max(2).min(4);
-
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Kawase Blur Encoder"),
         });
