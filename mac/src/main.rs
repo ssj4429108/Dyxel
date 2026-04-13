@@ -1,22 +1,32 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use std::sync::Arc;
-use winit::{event::*, event_loop::{ControlFlow, EventLoop}, window::WindowBuilder};
 use dyxel_core::DyxelHost;
 use kurbo::Vec2;
+use std::sync::Arc;
 use std::thread;
+use winit::{
+    event::*,
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
 
 mod touch;
+mod display_link;
 use touch::TouchTracker;
+
+/// Debug flag: force continuous render mode for stable frame-pacing validation.
+const DEBUG_FORCE_CONTINUOUS: bool = false;
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new()?;
-    let window = Arc::new(WindowBuilder::new()
-        .with_title("Dyxel Native (macOS)")
-        .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0))
-        .build(&event_loop)?);
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("Dyxel Native (macOS)")
+            .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0))
+            .build(&event_loop)?,
+    );
 
     let host = DyxelHost::new();
 
@@ -55,6 +65,41 @@ fn main() -> anyhow::Result<()> {
                         None
                     ));
                     surface_setup_done = true;
+
+                    // Detect display refresh rate and inject into engine
+                    if let Some(monitor) = w.primary_monitor() {
+                        if let Some(video_mode) = monitor.video_modes().next() {
+                            let mhz = video_mode.refresh_rate_millihertz();
+                            let fps = mhz as f64 / 1000.0;
+                            let effective_fps = if fps >= 119.0 { 120.0 } else if fps >= 59.0 { 60.0 } else { fps.max(30.0) };
+                            log::info!("macOS: Detected refresh rate {:.3} Hz ({} mHz), using target FPS {:.2}", fps, mhz, effective_fps);
+                            host.set_target_fps(effective_fps);
+                        } else {
+                            log::warn!("macOS: Could not detect video mode, falling back to 60 Hz");
+                            host.set_target_fps(60.0);
+                        }
+                    } else {
+                        log::warn!("macOS: Could not get primary monitor, falling back to 60 Hz");
+                        host.set_target_fps(60.0);
+                    }
+
+                    // Attach hardware VBlank sync for precise frame pacing on macOS.
+                    if !DEBUG_FORCE_CONTINUOUS {
+                        match display_link::MacVBlankWaiter::new() {
+                            Ok(waiter) => {
+                                host.set_vblank_waiter(waiter);
+                                log::info!("macOS: CVDisplayLink VBlank sync enabled");
+                            }
+                            Err(e) => {
+                                log::warn!("macOS: Failed to create CVDisplayLink VBlank sync: {}", e);
+                            }
+                        }
+                    }
+
+                    if DEBUG_FORCE_CONTINUOUS {
+                        host.set_continuous_render(true);
+                        log::info!("macOS: DEBUG_FORCE_CONTINUOUS is ON, forcing continuous render mode");
+                    }
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {

@@ -7,7 +7,7 @@ use vello::wgpu;
 pub struct WebVelloSurfaceState {
     pub surface: vello::util::RenderSurface<'static>,
     pub blit_pipeline: wgpu::RenderPipeline,
-    pub offscreen_texture: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
+    pub triple_buffer: Option<crate::TripleBuffer>,
 }
 
 // Web doesn't need Send + Sync, but we keep them for API consistency

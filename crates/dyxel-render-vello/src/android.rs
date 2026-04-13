@@ -7,7 +7,7 @@ use vello::wgpu;
 pub struct AndroidVelloSurfaceState {
     pub surface: vello::util::RenderSurface<'static>,
     pub blit_pipeline: wgpu::RenderPipeline,
-    pub offscreen_texture: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
+    pub triple_buffer: Option<crate::TripleBuffer>,
 }
 
 unsafe impl Send for AndroidVelloSurfaceState {}

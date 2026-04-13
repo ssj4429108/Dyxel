@@ -2,16 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Dyxel Render API - Renderer-agnostic abstraction layer
-//! 
+//!
 //! This crate provides a pure abstraction layer for rendering backends.
 //! It does NOT depend on any specific rendering library (vello, wgpu, etc.).
-//! 
+//!
 //! Concrete implementations are provided by separate crates:
 //! - dyxel-render-vello: Vello + wgpu implementation
 //! - dyxel-render-impeller: Impeller implementation (future)
 
+use dyxel_shared::{
+    filters::{BlendMode, Filter, Rect},
+    SharedState,
+};
 use std::any::Any;
-use dyxel_shared::{SharedState, filters::{BlendMode, Filter, Rect}};
 
 /// Callback type for marking nodes as dirty after layout computation
 /// Render backend calls this after compute_layout to notify core
@@ -46,7 +49,7 @@ pub trait LockExt<T> {}
 impl<T> LockExt<T> for std::sync::Mutex<T> {}
 
 /// Opaque handle to a GPU device
-/// 
+///
 /// This is an opaque pointer that concrete backends use to store their device type.
 /// For Vello backend, this points to a `wgpu::Device`.
 #[derive(Clone, Copy)]
@@ -63,12 +66,12 @@ impl DeviceHandle {
             _marker: std::marker::PhantomData,
         }
     }
-    
+
     /// Get the raw pointer
     pub fn as_ptr<T>(&self) -> *const T {
         self.ptr as *const T
     }
-    
+
     /// Get the mutable raw pointer
     pub fn as_mut_ptr<T>(&self) -> *mut T {
         self.ptr as *mut T
@@ -93,11 +96,11 @@ impl QueueHandle {
             _marker: std::marker::PhantomData,
         }
     }
-    
+
     pub fn as_ptr<T>(&self) -> *const T {
         self.ptr as *const T
     }
-    
+
     pub fn as_mut_ptr<T>(&self) -> *mut T {
         self.ptr as *mut T
     }
@@ -117,15 +120,15 @@ impl SurfaceTargetHandle {
             inner: Box::new(target),
         }
     }
-    
+
     pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
         self.inner.downcast_ref::<T>()
     }
-    
+
     pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
         self.inner.downcast_mut::<T>()
     }
-    
+
     pub fn into_inner<T: Any>(self) -> Option<T> {
         self.inner.downcast::<T>().ok().map(|b| *b)
     }
@@ -142,15 +145,15 @@ impl SurfaceHandle {
             inner: Box::new(surface),
         }
     }
-    
+
     pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
         self.inner.downcast_ref::<T>()
     }
-    
+
     pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
         self.inner.downcast_mut::<T>()
     }
-    
+
     /// Consume the handle and return the inner value
     pub fn into_inner<T: Any>(self) -> Option<T> {
         self.inner.downcast::<T>().ok().map(|b| *b)
@@ -158,7 +161,7 @@ impl SurfaceHandle {
 }
 
 /// Render context for managing devices and surfaces
-/// 
+///
 /// This is an opaque type that wraps the backend-specific render context.
 /// For Vello backend, this wraps `vello::util::RenderContext`.
 pub struct RenderContext {
@@ -171,15 +174,15 @@ impl RenderContext {
             inner: Box::new(ctx),
         }
     }
-    
+
     pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
         self.inner.downcast_ref::<T>()
     }
-    
+
     pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
         self.inner.downcast_mut::<T>()
     }
-    
+
     pub fn into_inner<T: Any>(self) -> Option<T> {
         self.inner.downcast::<T>().ok().map(|b| *b)
     }
@@ -224,8 +227,9 @@ pub type RenderResult = anyhow::Result<()>;
 #[cfg(not(target_arch = "wasm32"))]
 pub trait RenderBackend: Send + Sync {
     /// Initialize the backend with GPU device and queue
-    fn init(&self, device: DeviceHandle, queue: QueueHandle, config: BackendConfig) -> RenderResult;
-    
+    fn init(&self, device: DeviceHandle, queue: QueueHandle, config: BackendConfig)
+        -> RenderResult;
+
     /// Create a surface state for rendering
     fn create_surface_state(
         &self,
@@ -236,10 +240,13 @@ pub trait RenderBackend: Send + Sync {
         width: u32,
         height: u32,
     ) -> anyhow::Result<Box<dyn SurfaceState>>;
-    
+
     /// Prepare for rendering (called before render)
     fn prepare(&self, shared_state: &SharedPtr<SharedMutex<SharedState>>, width: u32, height: u32);
-    
+
+    /// Set frame timing data from the pacer (optional; default no-op)
+    fn set_frame_timing(&self, _pacer_wait_ms: f64, _frame_interval_ms: f64) {}
+
     /// Render a frame
     fn render(
         &self,
@@ -248,21 +255,22 @@ pub trait RenderBackend: Send + Sync {
         surface: &mut dyn SurfaceState,
         shared_state: &SharedPtr<SharedMutex<SharedState>>,
     ) -> RenderResult;
-    
+
     /// Handle lifecycle events
     fn on_lifecycle_event(&self, event: LifecycleEvent);
-    
+
     /// Synchronize GPU (block until all work is done)
     fn sync_gpu(&self, device: DeviceHandle, queue: QueueHandle);
-    
+
     /// Get as Any for downcasting
     fn as_any(&self) -> &dyn Any;
 }
 
 #[cfg(target_arch = "wasm32")]
 pub trait RenderBackend {
-    fn init(&self, device: DeviceHandle, queue: QueueHandle, config: BackendConfig) -> RenderResult;
-    
+    fn init(&self, device: DeviceHandle, queue: QueueHandle, config: BackendConfig)
+        -> RenderResult;
+
     fn create_surface_state(
         &self,
         context: &mut RenderContext,
@@ -272,9 +280,9 @@ pub trait RenderBackend {
         width: u32,
         height: u32,
     ) -> anyhow::Result<Box<dyn SurfaceState>>;
-    
+
     fn prepare(&self, shared_state: &SharedPtr<SharedMutex<SharedState>>, width: u32, height: u32);
-    
+
     fn render(
         &self,
         device: DeviceHandle,
@@ -282,11 +290,11 @@ pub trait RenderBackend {
         surface: &mut dyn SurfaceState,
         shared_state: &SharedPtr<SharedMutex<SharedState>>,
     ) -> RenderResult;
-    
+
     fn on_lifecycle_event(&self, event: LifecycleEvent);
-    
+
     fn sync_gpu(&self, device: DeviceHandle, queue: QueueHandle);
-    
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -294,7 +302,7 @@ pub trait RenderBackend {
 pub trait RenderBackendFactory: Send + Sync {
     /// Create a new render backend instance
     fn create(&self) -> Box<dyn RenderBackend>;
-    
+
     /// Get the name of this backend
     fn name(&self) -> &'static str;
 }
@@ -308,7 +316,15 @@ pub trait Scene {
     fn fill_rect(&mut self, x: f64, y: f64, width: f64, height: f64, color: [u8; 4]);
 
     /// Fill a rounded rectangle
-    fn fill_rounded_rect(&mut self, x: f64, y: f64, width: f64, height: f64, radius: f64, color: [u8; 4]);
+    fn fill_rounded_rect(
+        &mut self,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        radius: f64,
+        color: [u8; 4],
+    );
 
     /// Apply a transform to subsequent drawing operations
     fn push_transform(&mut self, transform: Transform);
@@ -348,42 +364,54 @@ pub trait Scene {
 /// 2D Transform (affine transformation)
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
-    pub xx: f64, pub yx: f64,
-    pub xy: f64, pub yy: f64,
-    pub x0: f64, pub y0: f64,
+    pub xx: f64,
+    pub yx: f64,
+    pub xy: f64,
+    pub yy: f64,
+    pub x0: f64,
+    pub y0: f64,
 }
 
 impl Transform {
     /// Identity transform
     pub const IDENTITY: Self = Self {
-        xx: 1.0, yx: 0.0,
-        xy: 0.0, yy: 1.0,
-        x0: 0.0, y0: 0.0,
+        xx: 1.0,
+        yx: 0.0,
+        xy: 0.0,
+        yy: 1.0,
+        x0: 0.0,
+        y0: 0.0,
     };
-    
+
     /// Create a translation transform
     pub fn translate(x: f64, y: f64) -> Self {
         Self {
-            xx: 1.0, yx: 0.0,
-            xy: 0.0, yy: 1.0,
-            x0: x, y0: y,
+            xx: 1.0,
+            yx: 0.0,
+            xy: 0.0,
+            yy: 1.0,
+            x0: x,
+            y0: y,
         }
     }
-    
+
     /// Create a scale transform
     pub fn scale(sx: f64, sy: f64) -> Self {
         Self {
-            xx: sx, yx: 0.0,
-            xy: 0.0, yy: sy,
-            x0: 0.0, y0: 0.0,
+            xx: sx,
+            yx: 0.0,
+            xy: 0.0,
+            yy: sy,
+            x0: 0.0,
+            y0: 0.0,
         }
     }
-    
+
     /// Create a non-uniform scale
     pub fn scale_non_uniform(sx: f64, sy: f64) -> Self {
         Self::scale(sx, sy)
     }
-    
+
     /// Multiply two transforms: self * other
     pub fn then(&self, other: &Self) -> Self {
         Self {
@@ -398,24 +426,24 @@ impl Transform {
 }
 
 /// Text rendering interface
-/// 
+///
 /// Abstraction for text layout and rendering
 pub trait TextRenderer {
     /// Set text content
     fn set_text(&mut self, text: &str);
-    
+
     /// Set font size
     fn set_font_size(&mut self, size: f32);
-    
+
     /// Set text color
     fn set_text_color(&mut self, r: u8, g: u8, b: u8, a: u8);
-    
+
     /// Set layout width (for wrapping)
     fn set_width(&mut self, width: Option<f32>);
-    
+
     /// Get layout size
     fn layout_size(&mut self) -> (f32, f32);
-    
+
     /// Draw text to a scene
     fn draw(&mut self, scene: &mut dyn Scene, transform: Transform);
 }
@@ -424,7 +452,7 @@ pub trait TextRenderer {
 pub trait RenderBackendExt {
     /// Enable performance overlay (if supported)
     fn enable_perf_overlay(&self);
-    
+
     /// Disable performance overlay
     fn disable_perf_overlay(&self);
 }
@@ -435,7 +463,7 @@ pub trait AsRenderBackend {
 }
 
 /// Extension trait for Vello-specific functionality
-/// 
+///
 /// This is only available when the Vello backend is used.
 /// Callers should check if backend implements this trait for Vello-specific features.
 pub trait VelloBackendExt: RenderBackend {

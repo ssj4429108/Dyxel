@@ -23,8 +23,12 @@ impl std::fmt::Display for FilterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FilterError::DeviceNotInitialized => write!(f, "GPU device not initialized"),
-            FilterError::ShaderCompilationFailed(msg) => write!(f, "Shader compilation failed: {}", msg),
-            FilterError::InvalidFilterParameters(msg) => write!(f, "Invalid filter parameters: {}", msg),
+            FilterError::ShaderCompilationFailed(msg) => {
+                write!(f, "Shader compilation failed: {}", msg)
+            }
+            FilterError::InvalidFilterParameters(msg) => {
+                write!(f, "Invalid filter parameters: {}", msg)
+            }
             FilterError::OutOfMemory => write!(f, "Out of GPU memory"),
         }
     }
@@ -68,12 +72,17 @@ impl KawaseTexturePool {
         let make = |w: u32, h: u32, label: &'static str| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
         };
@@ -141,44 +150,45 @@ impl FilterPipeline {
     /// Create a new filter pipeline
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Result<Self, FilterError> {
         // Create bind group layout for blur
-        let blur_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Blur Bind Group Layout"),
-            entries: &[
-                // Input texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let blur_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Blur Bind Group Layout"),
+                entries: &[
+                    // Input texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Output texture (storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                    // Output texture (storage)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Uniforms
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
 
         // Create compute pipeline
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -226,48 +236,50 @@ impl FilterPipeline {
         });
 
         // Create composite pipeline (for final blending)
-        let composite_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Composite Bind Group Layout"),
-            entries: &[
-                // Source texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let composite_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Composite Bind Group Layout"),
+                entries: &[
+                    // Source texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Uniforms
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                    // Uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         // For now, composite pipeline is a placeholder
         // Full implementation would create a render pipeline for blending
-        let composite_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Composite Pipeline Layout"),
-            bind_group_layouts: &[&composite_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Composite Pipeline Layout"),
+                bind_group_layouts: &[&composite_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Composite Shader"),
@@ -306,46 +318,48 @@ impl FilterPipeline {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/frosted_glass.wgsl").into()),
         });
 
-        let frosted_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Frosted Glass Bind Group Layout"),
-            entries: &[
-                // Input texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let frosted_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Frosted Glass Bind Group Layout"),
+                entries: &[
+                    // Input texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // Sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Uniforms
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    // Sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                    // Uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
-        let frosted_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Frosted Glass Pipeline Layout"),
-            bind_group_layouts: &[&frosted_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let frosted_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Frosted Glass Pipeline Layout"),
+                bind_group_layouts: &[&frosted_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let frosted_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Frosted Glass Pipeline"),
@@ -387,43 +401,45 @@ impl FilterPipeline {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/kawase_blur.wgsl").into()),
         });
 
-        let kawase_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Kawase Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let kawase_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Kawase Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
-        let kawase_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Kawase Pipeline Layout"),
-            bind_group_layouts: &[&kawase_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let kawase_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Kawase Pipeline Layout"),
+                bind_group_layouts: &[&kawase_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let kawase_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Kawase Blur Pipeline"),
@@ -480,13 +496,14 @@ impl FilterPipeline {
     /// Apply dual-filtering blur effect
     pub fn apply_blur(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::Texture,
         output: &wgpu::Texture,
         radius: f32,
     ) -> Result<(), FilterError> {
         if radius <= 0.0 {
             // No blur needed, just copy
-            self.copy_texture(input, output)?;
+            self.copy_texture(encoder, input, output)?;
             return Ok(());
         }
 
@@ -498,10 +515,7 @@ impl FilterPipeline {
         let iterations = ((radius / 2.0).ceil() as u32).max(1).min(8);
 
         // Create intermediate textures for ping-pong
-        let intermediate_size = (
-            (input_size.0 / 4).max(1),
-            (input_size.1 / 4).max(1),
-        );
+        let intermediate_size = ((input_size.0 / 4).max(1), (input_size.1 / 4).max(1));
 
         let desc = wgpu::TextureDescriptor {
             label: Some("Blur Intermediate"),
@@ -523,13 +537,9 @@ impl FilterPipeline {
         let ping = self.device.create_texture(&desc);
         let pong = self.device.create_texture(&desc);
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Blur Command Encoder"),
-        });
-
         // Step 1: Downsample to intermediate size
         self.run_blur_pass(
-            &mut encoder,
+            encoder,
             &input.create_view(&Default::default()),
             &ping.create_view(&Default::default()),
             input_size,
@@ -546,7 +556,7 @@ impl FilterPipeline {
 
         for i in 0..iterations {
             self.run_blur_pass(
-                &mut encoder,
+                encoder,
                 &current_input.create_view(&Default::default()),
                 &current_output.create_view(&Default::default()),
                 intermediate_size,
@@ -562,7 +572,7 @@ impl FilterPipeline {
         // Step 3: Upsample to output size
         // Final result is in current_input (due to swap)
         self.run_blur_pass(
-            &mut encoder,
+            encoder,
             &current_input.create_view(&Default::default()),
             &output.create_view(&Default::default()),
             intermediate_size,
@@ -576,8 +586,6 @@ impl FilterPipeline {
         // Insert memory barrier for synchronization
         // This ensures the compute shader writes are complete before any reads
         encoder.insert_debug_marker("Blur complete - memory barrier");
-
-        self.queue.submit(std::iter::once(encoder.finish()));
 
         Ok(())
     }
@@ -605,11 +613,8 @@ impl FilterPipeline {
             output_size: [output_size.0 as f32, output_size.1 as f32],
         };
 
-        self.queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&uniforms),
-        );
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         // Create bind group for this pass
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -651,6 +656,7 @@ impl FilterPipeline {
     /// Apply drop shadow effect
     pub fn apply_drop_shadow(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::Texture,
         output: &wgpu::Texture,
         dx: f32,
@@ -682,11 +688,11 @@ impl FilterPipeline {
         let shadow_texture = self.device.create_texture(&shadow_desc);
 
         // Apply blur for shadow
-        self.apply_blur(input, &shadow_texture, blur_radius)?;
+        self.apply_blur(encoder, input, &shadow_texture, blur_radius)?;
 
         // Composite shadow with offset and color
         // This is a simplified version - full implementation would use the composite pipeline
-        self.composite_with_shadow(input, output, &shadow_texture, dx, dy, color)?;
+        self.composite_with_shadow(encoder, input, output, &shadow_texture, dx, dy, color)?;
 
         Ok(())
     }
@@ -694,6 +700,7 @@ impl FilterPipeline {
     /// Composite source with shadow
     fn composite_with_shadow(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         _source: &wgpu::Texture,
         output: &wgpu::Texture,
         _shadow: &wgpu::Texture,
@@ -701,10 +708,6 @@ impl FilterPipeline {
         _dy: f32,
         color: [f32; 4],
     ) -> Result<(), FilterError> {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Shadow Composite Encoder"),
-        });
-
         // For now, use a simple render pass
         // Full implementation would use the composite pipeline with proper blending
 
@@ -728,21 +731,16 @@ impl FilterPipeline {
             });
         } // _render_pass dropped here
 
-        self.queue.submit(std::iter::once(encoder.finish()));
-
         Ok(())
     }
 
     /// Copy texture (for when no filter is applied)
     fn copy_texture(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::Texture,
         destination: &wgpu::Texture,
     ) -> Result<(), FilterError> {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Texture Copy Encoder"),
-        });
-
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: source,
@@ -763,8 +761,6 @@ impl FilterPipeline {
             },
         );
 
-        self.queue.submit(std::iter::once(encoder.finish()));
-
         Ok(())
     }
 
@@ -774,6 +770,7 @@ impl FilterPipeline {
     /// Pass 2: Vertical blur + tinting + noise
     pub fn apply_frosted_glass(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::Texture,
         output: &wgpu::Texture,
         radius: f32,
@@ -838,7 +835,7 @@ impl FilterPipeline {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(
-                        &input.create_view(&Default::default())
+                        &input.create_view(&Default::default()),
                     ),
                 },
                 wgpu::BindGroupEntry {
@@ -853,9 +850,6 @@ impl FilterPipeline {
         });
 
         // Pass 1 render pass
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Frosted Glass Pass 1"),
-        });
         {
             let mut pass1 = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Frosted Horizontal Blur"),
@@ -876,9 +870,6 @@ impl FilterPipeline {
             pass1.set_bind_group(0, &pass1_bind_group, &[]);
             pass1.draw(0..3, 0..1);
         }
-
-        // Submit Pass 1
-        self.queue.submit(std::iter::once(encoder.finish()));
 
         // Pass 2: Vertical blur + tinting + noise
         let pass2_uniforms = FrostedUniforms {
@@ -915,9 +906,6 @@ impl FilterPipeline {
         });
 
         // Pass 2 render pass
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Frosted Glass Pass 2"),
-        });
         {
             let mut pass2 = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Frosted Vertical Blur + Composite"),
@@ -939,8 +927,6 @@ impl FilterPipeline {
             pass2.draw(0..3, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
-
         Ok(())
     }
 
@@ -956,6 +942,7 @@ impl FilterPipeline {
     /// Otherwise, internal textures are used (and recreated on resolution change).
     pub fn apply_frosted_glass_kawase(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::Texture,
         output: &wgpu::Texture,
         blur_radius: f32,
@@ -971,7 +958,9 @@ impl FilterPipeline {
         // Ensure internal texture pool matches current resolution (for fallback or full_tex)
         {
             let mut pool_ref = self.kawase_pool.borrow_mut();
-            let needs_rebuild = pool_ref.as_ref().map_or(true, |p| !p.matches(full_w, full_h));
+            let needs_rebuild = pool_ref
+                .as_ref()
+                .map_or(true, |p| !p.matches(full_w, full_h));
             if needs_rebuild {
                 // Old textures are automatically dropped (and GPU resources freed)
                 *pool_ref = Some(KawaseTexturePool::create(&self.device, full_w, full_h));
@@ -986,26 +975,37 @@ impl FilterPipeline {
         // for fewer passes while maintaining quality
         let kawase_n = ((blur_radius / 25.0).ceil() as u32).max(2).min(4);
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Kawase Blur Encoder"),
-        });
-
         // Helper: run one Kawase render pass (source → target)
         let run_pass = |encoder: &mut wgpu::CommandEncoder,
                         src_view: &wgpu::TextureView,
                         dst_view: &wgpu::TextureView,
                         mode: u32,
                         pass_index: u32| {
-            let uniforms = KawaseUniforms { mode, pass_index, _pad0: 0, _pad1: 0 };
-            self.queue.write_buffer(&self.kawase_uniforms, 0, bytemuck::bytes_of(&uniforms));
+            let uniforms = KawaseUniforms {
+                mode,
+                pass_index,
+                _pad0: 0,
+                _pad1: 0,
+            };
+            self.queue
+                .write_buffer(&self.kawase_uniforms, 0, bytemuck::bytes_of(&uniforms));
 
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Kawase Pass BindGroup"),
                 layout: &self.kawase_bind_group_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 2, resource: self.kawase_uniforms.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.kawase_uniforms.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -1030,42 +1030,56 @@ impl FilterPipeline {
         };
 
         // Use external pool textures if available, otherwise internal
-        let (half_tex, quarter_tex, ping_tex, pong_tex) = if let Some(ref tex_set) = external_tex_set {
-            (tex_set.ds_half.texture(), tex_set.ds_quarter.texture(), tex_set.ping.texture(), tex_set.pong.texture())
-        } else {
-            (&internal_pool.half, &internal_pool.quarter, &internal_pool.ping, &internal_pool.pong)
-        };
+        let (half_tex, quarter_tex, ping_tex, pong_tex) =
+            if let Some(ref tex_set) = external_tex_set {
+                (
+                    tex_set.ds_half.texture(),
+                    tex_set.ds_quarter.texture(),
+                    tex_set.ping.texture(),
+                    tex_set.pong.texture(),
+                )
+            } else {
+                (
+                    &internal_pool.half,
+                    &internal_pool.quarter,
+                    &internal_pool.ping,
+                    &internal_pool.pong,
+                )
+            };
 
         // 1. Downsample full → half
         run_pass(
-            &mut encoder,
+            encoder,
             &input.create_view(&Default::default()),
             &half_tex.create_view(&Default::default()),
-            0, 0,
+            0,
+            0,
         );
 
         // 2. Downsample half → quarter
         run_pass(
-            &mut encoder,
+            encoder,
             &half_tex.create_view(&Default::default()),
             &quarter_tex.create_view(&Default::default()),
-            0, 0,
+            0,
+            0,
         );
 
         // 3. Kawase blur iterations (ping-pong between quarter and ping/pong)
         // src alternates: quarter → ping → pong → ... final result in last dst
         let textures = [quarter_tex, ping_tex, pong_tex];
         let mut src_idx: usize = 0; // index into textures[] for source
-        // dst starts at ping (index 1), then alternates ping/pong
+                                    // dst starts at ping (index 1), then alternates ping/pong
         let kawase_dsts: [usize; 6] = [1, 2, 1, 2, 1, 2]; // ping=1, pong=2
         let mut last_dst_idx = 0usize;
         for i in 0..kawase_n {
             let dst_idx = kawase_dsts[i as usize];
             run_pass(
-                &mut encoder,
+                encoder,
                 &textures[src_idx].create_view(&Default::default()),
                 &textures[dst_idx].create_view(&Default::default()),
-                1, i,
+                1,
+                i,
             );
             src_idx = dst_idx;
             last_dst_idx = dst_idx;
@@ -1075,10 +1089,11 @@ impl FilterPipeline {
         // The final Kawase result is in textures[last_dst_idx]
         // We need to upsample it. Use the half buffer as intermediate.
         run_pass(
-            &mut encoder,
+            encoder,
             &textures[last_dst_idx].create_view(&Default::default()),
             &half_tex.create_view(&Default::default()),
-            2, 0,
+            2,
+            0,
         );
 
         // 5. Upsample half → output (full res)
@@ -1092,20 +1107,27 @@ impl FilterPipeline {
         // Solution: upsample to a temporary Rgba16Float full-res texture, then copy to output.
         let full_tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Kawase Full Res Temp"),
-            size: wgpu::Extent3d { width: full_w, height: full_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: full_w,
+                height: full_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
         run_pass(
-            &mut encoder,
+            encoder,
             &half_tex.create_view(&Default::default()),
             &full_tex.create_view(&Default::default()),
-            2, 0,
+            2,
+            0,
         );
 
         // 6. Blit Rgba16Float full_tex → Rgba8Unorm output using frosted pipeline
@@ -1127,15 +1149,30 @@ impl FilterPipeline {
             padding: 0.0,
             tint_color: [0.0, 0.0, 0.0, 0.0],
         };
-        self.queue.write_buffer(&self.frosted_uniforms, 0, bytemuck::bytes_of(&blit_uniforms));
+        self.queue.write_buffer(
+            &self.frosted_uniforms,
+            0,
+            bytemuck::bytes_of(&blit_uniforms),
+        );
 
         let blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Kawase Final Blit BindGroup"),
             layout: &self.frosted_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&full_tex.create_view(&Default::default())) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.frosted_uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        &full_tex.create_view(&Default::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.frosted_uniforms.as_entire_binding(),
+                },
             ],
         });
 
@@ -1160,7 +1197,6 @@ impl FilterPipeline {
             rpass.draw(0..3, 0..1);
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
         Ok(())
     }
 
@@ -1194,7 +1230,9 @@ impl FilterPipeline {
         // Ensure internal texture pool matches current resolution (for fallback or full_tex)
         {
             let mut pool_ref = self.kawase_pool.borrow_mut();
-            let needs_rebuild = pool_ref.as_ref().map_or(true, |p| !p.matches(full_w, full_h));
+            let needs_rebuild = pool_ref
+                .as_ref()
+                .map_or(true, |p| !p.matches(full_w, full_h));
             if needs_rebuild {
                 *pool_ref = Some(KawaseTexturePool::create(&self.device, full_w, full_h));
             }
@@ -1214,16 +1252,31 @@ impl FilterPipeline {
                         dst_view: &wgpu::TextureView,
                         mode: u32,
                         pass_index: u32| {
-            let uniforms = KawaseUniforms { mode, pass_index, _pad0: 0, _pad1: 0 };
-            self.queue.write_buffer(&self.kawase_uniforms, 0, bytemuck::bytes_of(&uniforms));
+            let uniforms = KawaseUniforms {
+                mode,
+                pass_index,
+                _pad0: 0,
+                _pad1: 0,
+            };
+            self.queue
+                .write_buffer(&self.kawase_uniforms, 0, bytemuck::bytes_of(&uniforms));
 
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Kawase Pass BindGroup"),
                 layout: &self.kawase_bind_group_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 2, resource: self.kawase_uniforms.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.kawase_uniforms.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -1248,18 +1301,30 @@ impl FilterPipeline {
         };
 
         // Use external pool textures if available, otherwise internal
-        let (half_tex, quarter_tex, ping_tex, pong_tex) = if let Some(ref tex_set) = external_tex_set {
-            (tex_set.ds_half.texture(), tex_set.ds_quarter.texture(), tex_set.ping.texture(), tex_set.pong.texture())
-        } else {
-            (&internal_pool.half, &internal_pool.quarter, &internal_pool.ping, &internal_pool.pong)
-        };
+        let (half_tex, quarter_tex, ping_tex, pong_tex) =
+            if let Some(ref tex_set) = external_tex_set {
+                (
+                    tex_set.ds_half.texture(),
+                    tex_set.ds_quarter.texture(),
+                    tex_set.ping.texture(),
+                    tex_set.pong.texture(),
+                )
+            } else {
+                (
+                    &internal_pool.half,
+                    &internal_pool.quarter,
+                    &internal_pool.ping,
+                    &internal_pool.pong,
+                )
+            };
 
         // 1. Downsample full → half
         run_pass(
             encoder,
             &input.create_view(&Default::default()),
             &half_tex.create_view(&Default::default()),
-            0, 0,
+            0,
+            0,
         );
 
         // 2. Downsample half → quarter
@@ -1267,7 +1332,8 @@ impl FilterPipeline {
             encoder,
             &half_tex.create_view(&Default::default()),
             &quarter_tex.create_view(&Default::default()),
-            0, 0,
+            0,
+            0,
         );
 
         // 3. Kawase blur iterations (ping-pong between quarter and ping/pong)
@@ -1281,7 +1347,8 @@ impl FilterPipeline {
                 encoder,
                 &textures[src_idx].create_view(&Default::default()),
                 &textures[dst_idx].create_view(&Default::default()),
-                1, i,
+                1,
+                i,
             );
             src_idx = dst_idx;
             last_dst_idx = dst_idx;
@@ -1292,18 +1359,25 @@ impl FilterPipeline {
             encoder,
             &textures[last_dst_idx].create_view(&Default::default()),
             &half_tex.create_view(&Default::default()),
-            2, 0,
+            2,
+            0,
         );
 
         // 5. Create temporary full-res texture for final upsample
         let full_tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Kawase Full Res Temp"),
-            size: wgpu::Extent3d { width: full_w, height: full_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: full_w,
+                height: full_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
@@ -1311,7 +1385,8 @@ impl FilterPipeline {
             encoder,
             &half_tex.create_view(&Default::default()),
             &full_tex.create_view(&Default::default()),
-            2, 0,
+            2,
+            0,
         );
 
         // 6. Blit Rgba16Float full_tex → Rgba8Unorm output using frosted pipeline
@@ -1331,15 +1406,30 @@ impl FilterPipeline {
             padding: 0.0,
             tint_color: [0.0, 0.0, 0.0, 0.0],
         };
-        self.queue.write_buffer(&self.frosted_uniforms, 0, bytemuck::bytes_of(&blit_uniforms));
+        self.queue.write_buffer(
+            &self.frosted_uniforms,
+            0,
+            bytemuck::bytes_of(&blit_uniforms),
+        );
 
         let blit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Kawase Final Blit BindGroup"),
             layout: &self.frosted_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&full_tex.create_view(&Default::default())) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: self.frosted_uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        &full_tex.create_view(&Default::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.frosted_uniforms.as_entire_binding(),
+                },
             ],
         });
 

@@ -1,8 +1,8 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
@@ -18,21 +18,43 @@ use crate::engine::{setup_engine, LogicState, RenderState};
 use crate::platform::{SafeWindowHandle, SurfaceId};
 use crate::renderer::render_frame;
 use crate::state::SharedState;
-use dyxel_render_api::{DeviceHandle, QueueHandle, SharedPtr, SharedMutex};
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
+use dyxel_render_api::{DeviceHandle, QueueHandle, SharedMutex, SharedPtr};
 
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
     // Legacy single-touch events (deprecated)
-    TouchDown { x: f32, y: f32 },
-    TouchMove { x: f32, y: f32 },
-    TouchUp { x: f32, y: f32 },
-    
+    TouchDown {
+        x: f32,
+        y: f32,
+    },
+    TouchMove {
+        x: f32,
+        y: f32,
+    },
+    TouchUp {
+        x: f32,
+        y: f32,
+    },
+
     // New multi-touch events with Input Proxy
-    PointerDown { pointer_id: u32, x: f32, y: f32, pressure: f32 },
-    PointerMove { pointer_id: u32, x: f32, y: f32 },
-    PointerUp { pointer_id: u32, x: f32, y: f32 },
+    PointerDown {
+        pointer_id: u32,
+        x: f32,
+        y: f32,
+        pressure: f32,
+    },
+    PointerMove {
+        pointer_id: u32,
+        x: f32,
+        y: f32,
+    },
+    PointerUp {
+        pointer_id: u32,
+        x: f32,
+        y: f32,
+    },
     PointerCancel,
 }
 
@@ -80,18 +102,20 @@ pub enum RenderMessage {
     Shutdown,
     TogglePerfOverlay,
     SetContinuousRender(bool),
+    SetTargetFPS(f64),
+    SetVBlankWaiter(std::sync::Arc<dyn crate::pacer::VBlankWaiter>),
 }
 
 // =============== Input Proxy with GestureArena ===============
 
 #[cfg(not(target_arch = "wasm32"))]
-use dyxel_gesture::{GestureRouter, SpatialHitTester, HitTester};
-#[cfg(not(target_arch = "wasm32"))]
-use dyxel_gesture::{GestureConfig as V2GestureConfig, GestureType as V2GestureType};
+use crate::handler_registry::{HandlerRegistry, HandlerType};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runtime::get_handler_registry;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::handler_registry::{HandlerType, HandlerRegistry};
+use dyxel_gesture::{GestureConfig as V2GestureConfig, GestureType as V2GestureType};
+#[cfg(not(target_arch = "wasm32"))]
+use dyxel_gesture::{GestureRouter, HitTester, SpatialHitTester};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
@@ -101,6 +125,8 @@ thread_local! {
     static GESTURE_ROUTER: std::cell::RefCell<Option<GestureRouter>> = std::cell::RefCell::new(None);
     /// Thread-local pointer to LogicState for gesture callbacks
     static LOGIC_STATE_PTR: std::cell::Cell<*const LogicState> = std::cell::Cell::new(std::ptr::null());
+    /// Thread-local last present time for FrameInterval calculation
+    static LAST_PRESENT_TIME: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
 }
 
 /// Convert HandlerType to V2 GestureType
@@ -120,9 +146,8 @@ fn to_v2_gesture_type(handler_type: HandlerType) -> V2GestureType {
 #[cfg(not(target_arch = "wasm32"))]
 fn build_v2_config(node_id: u32, registry: &HandlerRegistry) -> V2GestureConfig {
     let gestures = registry.get_node_gestures(node_id);
-    let registered_types: Vec<V2GestureType> = gestures.into_iter()
-        .map(to_v2_gesture_type)
-        .collect();
+    let registered_types: Vec<V2GestureType> =
+        gestures.into_iter().map(to_v2_gesture_type).collect();
 
     // Determine max_tap_count from registry (supports single/double/triple/etc)
     let max_tap_count = registry.get_max_tap_count(node_id).max(1);
@@ -141,19 +166,21 @@ fn ensure_gesture_router_initialized(logic: &LogicState) {
         if router.borrow().is_none() {
             // Store LogicState pointer for callback access
             LOGIC_STATE_PTR.with(|ptr| ptr.set(logic as *const LogicState));
-            
+
             // Get shared buffer pointer for hit testing
             let bptr = *logic.shared_buffer_ptr.lock().unwrap();
-            
+
             // Set shared buffer pointer in SharedState for layout sync
             if let Some(bptr) = bptr {
                 let mem = unsafe { &mut *logic._rt.memory_mut() };
-                let shared_buffer_ptr = unsafe { 
-                    mem.as_mut_ptr().add(bptr as usize) as *const dyxel_shared::SharedBuffer 
+                let shared_buffer_ptr = unsafe {
+                    mem.as_mut_ptr().add(bptr as usize) as *const dyxel_shared::SharedBuffer
                 };
-                
+
                 if let Ok(mut state) = logic.shared_state.lock() {
-                    state.set_shared_buffer_ptr(shared_buffer_ptr as *mut dyxel_shared::SharedBuffer);
+                    state.set_shared_buffer_ptr(
+                        shared_buffer_ptr as *mut dyxel_shared::SharedBuffer,
+                    );
                 }
             }
 
@@ -166,14 +193,12 @@ fn ensure_gesture_router_initialized(logic: &LogicState) {
     });
 }
 
-
-
 /// Ensure node is registered in V2 router
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_node_registered_v2(router: &mut GestureRouter, node_id: u32) {
     let registry = get_handler_registry().lock().unwrap();
     let gestures = registry.get_node_gestures(node_id);
-    
+
     if !gestures.is_empty() {
         let config = build_v2_config(node_id, &registry);
         router.register_node_gestures(node_id, config);
@@ -208,13 +233,10 @@ fn decode_u32_to_f32(v: u32) -> f32 {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn dispatch_gesture_event_v2(
-    logic: &LogicState,
-    event: dyxel_gesture::GestureEvent,
-) {
-    use dyxel_shared::push_command;
-    use dyxel_gesture::GestureEventType;
+fn dispatch_gesture_event_v2(logic: &LogicState, event: dyxel_gesture::GestureEvent) {
     use crate::handler_registry::HandlerType;
+    use dyxel_gesture::GestureEventType;
+    use dyxel_shared::push_command;
 
     let bptr = match *logic.shared_buffer_ptr.lock().unwrap() {
         Some(ptr) => ptr,
@@ -243,15 +265,22 @@ fn dispatch_gesture_event_v2(
     // Determine handler type for registry lookup
     let handler_type = match event.event_type {
         GestureEventType::Tap => Some(HandlerType::Tap(event.tap_count.max(1))),
-        GestureEventType::LongPressStart | GestureEventType::LongPressEnd => Some(HandlerType::LongPress),
-        GestureEventType::PanStart | GestureEventType::PanUpdate | GestureEventType::PanEnd => Some(HandlerType::Pan),
-        GestureEventType::ScaleStart | GestureEventType::ScaleUpdate | GestureEventType::ScaleEnd => Some(HandlerType::Scale),
+        GestureEventType::LongPressStart | GestureEventType::LongPressEnd => {
+            Some(HandlerType::LongPress)
+        }
+        GestureEventType::PanStart | GestureEventType::PanUpdate | GestureEventType::PanEnd => {
+            Some(HandlerType::Pan)
+        }
+        GestureEventType::ScaleStart
+        | GestureEventType::ScaleUpdate
+        | GestureEventType::ScaleEnd => Some(HandlerType::Scale),
     };
 
     // SAFETY: This is called from the Logic Thread where the runtime is valid
     unsafe {
         let mem = &mut *logic._rt.memory_mut();
-        let shared_buffer = &mut *(mem.as_mut_ptr().add(bptr as usize) as *mut dyxel_shared::SharedBuffer);
+        let shared_buffer =
+            &mut *(mem.as_mut_ptr().add(bptr as usize) as *mut dyxel_shared::SharedBuffer);
 
         // Find target node via HandlerRegistry
         let target_node = if let Some(ht) = handler_type {
@@ -259,8 +288,12 @@ fn dispatch_gesture_event_v2(
             let handler_node = registry.find_handler(&bubble_path, ht);
             drop(registry);
 
-            log::debug!("dispatch_gesture_event_v2: bubble_path={:?}, handler_type={:?}, handler_node={:?}",
-                bubble_path, ht, handler_node);
+            log::debug!(
+                "dispatch_gesture_event_v2: bubble_path={:?}, handler_type={:?}, handler_node={:?}",
+                bubble_path,
+                ht,
+                handler_node
+            );
 
             handler_node.unwrap_or(event.target_node_id)
         } else {
@@ -288,9 +321,26 @@ fn dispatch_gesture_event_v2(
         // Send unified V2 gesture event
         // Use V2Ex if payload is non-zero, otherwise use V2
         if payload != 0 {
-            push_command!(shared_buffer, GestureEventV2Ex, target_node, event_type, phase, event.x, event.y, payload);
+            push_command!(
+                shared_buffer,
+                GestureEventV2Ex,
+                target_node,
+                event_type,
+                phase,
+                event.x,
+                event.y,
+                payload
+            );
         } else {
-            push_command!(shared_buffer, GestureEventV2, target_node, event_type, phase, event.x, event.y);
+            push_command!(
+                shared_buffer,
+                GestureEventV2,
+                target_node,
+                event_type,
+                phase,
+                event.x,
+                event.y
+            );
         }
 
         // Log for debugging
@@ -310,9 +360,17 @@ fn dispatch_gesture_event_v2(
             _ => "Unknown",
         };
 
-        if matches!(phase, GESTURE_PHASE_BEGAN | GESTURE_PHASE_ENDED) || event_type == GESTURE_TYPE_TAP {
-            log::info!("GestureV2: {} {} on node {} at ({:.1},{:.1})",
-                gesture_name, phase_name, target_node, event.x, event.y);
+        if matches!(phase, GESTURE_PHASE_BEGAN | GESTURE_PHASE_ENDED)
+            || event_type == GESTURE_TYPE_TAP
+        {
+            log::info!(
+                "GestureV2: {} {} on node {} at ({:.1},{:.1})",
+                gesture_name,
+                phase_name,
+                target_node,
+                event.x,
+                event.y
+            );
         }
     }
 }
@@ -321,12 +379,12 @@ fn dispatch_gesture_event_v2(
 #[cfg(not(target_arch = "wasm32"))]
 fn build_bubble_path(target_node: u32, logic: &LogicState) -> Vec<u32> {
     let mut path = vec![target_node];
-    
+
     // Walk up parent chain using SharedState
     // This queries the Host-side tree structure
     if let Ok(state) = logic.shared_state.lock() {
         let mut current = target_node;
-        
+
         // Traverse parent chain until we reach root (parent_id == 0)
         while current != 0 {
             if let Some(node) = state.nodes.get(&current) {
@@ -341,7 +399,7 @@ fn build_bubble_path(target_node: u32, logic: &LogicState) -> Vec<u32> {
             }
         }
     }
-    
+
     path
 }
 
@@ -357,27 +415,20 @@ fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
 
     // Convert InputEvent to V2 PointerEvent
     let (event_type, pointer_id, x, y, pressure) = match event {
-        InputEvent::TouchDown { x, y } => {
-            (PointerEventType::Down, 0, x, y, 1.0)
-        }
-        InputEvent::TouchMove { x, y } => {
-            (PointerEventType::Move, 0, x, y, 1.0)
-        }
-        InputEvent::TouchUp { x, y } => {
-            (PointerEventType::Up, 0, x, y, 0.0)
-        }
-        InputEvent::PointerDown { pointer_id, x, y, pressure } => {
-            (PointerEventType::Down, pointer_id, x, y, pressure)
-        }
+        InputEvent::TouchDown { x, y } => (PointerEventType::Down, 0, x, y, 1.0),
+        InputEvent::TouchMove { x, y } => (PointerEventType::Move, 0, x, y, 1.0),
+        InputEvent::TouchUp { x, y } => (PointerEventType::Up, 0, x, y, 0.0),
+        InputEvent::PointerDown {
+            pointer_id,
+            x,
+            y,
+            pressure,
+        } => (PointerEventType::Down, pointer_id, x, y, pressure),
         InputEvent::PointerMove { pointer_id, x, y } => {
             (PointerEventType::Move, pointer_id, x, y, 1.0)
         }
-        InputEvent::PointerUp { pointer_id, x, y } => {
-            (PointerEventType::Up, pointer_id, x, y, 0.0)
-        }
-        InputEvent::PointerCancel => {
-            (PointerEventType::Cancel, 0, 0.0, 0.0, 0.0)
-        }
+        InputEvent::PointerUp { pointer_id, x, y } => (PointerEventType::Up, pointer_id, x, y, 0.0),
+        InputEvent::PointerCancel => (PointerEventType::Cancel, 0, 0.0, 0.0, 0.0),
     };
 
     // Get timestamp from host (microseconds)
@@ -397,7 +448,8 @@ fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
                     let bptr = *logic.shared_buffer_ptr.lock().unwrap();
                     if let Some(bptr) = bptr {
                         let mem = &mut *logic._rt.memory_mut();
-                        let shared_buffer_ptr = mem.as_mut_ptr().add(bptr as usize) as *const dyxel_shared::SharedBuffer;
+                        let shared_buffer_ptr = mem.as_mut_ptr().add(bptr as usize)
+                            as *const dyxel_shared::SharedBuffer;
                         let mut tester = SpatialHitTester::new(shared_buffer_ptr);
                         tester.sync();
                         let result = tester.hit_test(x, y);
@@ -424,16 +476,20 @@ fn process_input_internal(logic: &mut LogicState, event: InputEvent) {
     GESTURE_ROUTER.with(|router_cell| {
         if let Some(ref mut router) = *router_cell.borrow_mut() {
             let bubble_path = build_bubble_path(target_node_id, logic);
-            
+
             // Ensure all nodes in bubble path are registered
             for &node_id in &bubble_path {
                 if node_id != 0 {
                     ensure_node_registered_v2(router, node_id);
                 }
             }
-            
-            log::trace!("DyxelInput: Routing ptr={} type={:?} target={}",
-                pointer_event.pointer_id, pointer_event.event_type, target_node_id);
+
+            log::trace!(
+                "DyxelInput: Routing ptr={} type={:?} target={}",
+                pointer_event.pointer_id,
+                pointer_event.event_type,
+                target_node_id
+            );
 
             // Process timer-based events FIRST (before pointer event)
             // This ensures recognizers like LongPress can trigger before PointerUp causes them to fail
@@ -564,7 +620,7 @@ impl DyxelHost {
 
         // Create shared state (used directly in WASM, managed by threads in native)
         let shared_state = SharedPtr::new(SharedMutex::new(crate::state::SharedState::new()));
-        
+
         let host = SharedPtr::new(Self {
             #[cfg(not(target_arch = "wasm32"))]
             logic_tx: StdMutex::new(Some(logic_tx)),
@@ -601,7 +657,7 @@ impl DyxelHost {
                         // Logic Thread should sync with latest VSync, not old ones
                         log::debug!("LogicThread: clearing VSync signals...");
                         while render_complete_rx.try_recv().is_ok() {}
-                        
+
                         // Receive message (block when stopped/paused to save CPU)
                         log::debug!("LogicThread: checking for messages...");
                         let msg_res = if lifecycle == Lifecycle::Running {
@@ -618,10 +674,10 @@ impl DyxelHost {
                                         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
                                         {
                                             use crate::runtime::{process_commands, sync_layout_to_wasm, is_render_needed, clear_dirty_tracker};
-                                            
+
                                             // Execute WASM tick (produces commands)
                                             log::debug!("LogicThread: acquiring tick_fn lock...");
-                                            
+
                                             // Process gesture router timers
                                             GESTURE_ROUTER.with(|router_cell| {
                                                 if let Some(router) = router_cell.borrow_mut().as_mut() {
@@ -644,7 +700,7 @@ impl DyxelHost {
                                                 log::warn!("LogicThread: tick_fn is None, skipping tick");
                                             }
                                             drop(tick_opt);
-                                            
+
                                             // Debug: read counters
                                             if let (Ok(_get_events), Ok(_get_gestures), Ok(_get_clicks)) = (
                                                 l._rt.find_function::<(), u32>("dyxel_get_event_count"),
@@ -653,13 +709,13 @@ impl DyxelHost {
                                             ) {
                                                 // WASM counters debug (removed)
                                             }
-                                            
+
                                             // Process WASM commands
                                             let bptr = *l.shared_buffer_ptr.lock().unwrap();
                                             if let Some(bptr) = bptr {
                                                 let mem = unsafe { &mut *l._rt.memory_mut() };
                                                 let _ = process_commands(mem, bptr, &l.shared_state);
-                                                
+
                                                 // Sync layout results back to WASM
                                                 let _ = sync_layout_to_wasm(
                                                     mem,
@@ -667,7 +723,7 @@ impl DyxelHost {
                                                     &l.shared_state.lock().unwrap(),
                                                 );
                                             }
-                                            
+
                                             // Only trigger render if transaction completed and dirty nodes exist
                                             if is_render_needed() {
                                                 let dirty_count = crate::runtime::get_dirty_tracker()
@@ -677,7 +733,7 @@ impl DyxelHost {
 
                                                 }
                                                 let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
-                                                
+
                                                 // VSync: Wait for render completion before next tick
                                                 // This ensures Logic and Render are synchronized
                                                 match render_complete_rx.recv_timeout(Duration::from_millis(33)) {
@@ -687,7 +743,7 @@ impl DyxelHost {
                                                         log::warn!("LogicThread: Render timeout, continuing");
                                                     }
                                                 }
-                                                
+
                                                 clear_dirty_tracker();
                                             } else {
                                                 // No render needed, wait for next VSync signal from Render Thread
@@ -735,7 +791,7 @@ impl DyxelHost {
                                 }
                                 LogicMessage::LoadWasm(path) => {
                                     log::info!("LogicThread: Processing LoadWasm...");
-                                    if let Some(ref mut l) = logic_opt { 
+                                    if let Some(ref mut l) = logic_opt {
                                         log::info!("LogicThread: Calling load_wasm...");
                                         if let Err(e) = l.load_wasm(path) {
                                             log::error!("LogicThread: LoadWasm failed: {}", e);
@@ -782,13 +838,15 @@ impl DyxelHost {
                     let mut render_opt: Option<RenderState> = None;
                     let mut lifecycle = Lifecycle::Stopped;
                     let mut continuous_render = true; // 默认开启连续渲染模式（最大性能）
+                    let mut pacer: Option<crate::pacer::FramePacer> = None;
+                    let mut pending_vblank_waiter: Option<Arc<dyn crate::pacer::VBlankWaiter>> = None;
 
                     loop {
                         // Process messages - either block or poll depending on mode
                         let mut latest_resize = None;
                         let mut draw_requested = continuous_render; // Continuous mode: always draw
                         let mut control_msgs = Vec::new();
-                        
+
                         if continuous_render {
                             // Continuous mode: non-blocking poll for messages
                             while let Ok(msg) = render_rx.try_recv() {
@@ -804,6 +862,21 @@ impl DyxelHost {
                                         draw_requested = enabled;
 
                                     }
+                                    RenderMessage::SetTargetFPS(fps) => {
+                                        let mut new_pacer = crate::pacer::FramePacer::new(fps);
+                                        if let Some(ref w) = pending_vblank_waiter {
+                                            new_pacer.set_vblank_waiter(w.clone());
+                                        }
+                                        pacer = Some(new_pacer);
+                                        log::info!("RenderThread: Target FPS set to {:.2}", fps);
+                                    }
+                                    RenderMessage::SetVBlankWaiter(w) => {
+                                        pending_vblank_waiter = Some(w.clone());
+                                        if let Some(ref mut p) = pacer {
+                                            p.set_vblank_waiter(w);
+                                            log::info!("RenderThread: VBlank waiter attached");
+                                        }
+                                    }
                                     _ => {
                                         control_msgs.push(msg);
                                     }
@@ -818,7 +891,7 @@ impl DyxelHost {
                                     return;
                                 }
                             };
-                            
+
                             // Process the first message
                             match msg {
                                 RenderMessage::Resize { width, height } => {
@@ -831,6 +904,21 @@ impl DyxelHost {
                                     continuous_render = enabled;
                                     draw_requested = enabled;
 
+                                }
+                                RenderMessage::SetTargetFPS(fps) => {
+                                    let mut new_pacer = crate::pacer::FramePacer::new(fps);
+                                    if let Some(ref w) = pending_vblank_waiter {
+                                        new_pacer.set_vblank_waiter(w.clone());
+                                    }
+                                    pacer = Some(new_pacer);
+                                    log::info!("RenderThread: Target FPS set to {:.2}", fps);
+                                }
+                                RenderMessage::SetVBlankWaiter(w) => {
+                                    pending_vblank_waiter = Some(w.clone());
+                                    if let Some(ref mut p) = pacer {
+                                        p.set_vblank_waiter(w);
+                                            log::info!("RenderThread: VBlank waiter attached");
+                                    }
                                 }
                                 _ => {
                                     control_msgs.push(msg);
@@ -850,6 +938,21 @@ impl DyxelHost {
                                         continuous_render = enabled;
                                         draw_requested = enabled;
 
+                                    }
+                                    RenderMessage::SetTargetFPS(fps) => {
+                                        let mut new_pacer = crate::pacer::FramePacer::new(fps);
+                                        if let Some(ref w) = pending_vblank_waiter {
+                                            new_pacer.set_vblank_waiter(w.clone());
+                                        }
+                                        pacer = Some(new_pacer);
+                                        log::info!("RenderThread: Target FPS set to {:.2}", fps);
+                                    }
+                                    RenderMessage::SetVBlankWaiter(w) => {
+                                        pending_vblank_waiter = Some(w.clone());
+                                        if let Some(ref mut p) = pacer {
+                                            p.set_vblank_waiter(w);
+                                            log::info!("RenderThread: VBlank waiter attached");
+                                        }
                                     }
                                     _ => {
                                         control_msgs.push(next);
@@ -956,6 +1059,15 @@ impl DyxelHost {
                                 }
                             }
                         } else if draw_requested && lifecycle == Lifecycle::Running {
+                            // Pacer wait at the start of every frame
+                            let pacer_wait_ms = pacer.as_mut().map(|p| p.wait_for_next_frame().as_secs_f64() * 1000.0).unwrap_or(0.0);
+                            let now = std::time::Instant::now();
+                            let frame_interval_ms = LAST_PRESENT_TIME.with(|t| {
+                                let interval = t.get().map(|last| now.duration_since(last).as_secs_f64() * 1000.0).unwrap_or(0.0);
+                                t.set(Some(now));
+                                interval
+                            });
+
                             let active_id = *active_surface_ptr.lock_guard().unwrap();
                             if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
                                 let mut surfs = surfaces_ptr.lock_guard().unwrap();
@@ -963,11 +1075,12 @@ impl DyxelHost {
                                     if !continuous_render {
                                         log::trace!("RenderThread: Rendering frame for surface {:?}", id);
                                     }
+                                    r.backend.set_frame_timing(pacer_wait_ms, frame_interval_ms);
                                     render_frame(r, s.as_mut());
-                                    
-                                    // Signal Logic Thread that render is complete (VSync)
-                                    // This synchronizes Logic and Render threads
-                                    // Frame rate is now determined by display VSync (60/120/144Hz)
+                                    // Notify pacer that frame was presented
+                                    if let Some(ref mut p) = pacer {
+                                        p.on_frame_submitted();
+                                    }
                                     let _ = render_complete_tx.send(());
                                 } else {
                                     log::warn!("RenderThread: Active surface {:?} not found in map", id);
@@ -984,7 +1097,6 @@ impl DyxelHost {
     }
 
     pub async fn prepare_engine(&self, ddir: String) {
-
         {
             let mut status = self.engine_status.lock_sync();
             if !matches!(*status, EngineStatus::Uninitialized) {
@@ -999,7 +1111,8 @@ impl DyxelHost {
                 {
                     // Store instance for main-thread surface creation
                     // Downcast RenderContext to get Vello's instance
-                    if let Some(v_ctx) = render.context.downcast_ref::<vello::util::RenderContext>() {
+                    if let Some(v_ctx) = render.context.downcast_ref::<vello::util::RenderContext>()
+                    {
                         *self.instance.lock().unwrap() = Some(Box::new(v_ctx.instance.clone()));
                     }
 
@@ -1012,7 +1125,6 @@ impl DyxelHost {
                 }
 
                 {
-
                     let mut status = self.engine_status.lock_sync();
                     *status = EngineStatus::Running;
                     self.engine_ready_notify.notify();
@@ -1040,7 +1152,7 @@ impl DyxelHost {
     }
 
     // === New multi-touch Input Proxy API ===
-    
+
     /// 指针按下（支持多指）
     pub fn on_pointer_down(&self, pointer_id: u32, x: f32, y: f32, pressure: f32) {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1048,14 +1160,19 @@ impl DyxelHost {
             let host_ptr = format!("{:p}", self);
             let logic_tx_guard = self.logic_tx.lock().unwrap();
             if let Some(tx) = &*logic_tx_guard {
-                log::debug!("DyxelInput: on_pointer_down pid={} x={:.1} y={:.1}", pointer_id, x, y);
+                log::debug!(
+                    "DyxelInput: on_pointer_down pid={} x={:.1} y={:.1}",
+                    pointer_id,
+                    x,
+                    y
+                );
                 match tx.send(LogicMessage::Input(InputEvent::PointerDown {
                     pointer_id,
                     x,
                     y,
                     pressure,
                 })) {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => log::error!("DyxelInput: Failed to send message: {}", e),
                 }
             } else {
@@ -1068,7 +1185,12 @@ impl DyxelHost {
     pub fn on_pointer_move(&self, pointer_id: u32, x: f32, y: f32) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            log::trace!("DyxelInput: on_pointer_move pid={} x={:.1} y={:.1}", pointer_id, x, y);
+            log::trace!(
+                "DyxelInput: on_pointer_move pid={} x={:.1} y={:.1}",
+                pointer_id,
+                x,
+                y
+            );
             let _ = tx.send(LogicMessage::Input(InputEvent::PointerMove {
                 pointer_id,
                 x,
@@ -1081,7 +1203,12 @@ impl DyxelHost {
     pub fn on_pointer_up(&self, pointer_id: u32, x: f32, y: f32) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            log::debug!("DyxelInput: on_pointer_up pid={} x={:.1} y={:.1}", pointer_id, x, y);
+            log::debug!(
+                "DyxelInput: on_pointer_up pid={} x={:.1} y={:.1}",
+                pointer_id,
+                x,
+                y
+            );
             let _ = tx.send(LogicMessage::Input(InputEvent::PointerUp {
                 pointer_id,
                 x,
@@ -1129,26 +1256,21 @@ impl DyxelHost {
     pub fn stop_native(&self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-
             let (ack_tx, ack_rx) = mpsc::channel();
             if let Some(tx) = &*self.render_tx.lock().unwrap() {
-
                 let _ = tx.send(RenderMessage::Suspend(ack_tx));
                 let _ = ack_rx.recv_timeout(Duration::from_millis(500)); // Barrier
             }
             if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-
                 let _ = tx.send(LogicMessage::Pause);
             }
             // Clear all surfaces, not just active one
             let mut surfaces = self.surfaces.lock_guard().unwrap();
             let count = surfaces.len();
             if count > 0 {
-
                 surfaces.clear();
             }
             self.active_surface_id.lock_guard().unwrap().take();
-
         }
     }
 
@@ -1179,7 +1301,7 @@ impl DyxelHost {
     pub fn tick(&self) {
         // No-op for now, logic runs in its own thread
     }
-    
+
     /// Toggle performance overlay display (FPS, Memory, CPU)
     pub fn toggle_perf_overlay(&self) {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1194,7 +1316,7 @@ impl DyxelHost {
 
 impl DyxelHost {
     /// Get the shared state (used by web crate)
-    /// 
+    ///
     /// Returns Some(shared_state) on WASM builds, None on native builds
     /// (native builds use thread-local shared state)
     pub fn get_shared_state(&self) -> Option<SharedPtr<SharedMutex<SharedState>>> {
@@ -1210,7 +1332,7 @@ impl DyxelHost {
             None
         }
     }
-    
+
     /// Set continuous render mode (for performance testing)
     /// When enabled, render thread will render as fast as possible without waiting for RequestDraw
     pub fn set_continuous_render(&self, enabled: bool) {
@@ -1222,9 +1344,29 @@ impl DyxelHost {
             }
         }
     }
-    
+
+    pub fn set_target_fps(&self, fps: f64) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.render_tx.lock().unwrap() {
+            match tx.send(RenderMessage::SetTargetFPS(fps)) {
+                Ok(_) => (),
+                Err(e) => log::error!("set_target_fps: Failed to send: {:?}", e),
+            }
+        }
+    }
+
+    pub fn set_vblank_waiter(&self, waiter: Arc<dyn crate::pacer::VBlankWaiter>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.render_tx.lock().unwrap() {
+            match tx.send(RenderMessage::SetVBlankWaiter(waiter)) {
+                Ok(_) => (),
+                Err(e) => log::error!("set_vblank_waiter: Failed to send: {:?}", e),
+            }
+        }
+    }
+
     /// Setup a surface for rendering
-    /// 
+    ///
     /// The target should be a wgpu::SurfaceTarget<'static> wrapped in SurfaceTargetHandle
     /// (for Vello backend), or None for other backends
     pub async fn setup(
@@ -1241,17 +1383,13 @@ impl DyxelHost {
         };
 
         if !already_running {
-
             self.engine_ready_notify.wait().await;
         } else {
-
         }
 
         let nid = self.next_surface_id.fetch_add(1, Ordering::SeqCst);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.render_tx.lock().unwrap() {
-
-
             // On macOS/Desktop, create surface on main thread to avoid Metal panic
             let (target, surface) = if cfg!(any(
                 target_os = "macos",
@@ -1263,14 +1401,20 @@ impl DyxelHost {
                     // Downcast to wgpu::Instance for Vello backend
                     if let Some(instance) = instance_any.downcast_ref::<vello::wgpu::Instance>() {
                         // Try to downcast target to wgpu::SurfaceTarget
-                        let mut target_opt: Option<dyxel_render_api::SurfaceTargetHandle> = Some(target);
-                        if let Some(wgpu_target) = target_opt.take().unwrap().into_inner::<vello::wgpu::SurfaceTarget<'static>>() {
+                        let mut target_opt: Option<dyxel_render_api::SurfaceTargetHandle> =
+                            Some(target);
+                        if let Some(wgpu_target) = target_opt
+                            .take()
+                            .unwrap()
+                            .into_inner::<vello::wgpu::SurfaceTarget<'static>>(
+                        ) {
                             match instance.create_surface(wgpu_target) {
-                                Ok(s) => {
-                                    (None, Some(dyxel_render_api::SurfaceHandle::new(s)))
-                                },
+                                Ok(s) => (None, Some(dyxel_render_api::SurfaceHandle::new(s))),
                                 Err(e) => {
-                                    log::error!("setup: Failed to create surface on main thread: {}", e);
+                                    log::error!(
+                                        "setup: Failed to create surface on main thread: {}",
+                                        e
+                                    );
                                     (None, None)
                                 }
                             }
@@ -1286,7 +1430,6 @@ impl DyxelHost {
             } else {
                 (Some(target), None)
             };
-
 
             match tx.send(RenderMessage::CreateSurface {
                 target,
@@ -1306,7 +1449,6 @@ impl DyxelHost {
 
         // Resume LogicThread if it was paused (e.g., after Back button/activity restart)
         if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-
             let _ = tx.send(LogicMessage::Resume);
         }
     }

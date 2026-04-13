@@ -393,7 +393,7 @@ impl DirtyTracker {
     }
 }
 
-#[repr(C, align(16))]
+#[repr(C)]
 pub struct SharedBuffer {
     pub command_len: u32,
     pub max_node_id: u32,
