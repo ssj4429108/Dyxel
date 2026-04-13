@@ -5,3 +5,4 @@
 check_refresh_rate.py
 /debug_frames/
 .DS_Store
+.worktrees/
