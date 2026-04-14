@@ -942,7 +942,7 @@ impl FilterPipeline {
     /// Otherwise, internal textures are used (and recreated on resolution change).
     pub fn apply_frosted_glass_kawase(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        mut encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::Texture,
         output: &wgpu::Texture,
         blur_radius: f32,
@@ -996,9 +996,6 @@ impl FilterPipeline {
         // OPTIMIZATION: Reduced max from 6 to 4, increased divisor from 15 to 25
         // for fewer passes while maintaining quality
         let kawase_n = ((blur_radius / 25.0).ceil() as u32).max(2).min(4);
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Kawase Blur Encoder"),
-        });
 
         // Helper: run one Kawase render pass (source → target)
         let run_pass = |encoder: &mut wgpu::CommandEncoder,
