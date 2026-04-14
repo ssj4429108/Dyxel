@@ -496,7 +496,7 @@ impl FilterPipeline {
     /// Apply dual-filtering blur effect
     pub fn apply_blur(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        mut encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::Texture,
         output: &wgpu::Texture,
         radius: f32,
@@ -539,7 +539,7 @@ impl FilterPipeline {
 
         // Step 1: Downsample to intermediate size
         self.run_blur_pass(
-            encoder,
+            &mut encoder,
             &input.create_view(&Default::default()),
             &ping.create_view(&Default::default()),
             input_size,
@@ -556,7 +556,7 @@ impl FilterPipeline {
 
         for i in 0..iterations {
             self.run_blur_pass(
-                encoder,
+                &mut encoder,
                 &current_input.create_view(&Default::default()),
                 &current_output.create_view(&Default::default()),
                 intermediate_size,
@@ -572,7 +572,7 @@ impl FilterPipeline {
         // Step 3: Upsample to output size
         // Final result is in current_input (due to swap)
         self.run_blur_pass(
-            encoder,
+            &mut encoder,
             &current_input.create_view(&Default::default()),
             &output.create_view(&Default::default()),
             intermediate_size,
@@ -1074,7 +1074,7 @@ impl FilterPipeline {
 
         // 1. Downsample full → half
         run_pass(
-            encoder,
+            &mut encoder,
             &input.create_view(&Default::default()),
             &half_tex.create_view(&Default::default()),
             0,
@@ -1083,7 +1083,7 @@ impl FilterPipeline {
 
         // 2. Downsample half → quarter
         run_pass(
-            encoder,
+            &mut encoder,
             &half_tex.create_view(&Default::default()),
             &quarter_tex.create_view(&Default::default()),
             0,
@@ -1100,7 +1100,7 @@ impl FilterPipeline {
         for i in 0..kawase_n {
             let dst_idx = kawase_dsts[i as usize];
             run_pass(
-                encoder,
+                &mut encoder,
                 &textures[src_idx].create_view(&Default::default()),
                 &textures[dst_idx].create_view(&Default::default()),
                 1,
@@ -1114,7 +1114,7 @@ impl FilterPipeline {
         // The final Kawase result is in textures[last_dst_idx]
         // We need to upsample it. Use the half buffer as intermediate.
         run_pass(
-            encoder,
+            &mut encoder,
             &textures[last_dst_idx].create_view(&Default::default()),
             &half_tex.create_view(&Default::default()),
             2,
@@ -1148,7 +1148,7 @@ impl FilterPipeline {
         });
 
         run_pass(
-            encoder,
+            &mut encoder,
             &half_tex.create_view(&Default::default()),
             &full_tex.create_view(&Default::default()),
             2,
@@ -1239,7 +1239,7 @@ impl FilterPipeline {
     /// * `uniforms_offset` - Byte offset for uniform buffer to avoid conflicts when batching
     pub fn encode_frosted_glass_kawase(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        mut encoder: &mut wgpu::CommandEncoder,
         input: &wgpu::Texture,
         output: &wgpu::Texture,
         blur_radius: f32,
@@ -1345,7 +1345,7 @@ impl FilterPipeline {
 
         // 1. Downsample full → half
         run_pass(
-            encoder,
+            &mut encoder,
             &input.create_view(&Default::default()),
             &half_tex.create_view(&Default::default()),
             0,
@@ -1354,7 +1354,7 @@ impl FilterPipeline {
 
         // 2. Downsample half → quarter
         run_pass(
-            encoder,
+            &mut encoder,
             &half_tex.create_view(&Default::default()),
             &quarter_tex.create_view(&Default::default()),
             0,
@@ -1369,7 +1369,7 @@ impl FilterPipeline {
         for i in 0..kawase_n {
             let dst_idx = kawase_dsts[i as usize];
             run_pass(
-                encoder,
+                &mut encoder,
                 &textures[src_idx].create_view(&Default::default()),
                 &textures[dst_idx].create_view(&Default::default()),
                 1,
@@ -1381,7 +1381,7 @@ impl FilterPipeline {
 
         // 4. Upsample quarter-res result → half
         run_pass(
-            encoder,
+            &mut encoder,
             &textures[last_dst_idx].create_view(&Default::default()),
             &half_tex.create_view(&Default::default()),
             2,
@@ -1407,7 +1407,7 @@ impl FilterPipeline {
         });
 
         run_pass(
-            encoder,
+            &mut encoder,
             &half_tex.create_view(&Default::default()),
             &full_tex.create_view(&Default::default()),
             2,
