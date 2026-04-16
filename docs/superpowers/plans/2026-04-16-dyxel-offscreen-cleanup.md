@@ -880,64 +880,44 @@ Then wrap the existing `children_scene` building and `children_texture` acquisit
 
 - [ ] **Step 3: Add direct render path in Pass 4**
 
-After the main render pass block ends in Pass 4 (after the `}` that closes the `rp` block, around line 1928), add:
+**Important warning from spec review:** `renderer.render_to_texture` with `base_color: Color::TRANSPARENT` may clear the entire target, erasing the main scene and blurred textures already drawn in Pass 4.
+
+**Recommended implementation:** Build a single composite Vello Scene for Pass 4 that includes (1) the main scene texture as a full-screen image, (2) the blurred textures as images, and (3) the children vector content with `push_layer` clipping. Then render this composite scene to `render_target_view` in **one** `render_to_texture` call, replacing the existing manual wgpu blit/composite pipeline for the direct-render case.
+
+If that proves too invasive, a fallback is to keep the existing Pass 4 wgpu blit for the main scene and blurred textures, and only replace the `children_texture` blit with a bounding-box-sized offscreen texture (already pooled in Task 6).
+
+For the composite-scene approach, after the main render pass block ends in Pass 4 (after the `}` that closes the `rp` block, around line 1928), add logic similar to:
 
 ```rust
-        // Direct render path for children (no offscreen texture needed)
+        // Direct render path for children via composite scene
         if has_children && can_direct_render {
-            let blurred_textures = self.blurred_textures.lock().unwrap();
-            let g = shared_state.lock().unwrap();
-            let mut editors = self.editors.lock().unwrap();
+            let mut composite_scene = Scene::new();
 
-            for entry in blurred_textures.iter() {
-                if entry.deferred_children.is_empty() {
-                    continue;
-                }
+            // 1. Draw main scene texture as full-screen background image
+            //    (requires creating an Image object from tb.current().texture)
+            // 2. Draw blurred textures as images at their transforms
+            // 3. Draw children vector content with push_layer clipping
 
-                let mut child_scene = Scene::new();
-                let global_x = entry.source_rect.0 as f64;
-                let global_y = entry.source_rect.1 as f64;
-
-                for &child_id in &entry.deferred_children {
-                    render_deferred_child(
-                        child_id,
-                        &g,
-                        &mut editors,
-                        &mut child_scene,
-                        Vec2::new(global_x, global_y),
-                    );
-                }
-
-                let clip_rect = KRect::from_origin_size(
-                    (entry.source_rect.0 as f64, entry.source_rect.1 as f64),
-                    (entry.source_rect.2 as f64, entry.source_rect.3 as f64),
-                );
-                if entry.border_radius > 0.0 {
-                    let rounded = RoundedRect::from_rect(clip_rect, entry.border_radius);
-                    child_scene.push_layer(Fill::NonZero, vello::peniko::BlendMode::Normal, 1.0, entry.transform, &rounded);
-                } else {
-                    child_scene.push_layer(Fill::NonZero, vello::peniko::BlendMode::Normal, 1.0, entry.transform, &clip_rect);
-                }
-
-                if let Err(e) = renderer.render_to_texture(
-                    device,
-                    queue,
-                    &child_scene,
-                    &render_target_view,
-                    &vello::RenderParams {
-                        base_color: Color::TRANSPARENT,
-                        width: w,
-                        height: h,
-                        antialiasing_method: aa_config,
-                    },
-                ) {
-                    log::warn!("[Blur] Direct render of children failed: {:?}", e);
-                }
-
-                child_scene.pop_layer();
+            // Then render composite_scene to render_target_view
+            // with base_color: Color::BLACK or the appropriate clear color
+            if let Err(e) = renderer.render_to_texture(
+                device,
+                queue,
+                &composite_scene,
+                &render_target_view,
+                &vello::RenderParams {
+                    base_color: Color::BLACK, // or app's background color
+                    width: w,
+                    height: h,
+                    antialiasing_method: aa_config,
+                },
+            ) {
+                log::warn!("[Blur] Composite direct render failed: {:?}", e);
             }
         }
 ```
+
+Because building the exact composite scene requires Vello `Image` API details that vary by version, the implementer should inspect how `vello::peniko::Image` is constructed in the current codebase and adapt the code accordingly. If this approach is blocked by API limitations, fall back to the bounding-box offscreen path (Task 6) for P2.
 
 Make sure `aa_config` is accessible here (it was defined earlier in the render function).
 
