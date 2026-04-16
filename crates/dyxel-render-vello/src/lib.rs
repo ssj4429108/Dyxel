@@ -83,14 +83,9 @@ struct BlurredTextureEntry {
 /// and the background hasn't changed significantly.
 #[derive(Debug)]
 struct CachedBlurResult {
-    /// The cached blurred texture
-    texture: wgpu::Texture,
-    /// Cached source rectangle
+    content_hash: u64,
     source_rect: (f32, f32, f32, f32),
-    /// Frame number when this was last updated
     last_updated_frame: u64,
-    /// Hash of background content (simplified: just frame counter for now)
-    background_generation: u64,
 }
 
 /// A single slot in the triple-buffer ring.
@@ -174,6 +169,10 @@ pub struct VelloBackend {
     blur_composite_bind_group_layout: SharedMutex<Option<wgpu::BindGroupLayout>>,
     blur_composite_uniforms: SharedMutex<Option<wgpu::Buffer>>,
     blur_composite_overlay_uniforms: SharedMutex<Option<wgpu::Buffer>>,
+    // Staging buffer for zero-copy blur uniform updates
+    blur_staging_buffer: SharedMutex<Option<wgpu::Buffer>>,
+    blur_staging_alignment: SharedMutex<usize>,
+    blur_staging_offset: std::sync::atomic::AtomicUsize,
     // Blurred textures to composite (cleared each frame)
     blurred_textures: SharedMutex<Vec<BlurredTextureEntry>>,
     // Texture pool for efficient blur texture reuse
@@ -227,6 +226,9 @@ impl VelloBackend {
             blur_composite_bind_group_layout: SharedMutex::new(None),
             blur_composite_uniforms: SharedMutex::new(None),
             blur_composite_overlay_uniforms: SharedMutex::new(None),
+            blur_staging_buffer: SharedMutex::new(None),
+            blur_staging_alignment: SharedMutex::new(256),
+            blur_staging_offset: std::sync::atomic::AtomicUsize::new(0),
             blurred_textures: SharedMutex::new(Vec::new()),
             texture_pool: SharedMutex::new(None),
             blur_cache: SharedMutex::new(std::collections::HashMap::new()),
@@ -913,6 +915,17 @@ impl VelloBackend {
         *self.blur_composite_uniforms.lock().unwrap() = Some(uniform_buffer);
         *self.blur_composite_overlay_uniforms.lock().unwrap() = Some(overlay_uniform_buffer);
 
+        // Initialize 1MB staging buffer for zero-copy blur uniform updates
+        let alignment = device.limits().min_uniform_buffer_offset_alignment as usize;
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Blur Staging Buffer"),
+            size: 1024 * 1024,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        *self.blur_staging_buffer.lock().unwrap() = Some(staging_buffer);
+        *self.blur_staging_alignment.lock().unwrap() = alignment;
+
         log::debug!("[Blur] Composite pipeline initialized");
     }
 
@@ -1010,6 +1023,9 @@ impl VelloBackend {
         if let Some(ref pool) = *self.texture_pool.lock().unwrap() {
             pool.collect_returns();
         }
+
+        // Reset blur uniform staging offset for this frame
+        self.blur_staging_offset.store(0, std::sync::atomic::Ordering::Relaxed);
 
         let w = v_surface_surface.config.width;
         let h = v_surface_surface.config.height;
@@ -1387,15 +1403,48 @@ impl VelloBackend {
                     // Collect entries that need blur processing
                     let mut blur_entries: Vec<_> = Vec::new();
 
+                    // Cache-aware logic: retain entries updated within last 60 frames
+                    let current_frame = FRAME_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
+                    {
+                        let mut blur_cache = self.blur_cache.lock().unwrap();
+                        blur_cache.retain(|_, cached| {
+                            current_frame.saturating_sub(cached.last_updated_frame) <= 60
+                        });
+                    }
+
                     for entry in blurred_textures.iter_mut() {
-                        // Skip entries that don't need recalculation (use cached blur)
-                        if !should_update_blur && !entry.needs_recalculation {
+                        if entry.skipped_due_to_size {
+                            continue;
+                        }
+
+                        let content_hash = compute_blur_content_hash(
+                            entry.view_id,
+                            entry.source_rect,
+                            entry.blur_radius,
+                            entry.width,
+                            entry.height,
+                        );
+
+                        let cache_hit = {
+                            let blur_cache = self.blur_cache.lock().unwrap();
+                            if let Some(cached) = blur_cache.get(&entry.view_id) {
+                                cached.content_hash == content_hash
+                                    && cached.source_rect == entry.source_rect
+                            } else {
+                                false
+                            }
+                        };
+
+                        if cache_hit {
+                            entry.needs_recalculation = false;
                             log::debug!(
                                 "[Blur Pass 2] Skipping view_id={} - using cached blur result",
                                 entry.view_id
                             );
                             continue;
                         }
+
+                        entry.needs_recalculation = true;
 
                         // Copy the region from scene texture to blur texture
                         let (src_x, src_y, src_w, src_h) = entry.source_rect;
@@ -1517,6 +1566,31 @@ impl VelloBackend {
                             log::debug!("[Blur] Marked view_id={} as cached", entry.view_id);
                         }
                     }
+
+                    // Store/update blur_cache metadata for actually blurred entries
+                    {
+                        let mut blur_cache = self.blur_cache.lock().unwrap();
+                        for entry in blurred_textures.iter_mut() {
+                            if processed_view_ids.contains(&entry.view_id) {
+                                let content_hash = compute_blur_content_hash(
+                                    entry.view_id,
+                                    entry.source_rect,
+                                    entry.blur_radius,
+                                    entry.width,
+                                    entry.height,
+                                );
+                                blur_cache.insert(
+                                    entry.view_id,
+                                    CachedBlurResult {
+                                        content_hash,
+                                        source_rect: entry.source_rect,
+                                        last_updated_frame: current_frame,
+                                    },
+                                );
+                            }
+                        }
+                    }
+
                     stage_timer.mark("blur_render_submit");
                 }
             }
@@ -1822,13 +1896,16 @@ impl VelloBackend {
                             0.0,
                         ];
 
-                        let entry_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some(&format!("Blur Uniform Buffer {}", entry.view_id)),
-                            size: 48,
-                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-                        queue.write_buffer(&entry_uniforms, 0, bytemuck::cast_slice(&uniform_data));
+                        // Zero-copy uniform upload via shared staging buffer
+                        let staging_buffer = self.blur_staging_buffer.lock().unwrap();
+                        let staging = staging_buffer.as_ref().expect("blur staging buffer not initialized");
+                        let alignment = *self.blur_staging_alignment.lock().unwrap();
+                        let stride = alignment * 2;
+                        let base_offset = self.blur_staging_offset.fetch_add(stride, std::sync::atomic::Ordering::Relaxed);
+                        if base_offset + stride > 1024 * 1024 {
+                            log::warn!("[Blur] Staging buffer overflow, skipping remaining entries");
+                            break;
+                        }
 
                         let overlay_color = entry.overlay_color;
                         let overlay_data: [f32; 8] = [
@@ -1846,21 +1923,8 @@ impl VelloBackend {
                             },
                         ];
 
-                        let entry_overlay_uniforms =
-                            device.create_buffer(&wgpu::BufferDescriptor {
-                                label: Some(&format!(
-                                    "Blur Overlay Uniform Buffer {}",
-                                    entry.view_id
-                                )),
-                                size: 32,
-                                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                                mapped_at_creation: false,
-                            });
-                        queue.write_buffer(
-                            &entry_overlay_uniforms,
-                            0,
-                            bytemuck::cast_slice(&overlay_data),
-                        );
+                        queue.write_buffer(staging, base_offset as u64, bytemuck::cast_slice(&uniform_data));
+                        queue.write_buffer(staging, (base_offset + alignment) as u64, bytemuck::cast_slice(&overlay_data));
 
                         log::debug!("[Blur] Uniform data: {:?}", uniform_data);
                         log::debug!("[Blur] Overlay data: {:?}", overlay_data);
@@ -1884,11 +1948,19 @@ impl VelloBackend {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
-                                    resource: entry_uniforms.as_entire_binding(),
+                                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: staging,
+                                        offset: base_offset as u64,
+                                        size: Some(std::num::NonZeroU64::new(48).unwrap()),
+                                    }),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 3,
-                                    resource: entry_overlay_uniforms.as_entire_binding(),
+                                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: staging,
+                                        offset: (base_offset + alignment) as u64,
+                                        size: Some(std::num::NonZeroU64::new(32).unwrap()),
+                                    }),
                                 },
                             ],
                         });
@@ -2117,6 +2189,27 @@ impl VelloBackend {
 // =============================================================================
 // Platform Coordinate System Correction
 // =============================================================================
+
+fn compute_blur_content_hash(
+    view_id: u32,
+    source_rect: (f32, f32, f32, f32),
+    blur_radius: f32,
+    width: u32,
+    height: u32,
+) -> u64 {
+    use rustc_hash::FxHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = FxHasher::default();
+    view_id.hash(&mut hasher);
+    source_rect.0.to_bits().hash(&mut hasher);
+    source_rect.1.to_bits().hash(&mut hasher);
+    source_rect.2.to_bits().hash(&mut hasher);
+    source_rect.3.to_bits().hash(&mut hasher);
+    blur_radius.to_bits().hash(&mut hasher);
+    width.hash(&mut hasher);
+    height.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Returns the platform-specific coordinate correction transform.
 #[inline]
