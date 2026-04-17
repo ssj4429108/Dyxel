@@ -33,7 +33,7 @@ pub enum DualTrackResult {
 }
 
 /// Initialize dual-track memory from WASM side
-/// 
+///
 /// # Safety
 /// Must be called before any other dual-track operations
 pub unsafe fn init_dual_track(registry: *mut Registry, stream: *mut CommandStream) {
@@ -42,10 +42,10 @@ pub unsafe fn init_dual_track(registry: *mut Registry, stream: *mut CommandStrea
 }
 
 /// Bulk create nodes with paging
-/// 
+///
 /// This function implements "Initialization Paging" - splitting large
 /// node creation into smaller chunks to avoid buffer overflow.
-/// 
+///
 /// # Example
 /// ```rust,ignore
 /// // Create 1000 nodes in 5 pages of 200
@@ -60,17 +60,12 @@ pub unsafe fn init_dual_track(registry: *mut Registry, stream: *mut CommandStrea
 ///     signal_host_flush();
 /// }
 /// ```
-pub fn create_node_page(
-    registry: &Registry,
-    start_id: u32,
-    count: usize,
-    parent_id: u32,
-) -> usize {
+pub fn create_node_page(registry: &Registry, start_id: u32, count: usize, parent_id: u32) -> usize {
     let mut created = 0;
-    
+
     for i in 0..count {
         let node_id = start_id + i as u32;
-        
+
         let node = RegistryNode {
             id: node_id,
             parent_id,
@@ -80,60 +75,58 @@ pub fn create_node_page(
             style_idx: 0,
             _reserved: 0,
         };
-        
+
         unsafe {
             if registry.add_node(node).is_none() {
                 break; // Registry full
             }
         }
-        
+
         created += 1;
     }
-    
+
     created
 }
 
 /// Reserve space in command stream with backpressure handling
-/// 
+///
 /// This function implements "Explicit Backpressure" - if the buffer
 /// is nearly full, it will wait (spin) for host to consume data.
-/// 
+///
 /// # Returns
 /// - `Ok(position)` if space reserved successfully
 /// - `Err(DualTrackResult)` if timeout or stream full
-pub fn reserve_space(
-    stream: &CommandStream,
-    size: usize,
-) -> Result<usize, DualTrackResult> {
+pub fn reserve_space(stream: &CommandStream, size: usize) -> Result<usize, DualTrackResult> {
     // Fast path: check if space available without waiting
     if stream.free_space() as usize >= size + SAFETY_MARGIN {
         return unsafe {
-            stream.reserve_space(size)
+            stream
+                .reserve_space(size)
                 .ok_or(DualTrackResult::CommandStreamFull)
         };
     }
-    
+
     // Slow path: wait for host with timeout
     let start_time = get_time_ms();
-    
+
     loop {
         // Try to reserve
         if let Some(pos) = unsafe { stream.reserve_space(size) } {
             return Ok(pos);
         }
-        
+
         // Check timeout
         if get_time_ms() - start_time > RESERVE_TIMEOUT_MS {
             return Err(DualTrackResult::Timeout);
         }
-        
+
         // Yield to host (in real WASM, this might be a host call)
         spin_yield();
     }
 }
 
 /// Write a set color command
-/// 
+///
 /// # Example
 /// ```rust,ignore
 /// let pos = reserve_space(stream, 5)?;
@@ -154,7 +147,7 @@ pub fn write_set_color(
         g,
         b,
     ];
-    
+
     unsafe { stream.write_command(OP_SET_COLOR, &data, pos) }
 }
 
@@ -174,12 +167,12 @@ pub fn write_bulk_create(
         (parent_id & 0xFF) as u8,
         ((parent_id >> 8) & 0xFF) as u8,
     ];
-    
+
     unsafe { stream.write_command(OP_BULK_CREATE, &data, pos) }
 }
 
 /// Commit all pending commands
-/// 
+///
 /// This increments the ticket, signaling host that new data is ready
 pub fn commit_commands(stream: &CommandStream) {
     stream.commit();
@@ -200,16 +193,16 @@ pub fn validate_dual_track(registry: &Registry, stream: &CommandStream) -> DualT
     if !registry.check_sentinel() || !stream.check_sentinel() {
         return DualTrackResult::SentinelCorrupted;
     }
-    
+
     if !registry.is_valid() || !stream.is_valid() {
         return DualTrackResult::SentinelCorrupted;
     }
-    
+
     DualTrackResult::Ok
 }
 
 /// Initialize 1000 nodes using paging
-/// 
+///
 /// This is the main entry point for stress test initialization
 pub fn init_1000_nodes_paged(
     registry: &Registry,
@@ -218,33 +211,33 @@ pub fn init_1000_nodes_paged(
 ) -> Result<(), DualTrackResult> {
     const TOTAL_NODES: usize = 1000;
     const PAGES: usize = (TOTAL_NODES + PAGE_SIZE - 1) / PAGE_SIZE;
-    
+
     INIT_TOTAL_PAGES.store(PAGES as u32, Ordering::Relaxed);
-    
+
     for page in 0..PAGES {
         let start_id = root_id + 1 + (page * PAGE_SIZE) as u32;
         let remaining = TOTAL_NODES - (page * PAGE_SIZE);
         let count = remaining.min(PAGE_SIZE);
-        
+
         // Create nodes in registry
         let created = create_node_page(registry, start_id, count, root_id);
         if created < count {
             return Err(DualTrackResult::RegistryFull);
         }
-        
+
         // Also send bulk create command for Host compatibility
         let cmd_size = 7;
         let pos = reserve_space(stream, cmd_size)?;
         write_bulk_create(stream, start_id, created as u16, root_id, pos);
         commit_commands(stream);
-        
+
         // Update page counter
         INIT_PAGE.store(page as u32 + 1, Ordering::Relaxed);
-        
+
         // Signal host to process (in real implementation, this would trigger render)
         // For now, we just commit and continue
     }
-    
+
     Ok(())
 }
 
@@ -252,7 +245,7 @@ pub fn init_1000_nodes_paged(
 pub fn get_init_progress() -> u32 {
     let current = INIT_PAGE.load(Ordering::Relaxed);
     let total = INIT_TOTAL_PAGES.load(Ordering::Relaxed);
-    
+
     if total == 0 {
         0
     } else {
@@ -261,7 +254,7 @@ pub fn get_init_progress() -> u32 {
 }
 
 /// Update 1000 node colors with backpressure awareness
-/// 
+///
 /// This implements adaptive update rate based on buffer pressure
 pub fn update_1000_colors(
     stream: &CommandStream,
@@ -270,29 +263,29 @@ pub fn update_1000_colors(
 ) -> Result<u32, DualTrackResult> {
     // Determine update stride based on backpressure
     let stride = match check_backpressure(stream) {
-        ThrottleLevel::Normal => 1,      // Update all
-        ThrottleLevel::Elevated => 2,    // Update 1/2
-        ThrottleLevel::Warning => 5,     // Update 1/5
-        ThrottleLevel::Critical => 10,   // Update 1/10
+        ThrottleLevel::Normal => 1,    // Update all
+        ThrottleLevel::Elevated => 2,  // Update 1/2
+        ThrottleLevel::Warning => 5,   // Update 1/5
+        ThrottleLevel::Critical => 10, // Update 1/10
     };
-    
+
     let time = frame as f32 * 0.05;
     let mut updated = 0;
-    
+
     for i in (0..1000).step_by(stride) {
         let node_id = start_id + i as u32;
-        
+
         // Calculate rainbow color
         let phase = i as f32 * 0.05;
         let hue = ((time * 30.0 + phase * 100.0) % 360.0) as u32;
         let (r, g, b) = hsv_to_rgb(hue, 0.8, 0.9);
-        
+
         // Reserve space and write command
         let pos = reserve_space(stream, 5)?;
         write_set_color(stream, node_id, r, g, b, pos);
         updated += 1;
     }
-    
+
     commit_commands(stream);
     Ok(updated)
 }
@@ -336,7 +329,7 @@ fn hsv_to_rgb(h: u32, s: f32, v: f32) -> (u8, u8, u8) {
     let c = v * s;
     let x = c * (1.0 - ((h as f32 / 60.0) % 2.0 - 1.0).abs());
     let m = v - c;
-    
+
     let (r, g, b) = match h / 60 {
         0 => (c, x, 0.0),
         1 => (x, c, 0.0),
@@ -345,7 +338,7 @@ fn hsv_to_rgb(h: u32, s: f32, v: f32) -> (u8, u8, u8) {
         4 => (x, 0.0, c),
         _ => (c, 0.0, x),
     };
-    
+
     (
         ((r + m) * 255.0) as u8,
         ((g + m) * 255.0) as u8,
@@ -354,7 +347,7 @@ fn hsv_to_rgb(h: u32, s: f32, v: f32) -> (u8, u8, u8) {
 }
 
 /// Signal host to flush (placeholder)
-/// 
+///
 /// In real implementation, this would call host function
 pub fn signal_host_flush() {
     // Placeholder - actual implementation depends on host interface
@@ -368,14 +361,14 @@ pub fn signal_host_flush() {
 pub fn init_stress_test_dual_track() -> Result<(), &'static str> {
     // In real implementation, get pointers from shared memory
     // For now, this is a placeholder
-    
+
     // unsafe {
     //     let registry = get_registry_ptr();
     //     let stream = get_command_stream_ptr();
     //     init_dual_track(registry, stream);
     //     init_1000_nodes_paged(&*registry, &*stream, 0)?;
     // }
-    
+
     Ok(())
 }
 
@@ -388,25 +381,25 @@ pub fn tick_stress_test(_frame: u32) -> Result<u32, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_hsv_to_rgb() {
         let (r, g, b) = hsv_to_rgb(0, 1.0, 1.0); // Red
         assert!(r > 250);
         assert!(g < 10);
         assert!(b < 10);
-        
+
         let (r, g, b) = hsv_to_rgb(120, 1.0, 1.0); // Green
         assert!(r < 10);
         assert!(g > 250);
         assert!(b < 10);
-        
+
         let (r, g, b) = hsv_to_rgb(240, 1.0, 1.0); // Blue
         assert!(r < 10);
         assert!(g < 10);
         assert!(b > 250);
     }
-    
+
     #[test]
     fn test_backpressure_levels() {
         // This would need actual CommandStream in test

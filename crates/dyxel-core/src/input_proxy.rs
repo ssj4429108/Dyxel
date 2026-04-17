@@ -8,9 +8,7 @@
 use kurbo::{Affine, Point, Rect as KurboRect, Vec2};
 use std::collections::HashMap;
 
-use dyxel_shared::{
-    InputEventType, RawInputEvent, SharedBuffer,
-};
+use dyxel_shared::{InputEventType, RawInputEvent, SharedBuffer};
 
 use crate::state::SharedState;
 
@@ -123,28 +121,13 @@ impl InputProxy {
         // 根据事件类型处理
         match native_type {
             NativeInputType::TouchDown => {
-                self.handle_pointer_down(
-                    pointer_id,
-                    world_pos,
-                    pressure,
-                    shared_buffer,
-                    state,
-                );
+                self.handle_pointer_down(pointer_id, world_pos, pressure, shared_buffer, state);
             }
             NativeInputType::TouchMove => {
-                self.handle_pointer_move(
-                    pointer_id,
-                    world_pos,
-                    pressure,
-                    shared_buffer,
-                );
+                self.handle_pointer_move(pointer_id, world_pos, pressure, shared_buffer);
             }
             NativeInputType::TouchUp => {
-                self.handle_pointer_up(
-                    pointer_id,
-                    world_pos,
-                    shared_buffer,
-                );
+                self.handle_pointer_up(pointer_id, world_pos, shared_buffer);
             }
             NativeInputType::TouchCancel => {
                 self.handle_pointer_cancel(pointer_id, shared_buffer);
@@ -172,9 +155,7 @@ impl InputProxy {
         state: &SharedState,
     ) {
         // Hit detection (with hot-area expansion)
-        let target_id = self
-            .hit_test_with_expansion(world_pos, state)
-            .unwrap_or(0);
+        let target_id = self.hit_test_with_expansion(world_pos, state).unwrap_or(0);
 
         // 记录指针状态
         let pointer_state = PointerState {
@@ -288,11 +269,7 @@ impl InputProxy {
     }
 
     /// 处理指针取消
-    fn handle_pointer_cancel(
-        &mut self,
-        pointer_id: u32,
-        shared_buffer: &mut SharedBuffer,
-    ) {
+    fn handle_pointer_cancel(&mut self, pointer_id: u32, shared_buffer: &mut SharedBuffer) {
         let Some(state) = self.pointer_states.remove(&pointer_id) else {
             return;
         };
@@ -324,9 +301,7 @@ impl InputProxy {
         shared_buffer: &mut SharedBuffer,
         state: &SharedState,
     ) {
-        let target_id = self
-            .hit_test_with_expansion(world_pos, state)
-            .unwrap_or(0);
+        let target_id = self.hit_test_with_expansion(world_pos, state).unwrap_or(0);
 
         let event = RawInputEvent {
             timestamp: self.current_time,
@@ -354,18 +329,9 @@ impl InputProxy {
     /// Hot-area expansion hit detection
     ///
     /// Auto-expand hot-area for small nodes to improve mobile tap accuracy
-    fn hit_test_with_expansion(
-        &self,
-        point: Point,
-        state: &SharedState,
-    ) -> Option<u32> {
+    fn hit_test_with_expansion(&self, point: Point, state: &SharedState) -> Option<u32> {
         let root_id = state.root_id?;
-        self.hit_test_recursive(
-            root_id,
-            point,
-            state,
-            Vec2::ZERO,
-        )
+        self.hit_test_recursive(root_id, point, state, Vec2::ZERO)
     }
 
     /// 递归Hit detection (with hot-area expansion)
@@ -379,8 +345,7 @@ impl InputProxy {
         let node = state.nodes.get(&id)?;
         let layout = state.taffy.layout(node.taffy_node).ok()?;
 
-        let global_pos = parent_pos
-            + Vec2::new(layout.location.x as f64, layout.location.y as f64);
+        let global_pos = parent_pos + Vec2::new(layout.location.x as f64, layout.location.y as f64);
 
         // Calculate hit rectangle with hot-area expansion
         let expansion = (self.config.hit_area_expansion * self.config.dpi_scale) as f64;
@@ -396,9 +361,7 @@ impl InputProxy {
 
         // 优先检查子节点（从后往前，顶层优先）
         for &child_id in node.children.iter().rev() {
-            if let Some(hit) =
-                self.hit_test_recursive(child_id, point, state, global_pos)
-            {
+            if let Some(hit) = self.hit_test_recursive(child_id, point, state, global_pos) {
                 return Some(hit);
             }
         }

@@ -3,24 +3,44 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Mutex as StdMutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use tokio::sync::Notify;
 
-use crate::engine::{setup_engine, LogicState, RenderState};
+use crate::engine::{LogicState, RenderState, setup_engine};
 use crate::platform::{SafeWindowHandle, SurfaceId};
 use crate::renderer::render_frame;
 use crate::state::SharedState;
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
 use dyxel_render_api::{DeviceHandle, QueueHandle, SharedMutex, SharedPtr};
+#[cfg(not(target_arch = "wasm32"))]
+use dyxel_render_vello::VelloBackend;
+
+#[cfg(not(target_arch = "wasm32"))]
+const LOGIC_FRAME_WAIT_TIMEOUT: Duration = Duration::from_millis(33);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wait_for_render_or_vsync(render_complete_rx: &mpsc::Receiver<()>) {
+    let _ = render_complete_rx.recv_timeout(LOGIC_FRAME_WAIT_TIMEOUT);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn render_needs_retry(render_state: &RenderState) -> bool {
+    render_state
+        .backend
+        .as_any()
+        .downcast_ref::<VelloBackend>()
+        .map(|backend| backend.is_renderer_loading() && !backend.is_renderer_ready())
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
@@ -617,6 +637,10 @@ impl DyxelHost {
         let (render_tx, render_rx) = mpsc::channel();
         #[cfg(not(target_arch = "wasm32"))]
         let (render_complete_tx, render_complete_rx) = mpsc::channel(); // VSync signal: Render -> Logic
+        #[cfg(not(target_arch = "wasm32"))]
+        let is_rendering = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        #[cfg(not(target_arch = "wasm32"))]
+        let render_jank_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         // Create shared state (used directly in WASM, managed by threads in native)
         let shared_state = SharedPtr::new(SharedMutex::new(crate::state::SharedState::new()));
@@ -642,6 +666,7 @@ impl DyxelHost {
         {
             let render_tx_for_logic = render_tx.clone();
             let render_complete_rx = render_complete_rx; // VSync signal receiver
+            let is_rendering_for_logic = is_rendering.clone();
 
             // 1. Logic Thread (Thinker)
             thread::Builder::new()
@@ -674,6 +699,8 @@ impl DyxelHost {
                                         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
                                         {
                                             use crate::runtime::{process_commands, sync_layout_to_wasm, is_render_needed, clear_dirty_tracker};
+
+                                            let logic_tick_start = std::time::Instant::now();
 
                                             // Execute WASM tick (produces commands)
                                             log::debug!("LogicThread: acquiring tick_fn lock...");
@@ -730,25 +757,29 @@ impl DyxelHost {
                                                     .map(|dt| dt.iter_dirty_nodes().count())
                                                     .unwrap_or(0);
                                                 if dirty_count > 0 {
-
-                                                }
-                                                let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
-
-                                                // VSync: Wait for render completion before next tick
-                                                // This ensures Logic and Render are synchronized
-                                                match render_complete_rx.recv_timeout(Duration::from_millis(33)) {
-                                                    Ok(_) => {}, // Render completed, continue
-                                                    Err(_) => {
-                                                        // Timeout - render may be slow, continue anyway
-                                                        log::warn!("LogicThread: Render timeout, continuing");
+                                                    // Core fix: if Render Thread is still busy, skip this frame's draw request (frame skip)
+                                                    if !is_rendering_for_logic.load(std::sync::atomic::Ordering::Acquire) {
+                                                        let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
+                                                    } else {
+                                                        let jank = render_jank_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                                        if jank % 60 == 1 {
+                                                            log::warn!("LogicThread: RenderJank={}, skipping RequestDraw because render is still in progress", jank);
+                                                        }
                                                     }
+                                                } else {
+                                                    let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
                                                 }
-
                                                 clear_dirty_tracker();
-                                            } else {
-                                                // No render needed, wait for next VSync signal from Render Thread
-                                                // This keeps Logic Thread synchronized with display refresh
-                                                let _ = render_complete_rx.recv_timeout(Duration::from_millis(33));
+                                            }
+
+                                            // Wait for the render/VSync boundary before the next tick.
+                                            // Without this wait the logic thread busy-loops, starving first frame presentation.
+                                            wait_for_render_or_vsync(&render_complete_rx);
+
+                                            // DIAG: record LogicTime covering the full WASM tick lifecycle
+                                            let logic_time_ms = logic_tick_start.elapsed().as_secs_f64() * 1000.0;
+                                            if logic_time_ms > 8.0 {
+                                                log::info!("DIAG LogicTime={:.2}ms RenderJank={}", logic_time_ms, render_jank_count.load(std::sync::atomic::Ordering::Relaxed));
                                             }
                                         }
                                     }
@@ -797,6 +828,7 @@ impl DyxelHost {
                                             log::error!("LogicThread: LoadWasm failed: {}", e);
                                         } else {
                                             log::info!("LogicThread: LoadWasm completed successfully");
+                                            let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
                                         }
                                         log::info!("LogicThread: LoadWasm block done");
                                     } else {
@@ -830,6 +862,8 @@ impl DyxelHost {
             let active_surface_ptr = active_surface_id.clone();
             let notify_ptr = engine_ready_notify.clone();
             let render_complete_tx = render_complete_tx.clone(); // VSync signal sender
+            let render_tx_for_retry = render_tx.clone();
+            let is_rendering_for_render = is_rendering.clone();
 
             thread::Builder::new()
                 .name("DyxelRender".into())
@@ -837,7 +871,7 @@ impl DyxelHost {
 
                     let mut render_opt: Option<RenderState> = None;
                     let mut lifecycle = Lifecycle::Stopped;
-                    let mut continuous_render = true; // 默认开启连续渲染模式（最大性能）
+                    let mut continuous_render = !cfg!(target_os = "android");
                     let mut pacer: Option<crate::pacer::FramePacer> = None;
                     let mut pending_vblank_waiter: Option<Arc<dyn crate::pacer::VBlankWaiter>> = None;
 
@@ -1001,6 +1035,9 @@ impl DyxelHost {
                                                 *active_surface_ptr.lock_guard().unwrap() =
                                                     Some(SurfaceId(nid));
                                                 lifecycle = Lifecycle::Running;
+                                                if !continuous_render {
+                                                    draw_requested = true;
+                                                }
                                             }
                                             Err(e) => log::error!(
                                                 "RenderThread: Failed to create surface: {}",
@@ -1068,6 +1105,8 @@ impl DyxelHost {
                                 interval
                             });
 
+                            is_rendering_for_render.store(true, std::sync::atomic::Ordering::Release);
+
                             let active_id = *active_surface_ptr.lock_guard().unwrap();
                             if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
                                 let mut surfs = surfaces_ptr.lock_guard().unwrap();
@@ -1077,6 +1116,9 @@ impl DyxelHost {
                                     }
                                     r.backend.set_frame_timing(pacer_wait_ms, frame_interval_ms);
                                     render_frame(r, s.as_mut());
+                                    if !continuous_render && render_needs_retry(r) {
+                                        let _ = render_tx_for_retry.send(RenderMessage::RequestDraw);
+                                    }
                                     // Notify pacer that frame was presented
                                     if let Some(ref mut p) = pacer {
                                         p.on_frame_submitted();
@@ -1088,6 +1130,8 @@ impl DyxelHost {
                             } else {
                                 log::trace!("RenderThread: Draw ignored (no active surface or no render_opt)");
                             }
+
+                            is_rendering_for_render.store(false, std::sync::atomic::Ordering::Release);
                         }
                     }
                 })
@@ -1245,6 +1289,10 @@ impl DyxelHost {
 
         #[cfg(target_os = "android")]
         {
+            self.set_continuous_render(false);
+            self.set_target_fps(60.0);
+            self.set_vblank_waiter(crate::android_vblank::AndroidVBlankWaiter::new());
+
             let sh = SharedPtr::new(SafeWindowHandle::new_android(_surface_ptr));
             // Create wgpu::SurfaceTarget and wrap it in SurfaceTargetHandle
             let wgpu_target: vello::wgpu::SurfaceTarget<'static> = sh.clone().into();
@@ -1311,6 +1359,26 @@ impl DyxelHost {
                 Err(e) => log::error!("toggle_perf_overlay: Failed to send: {:?}", e),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_render_or_vsync;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn wait_for_render_or_vsync_blocks_without_signal() {
+        let (_tx, rx) = mpsc::channel();
+        let start = Instant::now();
+
+        wait_for_render_or_vsync(&rx);
+
+        assert!(
+            start.elapsed() >= Duration::from_millis(25),
+            "logic thread returned too early without waiting for frame completion"
+        );
     }
 }
 

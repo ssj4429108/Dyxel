@@ -46,7 +46,7 @@ macro_rules! define_protocol {
                     let mut offset = $dol buffer.command_len as usize;
                     let mut data_size = 0;
                     $dol( data_size += std::mem::size_of_val(&$dol val); )*
-                    
+
                     if offset + 1 + data_size <= $crate::MAX_COMMAND_BYTES {
                         $dol buffer.command_data[offset] = $crate::OpCode::$dol op as u8;
                         offset += 1;
@@ -104,21 +104,21 @@ define_protocol! {
     [13] SetPadding(id: u32, t: f32, r: f32, b: f32, l: f32),
     [14] SetFlexWrap(id: u32, wrap: u32),
     [15] SetAlignContent(id: u32, ac: u32),
-    
+
     // === Interaction & Events (16-31) ===
     [16] AttachClick(id: u32),
-    [17] SetText(id: u32, len: u32), 
+    [17] SetText(id: u32, len: u32),
     [18] AddChild(pid: u32, cid: u32),
     [19] SetSemantics(id: u32, role: u32),
     [20] SetLabel(id: u32, len: u32),
     [21] UpdateLayout(),
     [22] SelectNode(id: u32),
-    
+
     // === Compact Operations (23-25) ===
     [23] SetColorCompact(r: u8, g: u8, b: u8, a: u8),
     [24] SetWidthCompact(dt: u8, v: f32),
     [25] SetHeightCompact(dt: u8, v: f32),
-    
+
     // === Gesture Handler Registration (28-31) ===
     // WASM notifies Host which nodes have gesture handlers
     // Tap handler with configurable count (1=single, 2=double, 3=triple, etc.)
@@ -127,7 +127,7 @@ define_protocol! {
     [30] RegisterPanHandler(id: u32),
     // [31] Reserved - was RegisterDoubleTapHandler, now merged into RegisterTapHandler
     // Note: UnregisterGestureHandler moved to 90 to avoid conflict
-    
+
     // === Rich Text Operations (32-47) ===
     [32] CreateTextNode(id: u32),
     [33] CreateSpanNode(id: u32),
@@ -152,13 +152,13 @@ define_protocol! {
     [49] EndTransaction(seq_id: u32),
     [50] AbortTransaction(seq_id: u32),
     [51] SetNodeDirty(id: u32, fields: u8),
-    
+
     // === LayoutRegistry Operations (52-55) - NEW! ===
     [52] GetLayout(id: u32),
     [53] IsLayoutDirty(id: u32),
     [54] ClearLayoutDirty(id: u32),
     [55] GetLayoutBatch(start_id: u32, count: u32),
-    
+
     // === Gesture Events (56-63) - Legacy, bubble in WASM ===
     [56] GestureTap(node_id: u32, x: f32, y: f32),
     [57] GestureDoubleTap(node_id: u32, x: f32, y: f32),
@@ -168,7 +168,7 @@ define_protocol! {
     [61] GesturePanUpdate(node_id: u32, x: f32, y: f32, delta_x: f32, delta_y: f32),
     [62] GesturePanEnd(node_id: u32, x: f32, y: f32, velocity_x: f32, velocity_y: f32),
     [63] GestureCancel(node_id: u32),
-    
+
     // === Direct Gesture Events (72-79) - Host resolves bubbling ===
     // These events have already been resolved by Host using HandlerRegistry
     // WASM should call the handler directly without bubbling
@@ -212,7 +212,10 @@ define_protocol! {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LayoutResult {
-    pub x: f32, pub y: f32, pub width: f32, pub height: f32,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 pub const MAX_COMMAND_BYTES: usize = 1024 * 64;
@@ -235,13 +238,16 @@ pub struct NodeHandle {
 
 impl NodeHandle {
     /// 无效句柄
-    pub const INVALID: Self = Self { slot: u32::MAX, generation: 0 };
-    
+    pub const INVALID: Self = Self {
+        slot: u32::MAX,
+        generation: 0,
+    };
+
     /// 创建新句柄
     pub const fn new(slot: u32, generation: u32) -> Self {
         Self { slot, generation }
     }
-    
+
     /// 检查是否有效
     pub fn is_valid(&self) -> bool {
         self.slot != u32::MAX
@@ -284,19 +290,19 @@ impl TransactionFlags {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirtyField {
     None = 0,
-    Position = 1 << 0,  // x, y changed
-    Size = 1 << 1,      // width, height changed
-    Style = 1 << 2,     // color, border, etc.
-    Text = 1 << 3,      // text content changed
-    Children = 1 << 4,  // child add/remove
-    Layout = 1 << 5,    // flex properties changed
+    Position = 1 << 0, // x, y changed
+    Size = 1 << 1,     // width, height changed
+    Style = 1 << 2,    // color, border, etc.
+    Text = 1 << 3,     // text content changed
+    Children = 1 << 4, // child add/remove
+    Layout = 1 << 5,   // flex properties changed
 }
 
 impl DirtyField {
     pub fn from_bits(bits: u8) -> Self {
         Self::from_bits_truncate(bits)
     }
-    
+
     pub fn from_bits_truncate(bits: u8) -> Self {
         match bits {
             0 => Self::None,
@@ -309,11 +315,11 @@ impl DirtyField {
             _ => Self::None,
         }
     }
-    
+
     pub fn bits(&self) -> u8 {
         *self as u8
     }
-    
+
     pub fn contains(&self, other: Self) -> bool {
         self.bits() & other.bits() != 0
     }
@@ -339,57 +345,64 @@ impl DirtyTracker {
             any_dirty: false,
         }
     }
-    
+
     /// Mark a node as dirty
     pub fn mark_dirty(&mut self, node_id: u32, fields: DirtyField) {
-        if node_id as usize >= 1024 { return; }
-        
+        if node_id as usize >= 1024 {
+            return;
+        }
+
         let word_idx = (node_id / 32) as usize;
         let bit_idx = node_id % 32;
         self.node_bitset[word_idx] |= 1 << bit_idx;
-        
+
         // Accumulate dirty fields as raw bits to preserve combinations
         let field_bits = fields.bits();
         self.node_dirty_fields
             .entry(node_id)
             .and_modify(|f| *f |= field_bits)
             .or_insert(field_bits);
-        
+
         self.any_dirty = true;
     }
-    
+
     /// Check if a node is dirty
     pub fn is_node_dirty(&self, node_id: u32) -> bool {
-        if node_id as usize >= 1024 { return false; }
+        if node_id as usize >= 1024 {
+            return false;
+        }
         let word_idx = (node_id / 32) as usize;
         let bit_idx = node_id % 32;
         (self.node_bitset[word_idx] >> bit_idx) & 1 != 0
     }
-    
+
     /// Check if any nodes are dirty
     pub fn has_dirty(&self) -> bool {
         self.any_dirty
     }
-    
+
     /// Clear all dirty flags
     pub fn clear(&mut self) {
         self.node_bitset = [0; 32];
         self.node_dirty_fields.clear();
         self.any_dirty = false;
     }
-    
+
     /// Iterate over all dirty node IDs
     pub fn iter_dirty_nodes(&self) -> impl Iterator<Item = u32> + '_ {
-        self.node_bitset.iter().enumerate().flat_map(|(word_idx, &word)| {
-            let mut nodes = Vec::new();
-            let mut w = word;
-            while w != 0 {
-                let bit = w.trailing_zeros();
-                nodes.push((word_idx as u32 * 32) + bit);
-                w &= w - 1;  // Clear lowest set bit
-            }
-            nodes.into_iter()
-        })
+        self.node_bitset
+            .iter()
+            .enumerate()
+            .flat_map(|(word_idx, &word)| {
+                let mut nodes = Vec::new();
+                let mut w = word;
+                while w != 0 {
+                    let bit = w.trailing_zeros();
+                    nodes.push((word_idx as u32 * 32) + bit);
+                    w &= w - 1; // Clear lowest set bit
+                }
+                nodes.into_iter()
+            })
     }
 }
 
@@ -406,7 +419,7 @@ pub struct SharedBuffer {
     /// 代际数组（与 layout_results 一一对应）
     pub generations: [u32; MAX_CAPACITY],
     /// 脏标记（位图，大小取决于 capacity）
-    pub dirty_mask: [u32; 128],  // 4096 / 32 = 128
+    pub dirty_mask: [u32; 128], // 4096 / 32 = 128
     /// Input event ring buffer (for Input Proxy)
     pub input_buffer: crate::input::InputBuffer,
     /// Device information (read by WASM)

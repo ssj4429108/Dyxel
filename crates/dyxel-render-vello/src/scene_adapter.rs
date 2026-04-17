@@ -10,7 +10,7 @@ use dyxel_render_api::{Scene as SceneTrait, Transform};
 use dyxel_shared::filters::{BlendMode as DyxelBlendMode, Filter, Rect};
 use kurbo::{Affine, Rect as KRect, RoundedRect};
 use vello::Scene;
-use vello::peniko::{BlendMode as PenikoBlendMode, Color, Fill, Mix, Compose};
+use vello::peniko::{BlendMode as PenikoBlendMode, Color, Compose, Fill, Mix};
 
 /// Adapter that wraps vello::Scene and implements dyxel_render_api::Scene trait
 pub struct VelloSceneAdapter<'a> {
@@ -58,15 +58,21 @@ impl<'a> VelloSceneAdapter<'a> {
     /// Convert Transform to Affine
     fn transform_to_affine(transform: Transform) -> Affine {
         Affine::new([
-            transform.xx, transform.yx,
-            transform.xy, transform.yy,
-            transform.x0, transform.y0,
+            transform.xx,
+            transform.yx,
+            transform.xy,
+            transform.yy,
+            transform.x0,
+            transform.y0,
         ])
     }
 
     /// Get the current transform (last pushed or identity)
     fn current_transform(&self) -> Affine {
-        self.transform_stack.last().copied().unwrap_or(Affine::IDENTITY)
+        self.transform_stack
+            .last()
+            .copied()
+            .unwrap_or(Affine::IDENTITY)
     }
 }
 
@@ -74,14 +80,34 @@ impl<'a> SceneTrait for VelloSceneAdapter<'a> {
     fn fill_rect(&mut self, x: f64, y: f64, width: f64, height: f64, color: [u8; 4]) {
         let rect = KRect::from_origin_size((x, y), (width, height));
         let peniko_color = Color::from_rgba8(color[0], color[1], color[2], color[3]);
-        self.scene.fill(Fill::NonZero, self.current_transform(), peniko_color, None, &rect);
+        self.scene.fill(
+            Fill::NonZero,
+            self.current_transform(),
+            peniko_color,
+            None,
+            &rect,
+        );
     }
 
-    fn fill_rounded_rect(&mut self, x: f64, y: f64, width: f64, height: f64, radius: f64, color: [u8; 4]) {
+    fn fill_rounded_rect(
+        &mut self,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        radius: f64,
+        color: [u8; 4],
+    ) {
         let rect = KRect::from_origin_size((x, y), (width, height));
         let rounded = RoundedRect::from_rect(rect, radius);
         let peniko_color = Color::from_rgba8(color[0], color[1], color[2], color[3]);
-        self.scene.fill(Fill::NonZero, self.current_transform(), peniko_color, None, &rounded);
+        self.scene.fill(
+            Fill::NonZero,
+            self.current_transform(),
+            peniko_color,
+            None,
+            &rounded,
+        );
     }
 
     fn push_transform(&mut self, transform: Transform) {
@@ -123,12 +149,24 @@ impl<'a> SceneTrait for VelloSceneAdapter<'a> {
                 (clip_rect.width as f64, clip_rect.height as f64),
             );
             // Vello's push_layer with clip
-            self.scene.push_layer(Fill::NonZero, peniko_blend, alpha.clamp(0.0, 1.0), transform, &krect);
+            self.scene.push_layer(
+                Fill::NonZero,
+                peniko_blend,
+                alpha.clamp(0.0, 1.0),
+                transform,
+                &krect,
+            );
         } else {
             // No clip - use full screen clip (empty rect means no geometric clip)
             // Vello requires a shape, so we use a large rect
             let full_rect = KRect::from_origin_size((-1e6, -1e6), (2e6, 2e6));
-            self.scene.push_layer(Fill::NonZero, peniko_blend, alpha.clamp(0.0, 1.0), transform, &full_rect);
+            self.scene.push_layer(
+                Fill::NonZero,
+                peniko_blend,
+                alpha.clamp(0.0, 1.0),
+                transform,
+                &full_rect,
+            );
         }
 
         // Note: Filter effects (Blur, DropShadow) in Vello are handled differently

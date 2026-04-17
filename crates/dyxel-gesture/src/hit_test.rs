@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Hit Testing
-//! 
+//!
 //! Determines which UI node is under a pointer position.
 
 /// Result of a hit test
@@ -41,16 +41,16 @@ impl HitTestResult {
 }
 
 /// Trait for hit testing implementations
-/// 
+///
 /// The Host layer provides an implementation that uses the layout tree
 pub trait HitTester: Send {
     /// Hit test at the given position
-    /// 
+    ///
     /// Returns the top-most node under the position (in z-order)
     fn hit_test(&self, x: f32, y: f32) -> HitTestResult;
-    
+
     /// Sync with data source (for incremental spatial index)
-    /// 
+    ///
     /// Default implementation does nothing. Spatial index implementations
     /// should update their internal structures here.
     fn sync(&mut self) {}
@@ -66,7 +66,7 @@ impl HitTester for NoOpHitTester {
 }
 
 /// Simple hit tester based on a list of rectangles
-/// 
+///
 /// Used for testing and simple use cases
 pub struct RectHitTester {
     /// List of (node_id, x, y, width, height)
@@ -100,7 +100,7 @@ impl HitTester for RectHitTester {
 }
 
 /// Layout-based hit tester using SharedBuffer
-/// 
+///
 /// This is the production implementation that uses the layout results
 /// from the SharedBuffer.
 pub struct LayoutHitTester {
@@ -114,7 +114,7 @@ unsafe impl Send for LayoutHitTester {}
 
 impl LayoutHitTester {
     /// Create a new layout hit tester
-    /// 
+    ///
     /// # Safety
     /// The pointer must be valid for the lifetime of this hit tester
     pub unsafe fn new(shared_buffer_ptr: *const dyxel_shared::SharedBuffer) -> Self {
@@ -136,30 +136,26 @@ impl HitTester for LayoutHitTester {
     fn hit_test(&self, x: f32, y: f32) -> HitTestResult {
         unsafe {
             let max_id = self.get_max_node_id();
-            
+
             // Check nodes from highest ID to lowest (z-order)
             for id in (1..=max_id).rev() {
                 let layout = self.get_layout(id);
-                
+
                 // Skip nodes with zero size
                 if layout.width <= 0.0 || layout.height <= 0.0 {
                     continue;
                 }
 
                 // Check if point is inside bounds
-                if x >= layout.x 
+                if x >= layout.x
                     && x <= layout.x + layout.width
-                    && y >= layout.y 
-                    && y <= layout.y + layout.height 
+                    && y >= layout.y
+                    && y <= layout.y + layout.height
                 {
-                    return HitTestResult::hit(
-                        id,
-                        x - layout.x,
-                        y - layout.y,
-                    );
+                    return HitTestResult::hit(id, x - layout.x, y - layout.y);
                 }
             }
-            
+
             HitTestResult::none()
         }
     }

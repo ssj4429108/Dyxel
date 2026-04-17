@@ -125,7 +125,7 @@ impl From<&str> for SizeUnit {
         if s == "auto" {
             SizeUnit::Auto
         } else if s.ends_with('%') {
-            SizeUnit::Percent(s[..s.len()-1].parse().unwrap_or(0.0))
+            SizeUnit::Percent(s[..s.len() - 1].parse().unwrap_or(0.0))
         } else {
             SizeUnit::Lp(s.parse().unwrap_or(0.0))
         }
@@ -234,10 +234,10 @@ mod tests {
 
         // LP to PX
         assert_eq!(device.lp_to_px(100.0), 200.0);
-        
+
         // PX to LP
         assert_eq!(device.px_to_lp(200.0), 100.0);
-        
+
         // Font scaling
         assert_eq!(device.scale_font(16.0), 16.0);
     }
@@ -252,7 +252,7 @@ mod tests {
 
         // LP input
         assert_eq!(SizeUnit::Lp(100.0).to_px(&device), 300.0);
-        
+
         // PX input
         assert_eq!(SizeUnit::Px(300.0).to_lp(&device), 100.0);
     }

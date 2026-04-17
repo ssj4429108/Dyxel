@@ -76,10 +76,12 @@ impl FramePacer {
                 while Instant::now() < effective_target {
                     std::hint::spin_loop();
                 }
+                // Block directly on the hardware VBlank signal. The condvar/spin cost
+                // is negligible and avoids the 1ms granularity of thread::sleep.
+                // Only wait for VBlank if we are still early; if we're already late,
+                // start rendering immediately to avoid being capped to the next VSync boundary.
+                waiter.wait_for_vblank();
             }
-            // Block directly on the hardware VBlank signal. The condvar/spin cost
-            // is negligible and avoids the 1ms granularity of thread::sleep.
-            waiter.wait_for_vblank();
         } else {
             // Software fallback
             if wait_start < effective_target {
@@ -107,17 +109,21 @@ impl FramePacer {
                 let measured_secs = measured.as_secs_f64();
                 let target_secs = self.target_frame_duration.as_secs_f64();
                 let drift = measured_secs - target_secs;
-                self.ema_drift_secs =
-                    self.ema_drift_secs * (1.0 - PHASE_LOCK_EMA_ALPHA) + drift * PHASE_LOCK_EMA_ALPHA;
+                self.ema_drift_secs = self.ema_drift_secs * (1.0 - PHASE_LOCK_EMA_ALPHA)
+                    + drift * PHASE_LOCK_EMA_ALPHA;
             }
         }
         self.last_wake = Some(now);
 
         let target_secs = self.target_frame_duration.as_secs_f64();
-        let correction_secs = (self.ema_drift_secs * PHASE_LOCK_GAIN)
-            .clamp(-target_secs * PHASE_LOCK_MAX_CORRECTION_RATIO, target_secs * PHASE_LOCK_MAX_CORRECTION_RATIO);
-        let correction = Duration::from_secs_f64(correction_secs.abs())
-            .min(self.target_frame_duration.mul_f64(PHASE_LOCK_MAX_CORRECTION_RATIO));
+        let correction_secs = (self.ema_drift_secs * PHASE_LOCK_GAIN).clamp(
+            -target_secs * PHASE_LOCK_MAX_CORRECTION_RATIO,
+            target_secs * PHASE_LOCK_MAX_CORRECTION_RATIO,
+        );
+        let correction = Duration::from_secs_f64(correction_secs.abs()).min(
+            self.target_frame_duration
+                .mul_f64(PHASE_LOCK_MAX_CORRECTION_RATIO),
+        );
 
         // Apply correction: if we're consistently late (drift > 0), pull the deadline earlier.
         // If we're consistently early (drift < 0), push it later.

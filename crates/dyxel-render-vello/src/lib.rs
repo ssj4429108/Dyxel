@@ -12,13 +12,13 @@ use dyxel_render_api::{
 use dyxel_shared::{SharedState, ViewType};
 use kurbo::{Affine, Rect as KRect, Vec2};
 use std::any::Any;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use taffy::style::AvailableSpace;
 use vello::wgpu;
 use vello::{
-    peniko::{Color, Fill},
     Renderer, RendererOptions, Scene,
+    peniko::{Color, Fill},
 };
 
 use dyxel_editor::Editor;
@@ -73,6 +73,8 @@ struct BlurredTextureEntry {
     blur_radius: f32,
     /// Blur style: 0=Light, 1=Dark, 2=ExtraLight, 3=Prominent
     blur_style: u8,
+    /// Skip this entry when the generated blur texture is intentionally disabled.
+    skipped_due_to_size: bool,
     /// Whether this entry needs blur recalculation
     needs_recalculation: bool,
 }
@@ -427,7 +429,9 @@ impl VelloBackend {
         {
             let mut pc = self.pipeline_cache.lock().unwrap();
             if pc.is_none() && pipeline_cache.is_some() {
-                log::warn!("[ColdStart] self.pipeline_cache was None in ensure_renderer_initialized_async; restoring from init_device_info");
+                log::warn!(
+                    "[ColdStart] self.pipeline_cache was None in ensure_renderer_initialized_async; restoring from init_device_info"
+                );
                 *pc = pipeline_cache.clone();
             }
         }
@@ -573,7 +577,10 @@ impl VelloBackend {
                                         cache_with_header.len()
                                     );
                                 } else {
-                                    log::error!("[ColdStart] Failed to write Stage 1 cache to {}", path);
+                                    log::error!(
+                                        "[ColdStart] Failed to write Stage 1 cache to {}",
+                                        path
+                                    );
                                 }
                             } else {
                                 log::warn!("[ColdStart] Stage 1 cache get_data() returned None");
@@ -591,7 +598,9 @@ impl VelloBackend {
 
                     // Stage 2: If this is Stage 1 (first launch with area_only), upgrade to full in background
                     if is_first_launch && memory_tier != dyxel_perf::DeviceMemoryTier::LowEnd {
-                        log::info!("[ColdStart] Starting Stage 2: Upgrading to full AA support in background");
+                        log::info!(
+                            "[ColdStart] Starting Stage 2: Upgrading to full AA support in background"
+                        );
 
                         let stage2_start = std::time::Instant::now();
                         let full_options = RendererOptions {
@@ -632,10 +641,15 @@ impl VelloBackend {
                                             // Update cache_stage to Stage 2
                                             *cache_stage_clone.lock().unwrap() = Some(2);
                                         } else {
-                                            log::error!("[ColdStart] Failed to write Stage 2 cache to {}", path);
+                                            log::error!(
+                                                "[ColdStart] Failed to write Stage 2 cache to {}",
+                                                path
+                                            );
                                         }
                                     } else {
-                                        log::warn!("[ColdStart] Stage 2 cache get_data() returned None");
+                                        log::warn!(
+                                            "[ColdStart] Stage 2 cache get_data() returned None"
+                                        );
                                     }
                                 } else {
                                     log::warn!(
@@ -1025,7 +1039,8 @@ impl VelloBackend {
         }
 
         // Reset blur uniform staging offset for this frame
-        self.blur_staging_offset.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.blur_staging_offset
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let w = v_surface_surface.config.width;
         let h = v_surface_surface.config.height;
@@ -1133,14 +1148,12 @@ impl VelloBackend {
 
                     // Register all nodes as layout-dirty after computation
                     // This ensures Logic Thread will sync layout to WASM memory
-                    {
-                        let node_ids: Vec<u32> = g.nodes.keys().copied().collect();
-                        dyxel_shared::layout_sync::register_layout_dirty_nodes(&node_ids);
+                    let changed_layout_nodes = g.sync_to_shared_buffer();
+                    if !changed_layout_nodes.is_empty() {
+                        dyxel_shared::layout_sync::register_layout_dirty_nodes(
+                            &changed_layout_nodes,
+                        );
                     }
-
-                    // Sync layout results and generations to SharedBuffer (for WASM/Guest access)
-                    // This replaces the old sync_layout_to_wasm function
-                    g.sync_to_shared_buffer();
 
                     // Phase 2: Auto-expand capacity if needed (pre-expand at 80% usage)
                     if g.should_pre_expand() {
@@ -1449,11 +1462,22 @@ impl VelloBackend {
                         // Copy the region from scene texture to blur texture
                         let (src_x, src_y, src_w, src_h) = entry.source_rect;
 
-                        log::debug!("[Blur] Copying region: src=({:.0},{:.0}) size={:.0}x{:.0} to blur texture {}x{}",
-                            src_x, src_y, src_w, src_h, entry.width, entry.height);
+                        log::debug!(
+                            "[Blur] Copying region: src=({:.0},{:.0}) size={:.0}x{:.0} to blur texture {}x{}",
+                            src_x,
+                            src_y,
+                            src_w,
+                            src_h,
+                            entry.width,
+                            entry.height
+                        );
 
                         if entry.blur_radius > 0.0 {
-                            log::debug!("[Blur Pass 2] Collecting view_id={} for blur processing, radius={}", entry.view_id, entry.blur_radius);
+                            log::debug!(
+                                "[Blur Pass 2] Collecting view_id={} for blur processing, radius={}",
+                                entry.view_id,
+                                entry.blur_radius
+                            );
                             blur_entries.push((entry.view_id, &entry.texture, entry.blur_radius));
                         }
 
@@ -1847,8 +1871,13 @@ impl VelloBackend {
                 let overlay_ready = overlay_uniform_buffer.is_some();
 
                 if !(pipeline_ready && layout_ready && uniforms_ready && overlay_ready) {
-                    log::warn!("[Blur] Resources not ready: pipeline={}, layout={}, uniforms={}, overlay={}",
-                        pipeline_ready, layout_ready, uniforms_ready, overlay_ready);
+                    log::warn!(
+                        "[Blur] Resources not ready: pipeline={}, layout={}, uniforms={}, overlay={}",
+                        pipeline_ready,
+                        layout_ready,
+                        uniforms_ready,
+                        overlay_ready
+                    );
                 }
 
                 if let (Some(pipeline), Some(layout), _, _) = (
@@ -1898,12 +1927,18 @@ impl VelloBackend {
 
                         // Zero-copy uniform upload via shared staging buffer
                         let staging_buffer = self.blur_staging_buffer.lock().unwrap();
-                        let staging = staging_buffer.as_ref().expect("blur staging buffer not initialized");
+                        let staging = staging_buffer
+                            .as_ref()
+                            .expect("blur staging buffer not initialized");
                         let alignment = *self.blur_staging_alignment.lock().unwrap();
                         let stride = alignment * 2;
-                        let base_offset = self.blur_staging_offset.fetch_add(stride, std::sync::atomic::Ordering::Relaxed);
+                        let base_offset = self
+                            .blur_staging_offset
+                            .fetch_add(stride, std::sync::atomic::Ordering::Relaxed);
                         if base_offset + stride > 1024 * 1024 {
-                            log::warn!("[Blur] Staging buffer overflow, skipping remaining entries");
+                            log::warn!(
+                                "[Blur] Staging buffer overflow, skipping remaining entries"
+                            );
                             break;
                         }
 
@@ -1923,8 +1958,16 @@ impl VelloBackend {
                             },
                         ];
 
-                        queue.write_buffer(staging, base_offset as u64, bytemuck::cast_slice(&uniform_data));
-                        queue.write_buffer(staging, (base_offset + alignment) as u64, bytemuck::cast_slice(&overlay_data));
+                        queue.write_buffer(
+                            staging,
+                            base_offset as u64,
+                            bytemuck::cast_slice(&uniform_data),
+                        );
+                        queue.write_buffer(
+                            staging,
+                            (base_offset + alignment) as u64,
+                            bytemuck::cast_slice(&overlay_data),
+                        );
 
                         log::debug!("[Blur] Uniform data: {:?}", uniform_data);
                         log::debug!("[Blur] Overlay data: {:?}", overlay_data);
@@ -2319,9 +2362,16 @@ fn render_with_blur(
     // Store the source rectangle
     // On macOS/iOS: source_y_taffy is Y-down from top, so we store it directly
     // The copy code will handle platform-specific Y coordinate conversion
-    log::debug!("[Blur] view_id={} source_rect=({:.1},{:.1}) size={:.1}x{:.1} parent_bg_check: y={:.1} h={:.1}",
-        id, source_x, source_y_taffy, node_width, node_height,
-        local_transform.as_coeffs()[5] - node_height, node_height);
+    log::debug!(
+        "[Blur] view_id={} source_rect=({:.1},{:.1}) size={:.1}x{:.1} parent_bg_check: y={:.1} h={:.1}",
+        id,
+        source_x,
+        source_y_taffy,
+        node_width,
+        node_height,
+        local_transform.as_coeffs()[5] - node_height,
+        node_height
+    );
 
     if let Some(index) = existing_index {
         // Update existing entry's metadata but reuse the texture
@@ -2339,6 +2389,7 @@ fn render_with_blur(
         entry.deferred_children = deferred_children;
         entry.blur_radius = node.blur_radius;
         entry.blur_style = node.blur_style;
+        entry.skipped_due_to_size = false;
         // Check if blur params changed significantly
         let size_changed = entry.width != texture_width || entry.height != texture_height;
         entry.needs_recalculation = size_changed;
@@ -2378,6 +2429,7 @@ fn render_with_blur(
             view_id: id,
             blur_radius: node.blur_radius,
             blur_style: node.blur_style,
+            skipped_due_to_size: false,
             needs_recalculation: true,
         });
     }
@@ -2553,8 +2605,13 @@ fn render_node_recursive_with_transform(
                 node_width,
                 node_height
             );
-            log::debug!("[Debug] BEFORE check: id={} needs_layer={} has_blur={} needs_layer_without_blur={}",
-                id, needs_layer, has_blur, needs_layer_without_blur);
+            log::debug!(
+                "[Debug] BEFORE check: id={} needs_layer={} has_blur={} needs_layer_without_blur={}",
+                id,
+                needs_layer,
+                has_blur,
+                needs_layer_without_blur
+            );
         }
 
         // === Step 1: Draw Shadow (if any, using blur) ===
@@ -2893,6 +2950,10 @@ impl RenderBackend for VelloBackend {
 
         // Store info for deferred renderer initialization (includes cache stage)
         *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache, cache_stage));
+
+        // Eagerly start renderer initialization in background so first frame isn't black
+        let queue_ref = unsafe { &*_queue.as_ptr::<wgpu::Queue>() };
+        self.ensure_renderer_initialized_async(device, queue_ref);
 
         // Initialize memory optimizer
         {

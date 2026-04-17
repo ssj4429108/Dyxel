@@ -11,8 +11,8 @@ use winit::{
     window::WindowBuilder,
 };
 
-mod touch;
 mod display_link;
+mod touch;
 use touch::TouchTracker;
 
 /// Debug flag: force continuous render mode for stable frame-pacing validation.

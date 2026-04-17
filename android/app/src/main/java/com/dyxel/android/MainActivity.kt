@@ -12,6 +12,26 @@ class MainActivity : AppCompatActivity() {
     private lateinit var engine: DyxelEngine
     private var isInitialized = false
     private var isInitializing = false
+    private var choreographerCallback: Choreographer.FrameCallback? = null
+
+    private fun startChoreographer() {
+        choreographerCallback = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                DyxelEngine.nativeOnVBlank()
+                Choreographer.getInstance().postFrameCallback(this)
+            }
+        }
+        Choreographer.getInstance().postFrameCallback(choreographerCallback!!)
+        android.util.Log.i("DyxelMain", "Choreographer VBlank callback started")
+    }
+
+    private fun stopChoreographer() {
+        choreographerCallback?.let {
+            Choreographer.getInstance().removeFrameCallback(it)
+            choreographerCallback = null
+            android.util.Log.i("DyxelMain", "Choreographer VBlank callback stopped")
+        }
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -69,7 +89,10 @@ class MainActivity : AppCompatActivity() {
                         engine.host.initNative(ptr.toULong(), dataDir, width.toUInt(), height.toUInt())
                         val initElapsed = System.currentTimeMillis() - initStartTime
                         android.util.Log.i("DyxelPerf", "[ColdStart] Init native surface: ${initElapsed}ms")
-                        
+
+                        // Start Choreographer VBlank callback after native surface is ready (must run on main thread)
+                        runOnUiThread { startChoreographer() }
+
                         // 3. Load business logic
                         val wasmStartTime = System.currentTimeMillis()
                         engine.host.loadWasm(wasmPath)
@@ -92,6 +115,7 @@ class MainActivity : AppCompatActivity() {
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 isInitialized = false
                 isInitializing = false
+                stopChoreographer()
                 // Synchronous barrier: block the UI thread until the render thread signals it has finished all GPU work.
                 engine.host.stopNative()
             }

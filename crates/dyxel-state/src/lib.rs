@@ -11,15 +11,15 @@
 //! assert_eq!(count.get(), 5);
 //! ```
 
+use dyxel_shared::SizeUnit;
+use futures_signals::signal::Signal;
+use slotmap::{SlotMap, new_key_type};
 use std::any::Any;
 use std::cell::RefCell;
-use std::ops::{Add, Sub, Mul, Div, AddAssign, SubAssign, MulAssign, DivAssign, Rem, RemAssign};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
-use futures_signals::signal::Signal;
-use dyxel_shared::SizeUnit;
-use slotmap::{SlotMap, new_key_type};
 
 new_key_type! {
     /// Unique identifier for a state
@@ -44,17 +44,15 @@ impl StateManager {
             states: SlotMap::with_key(),
         }
     }
-    
+
     /// Insert a new state
     pub fn insert<T: Clone + 'static>(&mut self, inner: StateRef<T>) -> StateId {
         self.states.insert(Box::new(inner))
     }
-    
+
     /// Get a state by ID
     pub fn get<T: Clone + 'static>(&self, id: StateId) -> Option<StateRef<T>> {
-        self.states.get(id)?
-            .downcast_ref::<StateRef<T>>()
-            .cloned()
+        self.states.get(id)?.downcast_ref::<StateRef<T>>().cloned()
     }
 }
 
@@ -81,21 +79,23 @@ impl<T: Clone + 'static> StateInner<T> {
             value: RefCell::new(value),
             text_bindings: RefCell::new(Vec::new()),
             signal_subscribers: RefCell::new(Vec::new()),
-            version: RefCell::new(VERSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
+            version: RefCell::new(
+                VERSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            ),
         }
     }
-    
+
     pub fn get(&self) -> T {
         self.value.borrow().clone()
     }
-    
+
     pub fn set(&self, new_value: T) {
         *self.value.borrow_mut() = new_value;
         let new_version = VERSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.version.borrow_mut() = new_version;
         self.update_subscribers();
     }
-    
+
     pub fn update<F>(&self, f: F)
     where
         F: FnOnce(&mut T),
@@ -103,31 +103,36 @@ impl<T: Clone + 'static> StateInner<T> {
         let mut value = self.value.borrow_mut();
         f(&mut *value);
         drop(value);
-        *self.version.borrow_mut() = VERSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.version.borrow_mut() =
+            VERSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.update_subscribers();
     }
-    
+
     /// Bind this state to a text node
     pub fn bind_text<F>(&self, node_id: u32, format: F)
     where
         F: Fn(&T) -> String + 'static,
     {
-        self.text_bindings.borrow_mut().push((node_id, Box::new(format)));
+        self.text_bindings
+            .borrow_mut()
+            .push((node_id, Box::new(format)));
     }
-    
+
     /// Subscribe to state changes via Signal
     pub fn subscribe_signal<F>(&self, callback: F)
     where
         F: FnMut(&T) + 'static,
     {
-        self.signal_subscribers.borrow_mut().push(Box::new(callback));
+        self.signal_subscribers
+            .borrow_mut()
+            .push(Box::new(callback));
     }
-    
+
     /// Get current version
     pub fn get_version(&self) -> u64 {
         *self.version.borrow()
     }
-    
+
     /// Update all bound text nodes and signal subscribers
     fn update_subscribers(&self) {
         let value = self.value.borrow();
@@ -175,20 +180,20 @@ impl<T: Clone + 'static> State<T> {
         let id = STATE_MANAGER.with(|m| m.borrow_mut().insert(inner.clone()));
         // Store ID for potential future use
         let _ = id;
-        
+
         Self { inner }
     }
-    
+
     /// Get the current value
     pub fn get(&self) -> T {
         self.inner.get()
     }
-    
+
     /// Set a new value
     pub fn set(&self, value: T) {
         self.inner.set(value);
     }
-    
+
     /// Update value with a function
     pub fn update<F>(&self, f: F)
     where
@@ -196,7 +201,7 @@ impl<T: Clone + 'static> State<T> {
     {
         self.inner.update(f);
     }
-    
+
     /// Bind this state to a text node with formatter
     pub fn bind_text<F>(&self, node_id: u32, format: F)
     where
@@ -204,7 +209,7 @@ impl<T: Clone + 'static> State<T> {
     {
         self.inner.bind_text(node_id, format);
     }
-    
+
     /// Bind with default Display format
     pub fn bind_display(&self, node_id: u32)
     where
@@ -212,9 +217,9 @@ impl<T: Clone + 'static> State<T> {
     {
         self.bind_text(node_id, |v| v.to_string());
     }
-    
+
     /// Convert this State into a Signal for reactive binding
-    /// 
+    ///
     /// This allows State to be used with `.sig()` method in RSX:
     /// ```rust,ignore
     /// let width = use_state(|| 100.0f32);
@@ -238,7 +243,7 @@ pub struct SizeUnitSignal {
 
 impl Signal for SizeUnitSignal {
     type Item = crate::SizeUnit;
-    
+
     fn poll_change(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         // Pin project to inner
         let inner = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
@@ -255,9 +260,7 @@ impl Unpin for SizeUnitSignal {}
 impl State<f32> {
     /// Convert f32 State to SizeUnit Signal (for width/height binding)
     pub fn sig_size(&self) -> SizeUnitSignal {
-        SizeUnitSignal {
-            inner: self.sig(),
-        }
+        SizeUnitSignal { inner: self.sig() }
     }
 }
 
@@ -292,12 +295,12 @@ impl<T: Clone + 'static> Clone for StateSignal<T> {
 
 impl<T: Clone + 'static> Signal for StateSignal<T> {
     type Item = T;
-    
+
     fn poll_change(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
         let current_version = self.state.get_version();
         let last_version = *self.last_version.borrow();
         let is_first = *self.is_first_poll.borrow();
-        
+
         // Only emit value on first poll or when version has changed
         if is_first || current_version != last_version {
             *self.is_first_poll.borrow_mut() = false;
@@ -386,7 +389,7 @@ where
 /// # Example
 /// ```rust
 /// use dyxel_state::use_state;
-/// 
+///
 /// let count = use_state(|| 0);
 /// assert_eq!(count.get(), 0);
 /// count.set(5);
@@ -414,7 +417,7 @@ where
 
 /// Create a side effect
 ///
-/// Currently just executes immediately. 
+/// Currently just executes immediately.
 /// In the future, could track signal dependencies and re-run.
 pub fn use_effect<F>(_f: F)
 where
@@ -426,23 +429,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_use_state() {
         let count = use_state(|| 0);
         assert_eq!(count.get(), 0);
-        
+
         count.set(5);
         assert_eq!(count.get(), 5);
     }
-    
+
     #[test]
     fn test_state_add_assign() {
         let mut count = use_state(|| 10);
         count += 5;
         assert_eq!(count.get(), 15);
     }
-    
+
     #[test]
     fn test_state_update() {
         let count = use_state(|| 5);

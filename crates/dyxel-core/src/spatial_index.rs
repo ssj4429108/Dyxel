@@ -30,16 +30,16 @@ impl SpatialIndex {
     pub fn insert(&mut self, node_id: u32, x: f32, y: f32, width: f32, height: f32) {
         // Remove old position
         self.remove(node_id);
-        
+
         // Store bounds
         self.bounds.insert(node_id, (x, y, width, height));
-        
+
         // Insert into grid cells
         let min_x = ((x) / GRID_CELL_SIZE).floor() as i32;
         let max_x = ((x + width) / GRID_CELL_SIZE).ceil() as i32;
         let min_y = ((y) / GRID_CELL_SIZE).floor() as i32;
         let max_y = ((y + height) / GRID_CELL_SIZE).ceil() as i32;
-        
+
         for cx in min_x..=max_x {
             for cy in min_y..=max_y {
                 self.grid.entry((cx, cy)).or_default().push(node_id);
@@ -54,7 +54,7 @@ impl SpatialIndex {
             let max_x = ((x + w) / GRID_CELL_SIZE).ceil() as i32;
             let min_y = (y / GRID_CELL_SIZE).floor() as i32;
             let max_y = ((y + h) / GRID_CELL_SIZE).ceil() as i32;
-            
+
             for cx in min_x..=max_x {
                 for cy in min_y..=max_y {
                     if let Some(cell) = self.grid.get_mut(&(cx, cy)) {
@@ -69,9 +69,9 @@ impl SpatialIndex {
     pub fn hit_test(&self, x: f32, y: f32) -> Vec<u32> {
         let cx = (x / GRID_CELL_SIZE).floor() as i32;
         let cy = (y / GRID_CELL_SIZE).floor() as i32;
-        
+
         let mut result = Vec::new();
-        
+
         // Check cell and neighbors (for nodes crossing cell boundaries)
         for dx in -1..=1 {
             for dy in -1..=1 {
@@ -86,7 +86,7 @@ impl SpatialIndex {
                 }
             }
         }
-        
+
         // Sort by node_id descending (higher ID = higher z-order)
         result.sort_by(|a, b| b.cmp(a));
         result
@@ -133,19 +133,22 @@ impl SceneTree {
     /// Hit test with bubble path
     pub fn hit_test(&self, x: f32, y: f32) -> Option<HitTestResult> {
         let hits = self.spatial.hit_test(x, y);
-        
+
         // First hit is the top-most node (highest z-order)
         hits.first().map(|&target| {
             let mut bubble_path = vec![target];
             let mut current = target;
-            
+
             // Build path to root
             while let Some(&parent) = self.parents.get(&current) {
                 bubble_path.push(parent);
                 current = parent;
             }
-            
-            HitTestResult { target, bubble_path }
+
+            HitTestResult {
+                target,
+                bubble_path,
+            }
         })
     }
 }

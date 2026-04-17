@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Minimal shader set for fastest possible first launch
-//! 
+//!
 //! This module defines the minimal set of shaders needed to render
 //! basic content, reducing first launch time to ~300-500ms.
-//! 
+//!
 //! Stages:
 //! 1. Stage 0 (Minimal): Core rendering only (~30% of shaders)
 //! 2. Stage 1 (Extended): Path preprocessing
@@ -41,17 +41,17 @@ impl ShaderStage {
             ShaderStage::Complete => &COMPLETE_SHADERS,
         }
     }
-    
+
     /// Check if a shader is in this stage
     pub fn contains(&self, name: &str) -> bool {
         self.shader_set().contains(name)
     }
-    
+
     /// Get shader set for fast lookup
     fn shader_set(&self) -> HashSet<&'static str> {
         self.shader_names().iter().cloned().collect()
     }
-    
+
     /// Get next stage
     pub fn next(&self) -> Option<ShaderStage> {
         match self {
@@ -61,7 +61,7 @@ impl ShaderStage {
             ShaderStage::Complete => None,
         }
     }
-    
+
     /// Get total estimated load time up to this stage
     pub fn estimated_time_ms(&self) -> u64 {
         match self {
@@ -77,12 +77,12 @@ impl ShaderStage {
 /// These are the shaders that MUST be loaded for any rendering
 const MINIMAL_SHADERS: &[&str] = &[
     // Core rasterization pipeline (fine is the heaviest but essential)
-    "fine_area",          // Essential: final pixel rendering
-    "coarse",             // Essential: coarse rasterization
-    "path_count",         // Essential: path counting
-    "path_count_setup",   // Essential: path count setup
-    "path_tiling",        // Essential: path tiling
-    "path_tiling_setup",  // Essential: path tiling setup
+    "fine_area",         // Essential: final pixel rendering
+    "coarse",            // Essential: coarse rasterization
+    "path_count",        // Essential: path counting
+    "path_count_setup",  // Essential: path count setup
+    "path_tiling",       // Essential: path tiling
+    "path_tiling_setup", // Essential: path tiling setup
 ];
 
 /// Stage 1: Extended - add path preprocessing
@@ -111,16 +111,17 @@ const FULL_SHADERS: &[&str] = &[
 
 /// Stage 3: Complete - add MSAA
 /// These are optional, only needed for high-quality AA
-const COMPLETE_SHADERS: &[&str] = &[
-    "fine_msaa8",
-    "fine_msaa16",
-];
+const COMPLETE_SHADERS: &[&str] = &["fine_msaa8", "fine_msaa16"];
 
 /// Get all shaders up to and including a stage
 pub fn shaders_up_to(stage: ShaderStage) -> Vec<&'static str> {
     let mut result = Vec::new();
-    for s in [ShaderStage::Minimal, ShaderStage::Extended, 
-              ShaderStage::Full, ShaderStage::Complete] {
+    for s in [
+        ShaderStage::Minimal,
+        ShaderStage::Extended,
+        ShaderStage::Full,
+        ShaderStage::Complete,
+    ] {
         if s as u8 <= stage as u8 {
             result.extend(s.shader_names());
         }
@@ -135,8 +136,12 @@ pub fn is_minimal_shader(name: &str) -> bool {
 
 /// Get stage for a shader
 pub fn shader_stage(name: &str) -> Option<ShaderStage> {
-    for stage in [ShaderStage::Minimal, ShaderStage::Extended,
-                  ShaderStage::Full, ShaderStage::Complete] {
+    for stage in [
+        ShaderStage::Minimal,
+        ShaderStage::Extended,
+        ShaderStage::Full,
+        ShaderStage::Complete,
+    ] {
         if stage.contains(name) {
             return Some(stage);
         }
@@ -188,20 +193,22 @@ impl StagedLoadProgress {
             ..Default::default()
         }
     }
-    
+
     pub fn mark_stage_complete(&mut self, stage: ShaderStage) {
         self.stages_completed.push(stage);
         self.total_shaders_loaded += stage.shader_names().len();
     }
-    
+
     pub fn elapsed_ms(&self) -> u64 {
         self.start_time
             .map(|t| t.elapsed().as_millis() as u64)
             .unwrap_or(0)
     }
-    
+
     pub fn is_complete(&self, target: ShaderStage) -> bool {
-        self.stages_completed.iter().any(|s| *s as u8 >= target as u8)
+        self.stages_completed
+            .iter()
+            .any(|s| *s as u8 >= target as u8)
     }
 }
 
@@ -217,21 +224,21 @@ pub fn estimate_time_savings(target_stage: ShaderStage) -> (u64, u64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_minimal_shaders_count() {
         assert_eq!(MINIMAL_SHADERS.len(), 6);
     }
-    
+
     #[test]
     fn test_shaders_up_to() {
         let minimal = shaders_up_to(ShaderStage::Minimal);
         assert_eq!(minimal.len(), 6);
-        
+
         let extended = shaders_up_to(ShaderStage::Extended);
         assert_eq!(extended.len(), 6 + 7); // Minimal + Extended
     }
-    
+
     #[test]
     fn test_time_savings() {
         let (time, saved, pct) = estimate_time_savings(ShaderStage::Minimal);

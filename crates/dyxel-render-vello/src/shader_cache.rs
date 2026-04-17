@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Shader cache management for faster startup
-//! 
+//!
 //! This module provides a pipeline cache management system that:
 //! 1. Pre-warms shader cache on first run
 //! 2. Persists cache to disk for subsequent runs
@@ -48,24 +48,24 @@ impl ShaderCacheManager {
         } else {
             None
         };
-        
+
         Self {
             config,
             cache_data,
             warmed: false,
         }
     }
-    
+
     /// Check if cache is available
     pub fn has_cache(&self) -> bool {
         self.cache_data.is_some()
     }
-    
+
     /// Get cache data for wgpu
     pub fn get_cache_data(&self) -> Option<&[u8]> {
         self.cache_data.as_deref()
     }
-    
+
     /// Load cache from disk
     fn load_cache(path: &PathBuf) -> Option<Vec<u8>> {
         match fs::read(path) {
@@ -79,13 +79,13 @@ impl ShaderCacheManager {
             }
         }
     }
-    
+
     /// Save cache to disk
     pub fn save_cache(&self, data: &[u8]) {
         if !self.config.enabled {
             return;
         }
-        
+
         let start = Instant::now();
         match fs::write(&self.config.cache_path, data) {
             Ok(_) => {
@@ -101,12 +101,12 @@ impl ShaderCacheManager {
             }
         }
     }
-    
+
     /// Mark as warmed
     pub fn mark_warmed(&mut self) {
         self.warmed = true;
     }
-    
+
     /// Check if cache has been warmed this session
     pub fn is_warmed(&self) -> bool {
         self.warmed
@@ -126,12 +126,12 @@ impl ShaderLoadStats {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn with_cache_hit(mut self) -> Self {
         self.cache_hit = true;
         self
     }
-    
+
     pub fn with_load_time(mut self, ms: u64) -> Self {
         self.load_time_ms = ms;
         self

@@ -5,10 +5,10 @@ use dyxel_app::prelude::*;
 pub fn final_demo() -> impl BaseView {
     rsx! {
         View {
-            
+
             width: "100%",
             height: "100%",
-            color: (50, 50, 50),
+            color: (50u32, 50, 50, 255),
             flexDirection: FlexDirection::Column,
             justifyContent: JustifyContent::Center,
             alignItems: AlignItems::Center,

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 // Re-export for tests and other consumers
-pub use dyxel_shared::{OpCode, DirtyField, DirtyTracker};
+pub use dyxel_shared::{DirtyField, DirtyTracker, OpCode};
 
 use std::collections::HashMap;
 
@@ -20,7 +20,9 @@ pub enum TransactionState {
 }
 
 impl Default for TransactionState {
-    fn default() -> Self { TransactionState::Idle }
+    fn default() -> Self {
+        TransactionState::Idle
+    }
 }
 
 /// A staged command waiting to be applied
@@ -38,7 +40,7 @@ pub struct StagedCommand {
 struct DedupKey {
     node_id: u32,
     field_type: FieldType,
-    seq: u64,  // Sequence number for unique keys (0 for normal ops)
+    seq: u64, // Sequence number for unique keys (0 for normal ops)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,7 +49,7 @@ enum FieldType {
     Color,
     Width,
     Height,
-    Position,  // x, y via inset/margin
+    Position, // x, y via inset/margin
     // Split layout properties - don't merge different layout attributes
     FlexDirection,
     JustifyContent,
@@ -55,8 +57,8 @@ enum FieldType {
     FlexWrap,
     AlignContent,
     FlexGrow,
-    Text,      // text content
-    Children,  // AddChild - needs special handling
+    Text,     // text content
+    Children, // AddChild - needs special handling
     Other,
 }
 
@@ -98,45 +100,50 @@ impl CommandAccumulator {
             seq_counter: 0,
         }
     }
-    
+
     /// Stage a command, merging with existing if same node+field
     pub fn stage(&mut self, cmd: StagedCommand) {
         let field_type = FieldType::from_opcode(&cmd.opcode);
-        
+
         // For AddChild/CreateNode/CreateTextNode, never merge - always create unique key
         let (key, always_push) = match field_type {
             FieldType::Children | FieldType::Other => {
                 // These ops should never be merged
                 self.seq_counter += 1;
-                (DedupKey {
-                    node_id: cmd.node_id,
-                    field_type,
-                    seq: self.seq_counter,
-                }, true)
+                (
+                    DedupKey {
+                        node_id: cmd.node_id,
+                        field_type,
+                        seq: self.seq_counter,
+                    },
+                    true,
+                )
             }
-            _ => {
-                (DedupKey {
+            _ => (
+                DedupKey {
                     node_id: cmd.node_id,
                     field_type,
                     seq: 0,
-                }, false)
-            }
+                },
+                false,
+            ),
         };
-        
+
         // Add to order if unique or not yet seen
         if always_push || !self.commands.contains_key(&key) {
             self.order.push(key);
         }
         self.commands.insert(key, cmd);
     }
-    
+
     /// Get commands in original order (after deduplication)
     pub fn get_commands(&self) -> Vec<&StagedCommand> {
-        self.order.iter()
+        self.order
+            .iter()
             .filter_map(|key| self.commands.get(key))
             .collect()
     }
-    
+
     /// Get mutable commands for processing
     pub fn drain_commands(&mut self) -> Vec<StagedCommand> {
         let mut result = Vec::with_capacity(self.order.len());
@@ -148,11 +155,11 @@ impl CommandAccumulator {
         self.order.clear();
         result
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
-    
+
     pub fn clear(&mut self) {
         self.commands.clear();
         self.order.clear();
@@ -173,7 +180,7 @@ impl TransactionProcessor {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Start a new transaction
     pub fn begin(&mut self, seq_id: u32, flags: u16) -> Result<(), String> {
         match self.state {
@@ -183,9 +190,14 @@ impl TransactionProcessor {
                 // Transaction started
                 Ok(())
             }
-            TransactionState::Active { seq_id: existing, .. } => {
+            TransactionState::Active {
+                seq_id: existing, ..
+            } => {
                 // Nested transaction not supported, abort current
-                Err(format!("Cannot begin transaction {} while {} is active", seq_id, existing))
+                Err(format!(
+                    "Cannot begin transaction {} while {} is active",
+                    seq_id, existing
+                ))
             }
             _ => {
                 // Previous transaction not cleaned up
@@ -195,7 +207,7 @@ impl TransactionProcessor {
             }
         }
     }
-    
+
     /// Stage a command within active transaction
     pub fn stage_command(&mut self, cmd: StagedCommand) -> Result<(), String> {
         match self.state {
@@ -207,28 +219,35 @@ impl TransactionProcessor {
             _ => Err("No active transaction to stage command".to_string()),
         }
     }
-    
+
     /// Commit the active transaction
     pub fn commit(&mut self, seq_id: u32) -> Result<Vec<StagedCommand>, String> {
         match self.state {
-            TransactionState::Active { seq_id: active_id, .. } if active_id == seq_id => {
+            TransactionState::Active {
+                seq_id: active_id, ..
+            } if active_id == seq_id => {
                 self.state = TransactionState::Committed { seq_id };
                 self.render_pending = true;
                 let commands = self.accumulator.drain_commands();
                 // Transaction committed
                 Ok(commands)
             }
-            TransactionState::Active { seq_id: active_id, .. } => {
-                Err(format!("Commit seq_id mismatch: expected {}, got {}", active_id, seq_id))
-            }
+            TransactionState::Active {
+                seq_id: active_id, ..
+            } => Err(format!(
+                "Commit seq_id mismatch: expected {}, got {}",
+                active_id, seq_id
+            )),
             _ => Err("No active transaction to commit".to_string()),
         }
     }
-    
+
     /// Abort the active transaction
     pub fn abort(&mut self, seq_id: u32) -> Result<(), String> {
         match self.state {
-            TransactionState::Active { seq_id: active_id, .. } if active_id == seq_id => {
+            TransactionState::Active {
+                seq_id: active_id, ..
+            } if active_id == seq_id => {
                 self.state = TransactionState::Aborted { seq_id };
                 self.accumulator.clear();
                 // Rollback dirty marks for this transaction would require more tracking
@@ -239,23 +258,23 @@ impl TransactionProcessor {
             _ => Err("No matching active transaction to abort".to_string()),
         }
     }
-    
+
     /// Reset to idle state
     pub fn reset(&mut self) {
         self.state = TransactionState::Idle;
         self.accumulator.clear();
         self.render_pending = false;
     }
-    
+
     /// Check if render is needed and clear the flag
     pub fn take_render_pending(&mut self) -> bool {
         let pending = self.render_pending;
         self.render_pending = false;
         pending
     }
-    
+
     /// Apply committed commands to shared state
-    pub fn apply_commands<F>(&mut self, mut apply_fn: F) 
+    pub fn apply_commands<F>(&mut self, mut apply_fn: F)
     where
         F: FnMut(&StagedCommand),
     {
@@ -271,7 +290,9 @@ impl TransactionProcessor {
 /// Helper: Extract node_id from opcode payload for dirty tracking
 pub fn extract_node_id(_opcode: &OpCode, payload: &[u8]) -> Option<u32> {
     if payload.len() >= 4 {
-        Some(u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]))
+        Some(u32::from_le_bytes([
+            payload[0], payload[1], payload[2], payload[3],
+        ]))
     } else {
         None
     }
@@ -282,17 +303,29 @@ pub fn get_dirty_field_for_opcode(opcode: &OpCode) -> DirtyField {
     match opcode {
         OpCode::CreateNode | OpCode::CreateTextNode => DirtyField::None,
         OpCode::SetColor | OpCode::SetColorCompact | OpCode::SetTextColor => DirtyField::Style,
-        OpCode::SetWidth | OpCode::SetWidthCompact | 
-        OpCode::SetHeight | OpCode::SetHeightCompact => DirtyField::Size,
+        OpCode::SetWidth
+        | OpCode::SetWidthCompact
+        | OpCode::SetHeight
+        | OpCode::SetHeightCompact => DirtyField::Size,
         OpCode::SetText | OpCode::SetTextContent => DirtyField::Text,
         OpCode::AddChild => DirtyField::Children,
-        OpCode::SetFlexDirection | OpCode::SetJustifyContent | 
-        OpCode::SetAlignItems | OpCode::SetFlexWrap | OpCode::SetAlignContent |
-        OpCode::SetFlexGrow | OpCode::SetPadding => DirtyField::Layout,
+        OpCode::SetFlexDirection
+        | OpCode::SetJustifyContent
+        | OpCode::SetAlignItems
+        | OpCode::SetFlexWrap
+        | OpCode::SetAlignContent
+        | OpCode::SetFlexGrow
+        | OpCode::SetPadding => DirtyField::Layout,
         // === LayoutRegistry Operations (read-only, no dirty) ===
-        OpCode::GetLayout | OpCode::IsLayoutDirty | OpCode::ClearLayoutDirty | OpCode::GetLayoutBatch => DirtyField::None,
+        OpCode::GetLayout
+        | OpCode::IsLayoutDirty
+        | OpCode::ClearLayoutDirty
+        | OpCode::GetLayoutBatch => DirtyField::None,
         // === Transaction Operations (no dirty) ===
-        OpCode::BeginTransaction | OpCode::EndTransaction | OpCode::AbortTransaction | OpCode::SetNodeDirty => DirtyField::None,
+        OpCode::BeginTransaction
+        | OpCode::EndTransaction
+        | OpCode::AbortTransaction
+        | OpCode::SetNodeDirty => DirtyField::None,
         _ => DirtyField::Style,
     }
 }

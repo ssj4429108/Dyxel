@@ -61,11 +61,11 @@ struct TextureReturn {
 pub struct KawaseTextureSet {
     /// Downsample 1/2 resolution (half size of input)
     pub ds_half: PooledTexture,
-    /// Downsample 1/4 resolution (quarter size of input)
+    /// Downsample 1/8 resolution (1/8 size of input for reduced fill rate)
     pub ds_quarter: PooledTexture,
-    /// Ping-pong buffer A (quarter size)
+    /// Ping-pong buffer A (1/8 size)
     pub ping: PooledTexture,
-    /// Ping-pong buffer B (quarter size)
+    /// Ping-pong buffer B (1/8 size)
     pub pong: PooledTexture,
 }
 
@@ -162,7 +162,12 @@ impl TexturePool {
     }
 
     /// Acquire a single texture from the pool
-    pub fn acquire(&mut self, width: u32, height: u32, format: wgpu::TextureFormat) -> PooledTexture {
+    pub fn acquire(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> PooledTexture {
         let key = bucket_key(width, height, format);
 
         // Try to get from bucket, validating actual dimensions match exactly.
@@ -203,8 +208,9 @@ impl TexturePool {
         // Calculate sizes
         let half_w = (full_width / 2).max(1);
         let half_h = (full_height / 2).max(1);
-        let quarter_w = (full_width / 4).max(1);
-        let quarter_h = (full_height / 4).max(1);
+        // Use /8 to match internal KawaseTexturePool optimization (reduces fill rate to 1/64)
+        let quarter_w = (full_width / 8).max(1);
+        let quarter_h = (full_height / 8).max(1);
 
         KawaseTextureSet {
             ds_half: self.acquire(half_w, half_h, wgpu::TextureFormat::Rgba16Float),
@@ -215,7 +221,12 @@ impl TexturePool {
     }
 
     /// Create a new texture with standard blur usage flags
-    fn create_texture(&self, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+    fn create_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Pooled Blur Texture"),
             size: wgpu::Extent3d {
@@ -274,7 +285,10 @@ impl SharedTexturePool {
     }
 
     pub fn acquire_kawase_set(&self, full_width: u32, full_height: u32) -> KawaseTextureSet {
-        self.inner.lock().unwrap().acquire_kawase_set(full_width, full_height)
+        self.inner
+            .lock()
+            .unwrap()
+            .acquire_kawase_set(full_width, full_height)
     }
 }
 
@@ -284,8 +298,17 @@ mod tests {
 
     #[test]
     fn test_bucket_key() {
-        assert_eq!(bucket_key(64, 64, wgpu::TextureFormat::Rgba8Unorm), (64, 64, 0));
-        assert_eq!(bucket_key(65, 128, wgpu::TextureFormat::Rgba16Float), (65, 128, 1));
-        assert_eq!(bucket_key(256, 256, wgpu::TextureFormat::Bgra8Unorm), (256, 256, 2));
+        assert_eq!(
+            bucket_key(64, 64, wgpu::TextureFormat::Rgba8Unorm),
+            (64, 64, 0)
+        );
+        assert_eq!(
+            bucket_key(65, 128, wgpu::TextureFormat::Rgba16Float),
+            (65, 128, 1)
+        );
+        assert_eq!(
+            bucket_key(256, 256, wgpu::TextureFormat::Bgra8Unorm),
+            (256, 256, 2)
+        );
     }
 }

@@ -6,6 +6,36 @@
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use taffy::prelude::{AvailableSpace, Size};
+
+    fn test_shared_buffer() -> SharedBuffer {
+        SharedBuffer {
+            command_len: 0,
+            max_node_id: 0,
+            capacity: INITIAL_CAPACITY as u32,
+            _padding: [0; 1],
+            command_data: [0; MAX_COMMAND_BYTES],
+            layout_results: [LayoutResult {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            }; MAX_CAPACITY],
+            generations: [0; MAX_CAPACITY],
+            dirty_mask: [0; 128],
+            input_buffer: InputBuffer::new(),
+            device_info: DeviceInfo {
+                device_pixel_ratio: 1.0,
+                text_scale_factor: 1.0,
+                screen_width_lp: 0.0,
+                screen_height_lp: 0.0,
+                safe_area_top: 0.0,
+                safe_area_bottom: 0.0,
+                platform: 0,
+                _padding: [0.0; 3],
+            },
+        }
+    }
 
     #[test]
     fn test_node_handle_creation() {
@@ -13,7 +43,7 @@ mod tests {
         assert_eq!(handle.slot, 5);
         assert_eq!(handle.generation, 1);
         assert!(handle.is_valid());
-        
+
         let invalid = NodeHandle::INVALID;
         assert!(!invalid.is_valid());
     }
@@ -27,15 +57,15 @@ mod tests {
     #[test]
     fn test_create_node_with_handle() {
         let mut state = SharedState::new();
-        
+
         // 创建节点
         let handle = state.create_node_with_handle(100);
         assert!(handle.is_some());
-        
+
         let h = handle.unwrap();
         assert_eq!(h.slot, 0); // 第一个节点应该是 slot 0
         assert_eq!(h.generation, 0); // 初始代际为 0
-        
+
         // 验证节点存在
         assert!(state.get_node_by_handle(h).is_some());
     }
@@ -43,23 +73,23 @@ mod tests {
     #[test]
     fn test_generational_id_prevents_stale_access() {
         let mut state = SharedState::new();
-        
+
         // 创建节点
         let handle1 = state.create_node_with_handle(100).unwrap();
         let slot = handle1.slot;
-        
+
         // 删除节点
         assert!(state.remove_node_with_handle(handle1));
-        
+
         // 尝试用旧 handle 访问（应该失败）
         assert!(!state.verify_handle(handle1));
         assert!(state.get_node_by_handle(handle1).is_none());
-        
+
         // 创建新节点（应该复用同一 slot，但代际+1）
         let handle2 = state.create_node_with_handle(101).unwrap();
         assert_eq!(handle2.slot, slot);
         assert_eq!(handle2.generation, 1); // 代际增加
-        
+
         // 旧 handle 仍然无效
         assert!(!state.verify_handle(handle1));
         assert!(state.verify_handle(handle2));
@@ -68,16 +98,16 @@ mod tests {
     #[test]
     fn test_id_recycling() {
         let mut state = SharedState::new();
-        
+
         // 创建一些节点
         let _h1 = state.create_node_with_handle(1).unwrap();
         let h2 = state.create_node_with_handle(2).unwrap();
         let _h3 = state.create_node_with_handle(3).unwrap();
-        
+
         // 删除中间的
         let h2_slot = h2.slot;
         state.remove_node_with_handle(h2);
-        
+
         // 创建新节点（应该复用 slot 1）
         let h4 = state.create_node_with_handle(4).unwrap();
         assert_eq!(h4.slot, h2_slot); // 复用了 slot 1
@@ -88,18 +118,18 @@ mod tests {
     fn test_capacity_expansion() {
         let mut state = SharedState::new();
         assert_eq!(state.get_capacity(), INITIAL_CAPACITY); // 256
-        
+
         // 扩容到 512
         assert!(state.expand_capacity(512).is_ok());
         assert_eq!(state.get_capacity(), 512);
-        
+
         // 扩容到 1024
         assert!(state.expand_capacity(1024).is_ok());
         assert_eq!(state.get_capacity(), 1024);
-        
+
         // 不能缩容
         assert!(state.expand_capacity(512).is_err());
-        
+
         // 不能超过最大容量
         assert!(state.expand_capacity(5000).is_err());
     }
@@ -107,16 +137,16 @@ mod tests {
     #[test]
     fn test_pre_expansion_threshold() {
         let mut state = SharedState::new();
-        
+
         // 创建节点直到超过 80% 阈值
         // 256 * 0.8 = 204.8，所以创建 205 个节点应该触发预扩容
         for i in 0..205 {
             state.create_node_with_handle(i);
         }
-        
+
         // 此时应该建议预扩容
         assert!(state.should_pre_expand());
-        
+
         // 执行扩容
         assert!(state.auto_expand());
         assert_eq!(state.get_capacity(), 512);
@@ -125,15 +155,15 @@ mod tests {
     #[test]
     fn test_stats() {
         let mut state = SharedState::new();
-        
+
         // 创建节点
         let h1 = state.create_node_with_handle(1).unwrap();
         state.create_node_with_handle(2).unwrap();
         state.create_node_with_handle(3).unwrap();
-        
+
         // 删除一个
         state.remove_node_with_handle(h1);
-        
+
         let stats = state.get_stats();
         assert_eq!(stats.capacity, INITIAL_CAPACITY);
         assert_eq!(stats.active_count, 2);
@@ -144,17 +174,68 @@ mod tests {
     #[test]
     fn test_generation_wrapping() {
         let mut state = SharedState::new();
-        
+
         // 创建并反复删除同一 slot
         let mut handle = state.create_node_with_handle(1).unwrap();
         let slot = handle.slot;
-        
+
         for i in 0..10 {
             state.remove_node_with_handle(handle);
             handle = state.create_node_with_handle(i + 2).unwrap();
             assert_eq!(handle.slot, slot);
             assert_eq!(handle.generation, i + 1);
         }
+    }
+
+    #[test]
+    fn test_sync_to_shared_buffer_only_returns_changed_nodes() {
+        let mut state = SharedState::new();
+        let mut shared_buffer = Box::new(test_shared_buffer());
+        state.set_shared_buffer_ptr(shared_buffer.as_mut() as *mut SharedBuffer);
+
+        state.create_node(1);
+        state.set_width(1, 1, 100.0);
+        state.set_height(1, 1, 100.0);
+
+        state.create_node(2);
+        state.set_width(2, 1, 40.0);
+        state.set_height(2, 1, 20.0);
+        state.add_child(1, 2);
+
+        let root = state.root_id.expect("root node");
+        state
+            .taffy
+            .compute_layout(
+                state.nodes[&root].taffy_node,
+                Size {
+                    width: AvailableSpace::Definite(200.0),
+                    height: AvailableSpace::Definite(200.0),
+                },
+            )
+            .expect("initial layout");
+
+        let mut first_changed = state.sync_to_shared_buffer();
+        first_changed.sort_unstable();
+        assert_eq!(first_changed, vec![0, 1]);
+
+        let second_changed = state.sync_to_shared_buffer();
+        assert!(second_changed.is_empty());
+
+        state.set_width(2, 1, 60.0);
+        state
+            .taffy
+            .compute_layout(
+                state.nodes[&root].taffy_node,
+                Size {
+                    width: AvailableSpace::Definite(200.0),
+                    height: AvailableSpace::Definite(200.0),
+                },
+            )
+            .expect("updated layout");
+
+        let third_changed = state.sync_to_shared_buffer();
+        assert_eq!(third_changed, vec![1]);
+        assert_eq!(shared_buffer.layout_results[1].width, 60.0);
     }
 }
 
@@ -169,21 +250,21 @@ mod integration_tests {
     #[test]
     fn test_real_world_usage_pattern() {
         let mut state = SharedState::new();
-        
+
         // Phase 1: 初始创建 100 个节点
         let mut handles = Vec::new();
         for i in 0..100 {
             handles.push(state.create_node_with_handle(i).unwrap());
         }
         assert_eq!(state.get_stats().active_count, 100);
-        
+
         // Phase 2: 删除一半
         for h in handles.drain(50..) {
             state.remove_node_with_handle(h);
         }
         assert_eq!(state.get_stats().active_count, 50);
         assert_eq!(state.get_stats().free_count, 50);
-        
+
         // Phase 3: 创建新节点（应该复用被删除的 slot）
         for i in 100..150 {
             let new_handle = state.create_node_with_handle(i).unwrap();
@@ -192,7 +273,7 @@ mod integration_tests {
             assert!(new_handle.generation > 0); // 代际增加
             handles.push(new_handle);
         }
-        
+
         assert_eq!(state.get_stats().active_count, 100);
     }
 
@@ -200,19 +281,19 @@ mod integration_tests {
     #[test]
     fn test_capacity_boundary() {
         let mut state = SharedState::new();
-        
+
         // 创建到刚好低于 80% 阈值
         let threshold = (INITIAL_CAPACITY as f32 * 0.8) as u32;
         for i in 0..threshold {
             state.create_node_with_handle(i);
         }
-        
+
         // 不应该建议预扩容
         assert!(!state.should_pre_expand());
-        
+
         // 再创建一个，超过阈值
         state.create_node_with_handle(threshold);
-        
+
         // 现在应该建议预扩容
         assert!(state.should_pre_expand());
     }
@@ -221,11 +302,11 @@ mod integration_tests {
     #[test]
     fn test_max_capacity_limit() {
         let mut state = SharedState::new();
-        
+
         // 扩容到最大
         state.expand_capacity(MAX_CAPACITY).unwrap();
         assert_eq!(state.get_capacity(), MAX_CAPACITY);
-        
+
         // 创建到最大容量
         let mut handles = Vec::new();
         for i in 0..MAX_CAPACITY as u32 {
@@ -236,7 +317,7 @@ mod integration_tests {
                 break;
             }
         }
-        
+
         // 验证活跃节点数量
         let stats = state.get_stats();
         assert!(stats.active_count <= MAX_CAPACITY);
@@ -246,25 +327,21 @@ mod integration_tests {
     #[test]
     fn test_rapid_create_delete() {
         let mut state = SharedState::new();
-        
+
         // 快速创建和删除 1000 次
         for i in 0..1000 {
             let h = state.create_node_with_handle(i).unwrap();
             state.remove_node_with_handle(h);
         }
-        
+
         // 最终应该没有活跃节点
         assert_eq!(state.get_stats().active_count, 0);
-        
+
         // 但应该有大量回收的 ID
         assert!(state.get_stats().free_count > 0);
-        
+
         // 验证代际计数
-        let max_generation = state.get_generations()
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0);
+        let max_generation = state.get_generations().iter().copied().max().unwrap_or(0);
         assert!(max_generation > 0);
     }
 }

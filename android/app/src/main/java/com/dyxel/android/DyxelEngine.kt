@@ -80,6 +80,9 @@ class DyxelEngine {
     private external fun initLogger()
 
     companion object {
+        @JvmStatic
+        external fun nativeOnVBlank()
+
         init {
             System.setProperty("uniffi.component.dyxel_core.libraryOverride", "dyxel_core")
             System.loadLibrary("dyxel_core")

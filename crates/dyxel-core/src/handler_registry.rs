@@ -117,7 +117,11 @@ impl HandlerRegistry {
     pub fn get_config(&self, node_id: u32, config_type: u8) -> Option<u32> {
         match config_type {
             CONFIG_TAP_COUNT => self.tap_handlers.get(&node_id).copied(),
-            _ => self.gesture_configs.get(&node_id)?.get(&config_type).copied(),
+            _ => self
+                .gesture_configs
+                .get(&node_id)?
+                .get(&config_type)
+                .copied(),
         }
     }
 
@@ -291,18 +295,12 @@ mod tests {
 
         // Find handler in bubble path
         let path = vec![5, 8, 10, 20]; // Leaf to root
-        assert_eq!(
-            registry.find_handler(&path, HandlerType::Tap(1)),
-            Some(10)
-        );
+        assert_eq!(registry.find_handler(&path, HandlerType::Tap(1)), Some(10));
         assert_eq!(
             registry.find_handler(&path, HandlerType::LongPress),
             Some(20)
         );
-        assert_eq!(
-            registry.find_handler(&path, HandlerType::Pan),
-            None
-        );
+        assert_eq!(registry.find_handler(&path, HandlerType::Pan), None);
 
         // Unregister
         registry.unregister(10);

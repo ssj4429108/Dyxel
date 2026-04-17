@@ -5,8 +5,8 @@
 //!
 //! Routes raw pointer events to registered callbacks.
 
-use std::collections::HashMap;
 use crate::events::PointerEvent;
+use std::collections::HashMap;
 
 pub type PointerRouteCallback = Box<dyn FnMut(&PointerEvent) + Send>;
 
@@ -24,7 +24,10 @@ impl PointerRouter {
     }
 
     pub fn add_route(&mut self, pointer: u32, callback: PointerRouteCallback) {
-        self.routes.entry(pointer).or_insert_with(Vec::new).push(callback);
+        self.routes
+            .entry(pointer)
+            .or_insert_with(Vec::new)
+            .push(callback);
     }
 
     pub fn remove_route(&mut self, pointer: u32) {

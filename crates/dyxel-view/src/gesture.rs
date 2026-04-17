@@ -217,7 +217,14 @@ impl GestureEvent {
     }
 
     /// Create a scale event
-    pub fn scale(node_id: u32, x: f32, y: f32, scale: f32, delta_scale: f32, phase: GesturePhase) -> Self {
+    pub fn scale(
+        node_id: u32,
+        x: f32,
+        y: f32,
+        scale: f32,
+        delta_scale: f32,
+        phase: GesturePhase,
+    ) -> Self {
         Self {
             gesture_type: GestureEventType::Scale,
             phase,
@@ -254,7 +261,14 @@ impl GestureEvent {
     }
 
     /// Create a rotation event
-    pub fn rotation(node_id: u32, x: f32, y: f32, angle: f32, delta_angle: f32, phase: GesturePhase) -> Self {
+    pub fn rotation(
+        node_id: u32,
+        x: f32,
+        y: f32,
+        angle: f32,
+        delta_angle: f32,
+        phase: GesturePhase,
+    ) -> Self {
         Self {
             gesture_type: GestureEventType::Rotation,
             phase,
@@ -595,7 +609,10 @@ impl SequenceGesture {
         }
     }
 
-    pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
+    pub fn on_gesture_judge_begin(
+        mut self,
+        handler: impl FnMut(&GestureEvent) -> bool + 'static,
+    ) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
         self
     }
@@ -624,7 +641,10 @@ impl ParallelGesture {
         }
     }
 
-    pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
+    pub fn on_gesture_judge_begin(
+        mut self,
+        handler: impl FnMut(&GestureEvent) -> bool + 'static,
+    ) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
         self
     }
@@ -653,7 +673,10 @@ impl ExclusiveGesture {
         }
     }
 
-    pub fn on_gesture_judge_begin(mut self, handler: impl FnMut(&GestureEvent) -> bool + 'static) -> Self {
+    pub fn on_gesture_judge_begin(
+        mut self,
+        handler: impl FnMut(&GestureEvent) -> bool + 'static,
+    ) -> Self {
         self.on_gesture_judge_begin = Some(Box::new(handler));
         self
     }
@@ -767,17 +790,18 @@ where
 {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    
+
     thread_local! {
         static TAP_HANDLERS_V2: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     }
-    
+
     push_command!(SHARED_BUFFER, AttachClick, node_id);
     // Unified tap handler with count=1 for single tap
     push_command!(SHARED_BUFFER, RegisterTapHandler, node_id, 1u32);
 
     TAP_HANDLERS_V2.with(|h| {
-        h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
+        h.borrow_mut()
+            .insert(node_id, Box::new(move |event| handler(event)));
     });
 }
 
@@ -788,17 +812,18 @@ where
 {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    
+
     thread_local! {
         static DOUBLE_TAP_HANDLERS_V2: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     }
-    
+
     push_command!(SHARED_BUFFER, AttachClick, node_id);
     // Use unified RegisterTapHandler with count=2 for double tap
     push_command!(SHARED_BUFFER, RegisterTapHandler, node_id, 2u32);
 
     DOUBLE_TAP_HANDLERS_V2.with(|h| {
-        h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
+        h.borrow_mut()
+            .insert(node_id, Box::new(move |event| handler(event)));
     });
 }
 
@@ -809,16 +834,17 @@ where
 {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    
+
     thread_local! {
         static LONG_PRESS_HANDLERS_V2: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     }
-    
+
     push_command!(SHARED_BUFFER, AttachClick, node_id);
     push_command!(SHARED_BUFFER, RegisterLongPressHandler, node_id);
-    
+
     LONG_PRESS_HANDLERS_V2.with(|h| {
-        h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
+        h.borrow_mut()
+            .insert(node_id, Box::new(move |event| handler(event)));
     });
 }
 
@@ -829,15 +855,16 @@ where
 {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    
+
     thread_local! {
         static PAN_HANDLERS_V2: RefCell<HashMap<u32, Box<dyn FnMut(GestureEvent)>>> = RefCell::new(HashMap::new());
     }
-    
+
     push_command!(SHARED_BUFFER, AttachClick, node_id);
     push_command!(SHARED_BUFFER, RegisterPanHandler, node_id);
-    
+
     PAN_HANDLERS_V2.with(|h| {
-        h.borrow_mut().insert(node_id, Box::new(move |event| handler(event)));
+        h.borrow_mut()
+            .insert(node_id, Box::new(move |event| handler(event)));
     });
 }
