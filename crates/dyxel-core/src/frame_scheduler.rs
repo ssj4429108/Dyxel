@@ -255,7 +255,7 @@ impl FrameScheduler {
                     token_issued_at: now,
                 });
                 self.state = SchedulerState::Rendering;
-                log::trace!(
+                log::debug!(
                     "FrameScheduler: issued token frame_id={} epoch={} divisor={}",
                     frame_id,
                     epoch,

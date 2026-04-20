@@ -691,23 +691,21 @@ impl DyxelHost {
                     let mut lifecycle = Lifecycle::Stopped;
 
                     loop {
-                        log::debug!("LogicThread: loop start, lifecycle={:?}", lifecycle);
+                        log::trace!("LogicThread: loop start, lifecycle={:?}", lifecycle);
                         // Clear any pending VSync signals to prevent frame lag accumulation
                         // Logic Thread should sync with latest VSync, not old ones
-                        log::debug!("LogicThread: clearing VSync signals...");
                         while render_complete_rx.try_recv().is_ok() {}
 
                         // Receive message (block when stopped/paused to save CPU)
-                        log::debug!("LogicThread: checking for messages...");
                         let msg_res = if lifecycle == Lifecycle::Running {
                             // Running: non-blocking check then wait for VSync if no message
                             match logic_rx.try_recv() {
                                 Ok(msg) => {
-                                    log::debug!("LogicThread: received message");
+                                    log::trace!("LogicThread: received message");
                                     Ok(msg)
                                 }
                                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                    log::debug!("LogicThread: no message, executing tick...");
+                                    log::trace!("LogicThread: no message, executing tick...");
                                     // No message, execute tick and sleep
                                     if let Some(ref mut l) = logic_opt {
                                         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
@@ -730,13 +728,10 @@ impl DyxelHost {
                                             });
 
                                             let tick_opt = l.tick_fn.lock().unwrap();
-                                            log::debug!("LogicThread: tick_fn lock acquired");
                                             if let Some(tick) = tick_opt.as_ref() {
-                                                log::debug!("LogicThread: calling tick...");
                                                 if let Err(e) = tick.call() {
                                                     log::error!("LogicThread: WASM tick failed: {}", e);
                                                 }
-                                                log::debug!("LogicThread: tick returned");
                                             } else {
                                                 log::warn!("LogicThread: tick_fn is None, skipping tick");
                                             }
@@ -771,10 +766,13 @@ impl DyxelHost {
                                             let viewport = *l.last_viewport_size.lock().unwrap();
                                             let package = runtime_prepare(l, viewport.0, viewport.1);
                                             let epoch = package.layout_epoch;
+                                            let node_count = package.nodes.len();
+                                            let did_layout = package.did_layout;
                                             mailbox_for_logic.commit(epoch, std::sync::Arc::new(package));
 
                                             // Notify scheduler that new content is ready
                                             let _ = scheduler_tx_for_logic.send(SchedulerEvent::LogicCommitted { epoch });
+                                            log::debug!("LogicThread: Committed epoch={} nodes={} viewport={:?} did_layout={}", epoch, node_count, viewport, did_layout);
 
                                             // DIAG: record LogicTime covering the full WASM tick lifecycle
                                             let logic_time_ms = logic_tick_start.elapsed().as_secs_f64() * 1000.0;
@@ -787,7 +785,6 @@ impl DyxelHost {
                                             std::thread::sleep(Duration::from_millis(1));
                                         }
                                     }
-                                    log::debug!("LogicThread: tick complete, continuing loop");
                                     continue;
                                 }
                                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -801,7 +798,6 @@ impl DyxelHost {
                         };
 
                         // Process received message
-                        log::trace!("LogicThread: msg_res={:?}, lifecycle={:?}", msg_res.is_ok(), lifecycle);
                         if let Ok(msg) = msg_res {
                             match &msg {
                                 LogicMessage::SetReady(_) => log::debug!("LogicThread: msg type=SetReady"),
@@ -820,10 +816,11 @@ impl DyxelHost {
                                     log::info!("LogicThread: Running now!");
                                 }
                                 LogicMessage::Input(event) => {
-                                    log::info!("LogicThread: Received Input event={:?}, logic_opt={}", event, logic_opt.is_some());
+                                    log::debug!("LogicThread: Received Input event={:?}, logic_opt={}", event, logic_opt.is_some());
                                     if let Some(ref mut l) = logic_opt { process_input_internal(l, event); }
                                 }
                                 LogicMessage::Resize { width, height } => {
+                                    log::info!("LogicThread: Received Resize {}x{}", width, height);
                                     if let Some(ref mut l) = logic_opt {
                                         *l.last_viewport_size.lock().unwrap() = (width, height);
                                     }
@@ -1020,6 +1017,7 @@ impl DyxelHost {
                         if lifecycle == Lifecycle::Running {
                             match render_cmd_rx.recv_timeout(Duration::from_millis(16)) {
                                 Ok(crate::frame_scheduler::RenderCommand::Render(token)) => {
+                                    log::debug!("RenderThread: Received RenderCommand frame_id={} epoch={}", token.frame_id, token.epoch);
                                     let now = std::time::Instant::now();
                                     let frame_interval_ms = LAST_PRESENT_TIME.with(|t| {
                                         let interval = t.get().map(|last| now.duration_since(last).as_secs_f64() * 1000.0).unwrap_or(0.0);
@@ -1038,6 +1036,7 @@ impl DyxelHost {
                                             let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderStarted { frame_id: token.frame_id, epoch: token.epoch });
                                             r.backend.set_frame_timing(0.0, frame_interval_ms);
                                             let (epoch, package) = mailbox_for_render.snapshot();
+                                            log::debug!("RenderThread: Rendering epoch={} nodes={} viewport={:?}", epoch, package.nodes.len(), package.viewport);
                                             render_frame_with_package(r, s.as_mut(), &package);
                                             // Notify scheduler that render completed
                                             let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderCompleted { frame_id: token.frame_id, epoch, stats: crate::FrameStats::default() });
@@ -1235,6 +1234,13 @@ impl DyxelHost {
 
         if needs_prepare {
             self.prepare_engine(ddir.clone()).await;
+        }
+
+        // Send initial viewport size to logic thread before load_wasm
+        // so logic thread knows the viewport before first tick
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::Resize { width: _w, height: _h });
         }
 
         #[cfg(target_os = "android")]
