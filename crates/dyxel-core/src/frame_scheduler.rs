@@ -23,6 +23,7 @@ pub struct FrameToken {
 #[derive(Debug)]
 pub enum SchedulerEvent {
     LogicCommitted { epoch: u64 },
+    RenderCompleted { frame_id: u64, epoch: u64 },
     Shutdown,
 }
 

@@ -15,8 +15,10 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use crate::engine::{LogicState, RenderState, setup_engine};
+use crate::frame_scheduler::{SchedulerEvent};
 use crate::platform::{SafeWindowHandle, SurfaceId};
-use crate::renderer::render_frame;
+use crate::render_mailbox::RenderMailbox;
+use crate::renderer::{render_frame_with_package, runtime_prepare};
 use crate::state::SharedState;
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
@@ -28,6 +30,7 @@ use dyxel_render_vello::VelloBackend;
 const LOGIC_FRAME_WAIT_TIMEOUT: Duration = Duration::from_millis(33);
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn wait_for_render_or_vsync(render_complete_rx: &mpsc::Receiver<()>) {
     let _ = render_complete_rx.recv_timeout(LOGIC_FRAME_WAIT_TIMEOUT);
 }
@@ -97,6 +100,7 @@ pub enum LogicMessage {
     SetReady(LogicState),
     Input(InputEvent),
     LoadWasm(String),
+    Resize { width: u32, height: u32 },
     Pause,
     Resume,
     Shutdown,
@@ -639,11 +643,15 @@ impl DyxelHost {
         let (render_complete_tx, render_complete_rx) = mpsc::channel(); // VSync signal: Render -> Logic
         #[cfg(not(target_arch = "wasm32"))]
         let is_rendering = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        #[cfg(not(target_arch = "wasm32"))]
-        let render_jank_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
         // Create shared state (used directly in WASM, managed by threads in native)
         let shared_state = SharedPtr::new(SharedMutex::new(crate::state::SharedState::new()));
+
+        // FrameScheduler infrastructure: mailbox + scheduler event channel
+        #[cfg(not(target_arch = "wasm32"))]
+        let mailbox = Arc::new(RenderMailbox::new());
+        #[cfg(not(target_arch = "wasm32"))]
+        let (scheduler_tx, _scheduler_rx) = crossbeam_channel::unbounded::<SchedulerEvent>();
 
         let host = SharedPtr::new(Self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -665,8 +673,8 @@ impl DyxelHost {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let render_tx_for_logic = render_tx.clone();
-            let render_complete_rx = render_complete_rx; // VSync signal receiver
-            let is_rendering_for_logic = is_rendering.clone();
+            let mailbox_for_logic = mailbox.clone();
+            let scheduler_tx_for_logic = scheduler_tx.clone();
 
             // 1. Logic Thread (Thinker)
             thread::Builder::new()
@@ -747,40 +755,36 @@ impl DyxelHost {
                                                 let mut state_guard = l.shared_state.lock().unwrap();
                                                 let _ = sync_layout_to_wasm(mem, bptr, &mut *state_guard);
 
-                                                // Only trigger render if transaction completed and dirty nodes exist
+                                                // Clear dirty tracker after processing
                                                 if crate::runtime::is_render_needed(&*state_guard) {
-                                                    let dirty_count = state_guard.dirty_tracker.iter_dirty_nodes().count();
-                                                    if dirty_count > 0 {
-                                                        // Core fix: if Render Thread is still busy, skip this frame's draw request (frame skip)
-                                                        if !is_rendering_for_logic.load(std::sync::atomic::Ordering::Acquire) {
-                                                            let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
-                                                        } else {
-                                                            let jank = render_jank_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                                                            if jank % 60 == 1 {
-                                                                log::warn!("LogicThread: RenderJank={}, skipping RequestDraw because render is still in progress", jank);
-                                                            }
-                                                        }
-                                                    } else {
-                                                        let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
-                                                    }
                                                     crate::runtime::clear_dirty_tracker(&mut *state_guard);
                                                 }
                                             }
 
-                                            // Wait for the render/VSync boundary before the next tick.
-                                            // Without this wait the logic thread busy-loops, starving first frame presentation.
-                                            wait_for_render_or_vsync(&render_complete_rx);
+                                            // === NEW: Prepare RenderPackage and commit to mailbox ===
+                                            let viewport = *l.last_viewport_size.lock().unwrap();
+                                            let package = runtime_prepare(l, viewport.0, viewport.1);
+                                            let epoch = package.layout_epoch;
+                                            mailbox_for_logic.commit(epoch, std::sync::Arc::new(package));
+
+                                            // Notify scheduler that new content is ready
+                                            let _ = scheduler_tx_for_logic.send(SchedulerEvent::LogicCommitted { epoch });
+
+                                            // Transitional: still send RequestDraw until scheduler takes over (Task 5)
+                                            let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
 
                                             // DIAG: record LogicTime covering the full WASM tick lifecycle
                                             let logic_time_ms = logic_tick_start.elapsed().as_secs_f64() * 1000.0;
                                             if logic_time_ms > 8.0 {
-                                                log::info!("DIAG LogicTime={:.2}ms RenderJank={}", logic_time_ms, render_jank_count.load(std::sync::atomic::Ordering::Relaxed));
+                                                log::info!("DIAG LogicTime={:.2}ms", logic_time_ms);
                                             }
+
+                                            // Temporary pacing: sleep briefly to prevent busy-looping
+                                            // until scheduler takes over cadence control (Task 6)
+                                            std::thread::sleep(Duration::from_millis(1));
                                         }
                                     }
-                                    // After tick/VSync, check for input messages before continuing
-                                    // This prevents input events from being delayed by VSync wait
-                                    log::debug!("LogicThread: tick/VSync complete, continuing loop");
+                                    log::debug!("LogicThread: tick complete, continuing loop");
                                     continue;
                                 }
                                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -800,6 +804,7 @@ impl DyxelHost {
                                 LogicMessage::SetReady(_) => log::debug!("LogicThread: msg type=SetReady"),
                                 LogicMessage::Input(_) => log::trace!("LogicThread: msg type=Input"),
                                 LogicMessage::LoadWasm(_) => log::debug!("LogicThread: msg type=LoadWasm"),
+                                LogicMessage::Resize { .. } => log::debug!("LogicThread: msg type=Resize"),
                                 LogicMessage::Pause => log::debug!("LogicThread: msg type=Pause"),
                                 LogicMessage::Resume => log::debug!("LogicThread: msg type=Resume"),
                                 LogicMessage::Shutdown => log::info!("LogicThread: msg type=Shutdown"),
@@ -814,6 +819,11 @@ impl DyxelHost {
                                 LogicMessage::Input(event) => {
                                     log::info!("LogicThread: Received Input event={:?}, logic_opt={}", event, logic_opt.is_some());
                                     if let Some(ref mut l) = logic_opt { process_input_internal(l, event); }
+                                }
+                                LogicMessage::Resize { width, height } => {
+                                    if let Some(ref mut l) = logic_opt {
+                                        *l.last_viewport_size.lock().unwrap() = (width, height);
+                                    }
                                 }
                                 LogicMessage::LoadWasm(path) => {
                                     log::info!("LogicThread: Processing LoadWasm...");
@@ -859,6 +869,8 @@ impl DyxelHost {
             let render_complete_tx = render_complete_tx.clone(); // VSync signal sender
             let render_tx_for_retry = render_tx.clone();
             let is_rendering_for_render = is_rendering.clone();
+            let mailbox_for_render = mailbox.clone();
+            let scheduler_tx_for_render = scheduler_tx.clone();
 
             thread::Builder::new()
                 .name("DyxelRender".into())
@@ -1087,7 +1099,8 @@ impl DyxelHost {
                                 let mut surfs = surfaces_ptr.lock_guard().unwrap();
                                 if let Some(s) = surfs.get_mut(&id.0) {
                                     s.resize(&mut r.context, width, height);
-                                    render_frame(r, s.as_mut());
+                                    let (_, package) = mailbox_for_render.snapshot();
+                                    render_frame_with_package(r, s.as_mut(), &package);
                                 }
                             }
                         } else if draw_requested && lifecycle == Lifecycle::Running {
@@ -1110,7 +1123,8 @@ impl DyxelHost {
                                         log::trace!("RenderThread: Rendering frame for surface {:?}", id);
                                     }
                                     r.backend.set_frame_timing(pacer_wait_ms, frame_interval_ms);
-                                    render_frame(r, s.as_mut());
+                                    let (epoch, package) = mailbox_for_render.snapshot();
+                                    render_frame_with_package(r, s.as_mut(), &package);
                                     if !continuous_render && render_needs_retry(r) {
                                         let _ = render_tx_for_retry.send(RenderMessage::RequestDraw);
                                     }
@@ -1118,6 +1132,9 @@ impl DyxelHost {
                                     if let Some(ref mut p) = pacer {
                                         p.on_frame_submitted();
                                     }
+                                    // Notify scheduler that render completed
+                                    let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderCompleted { frame_id: 0, epoch });
+                                    // Legacy: also signal logic thread (to be removed in Task 5)
                                     let _ = render_complete_tx.send(());
                                 } else {
                                     log::warn!("RenderThread: Active surface {:?} not found in map", id);
@@ -1267,8 +1284,13 @@ impl DyxelHost {
 
     pub fn resize_native(&self, width: u32, height: u32) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.render_tx.lock().unwrap() {
-            let _ = tx.send(RenderMessage::Resize { width, height });
+        {
+            if let Some(tx) = &*self.render_tx.lock().unwrap() {
+                let _ = tx.send(RenderMessage::Resize { width, height });
+            }
+            if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+                let _ = tx.send(LogicMessage::Resize { width, height });
+            }
         }
     }
 
@@ -1508,6 +1530,11 @@ impl DyxelHost {
                 Ok(_) => (),
                 Err(e) => log::error!("setup: Failed to send RequestDraw: {:?}", e),
             }
+        }
+
+        // Inform logic thread of initial viewport size
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::Resize { width, height });
         }
 
         // Resume LogicThread if it was paused (e.g., after Back button/activity restart)

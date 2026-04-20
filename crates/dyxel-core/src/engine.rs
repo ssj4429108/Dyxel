@@ -22,13 +22,7 @@ pub struct LogicState {
     pub on_click_fn: Mutex<Option<wasm3::Function<'static, (u32,), ()>>>,
     #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
     pub shared_buffer_ptr: Mutex<Option<u32>>,
-}
-
-pub struct RenderState {
-    pub context: RenderContext,
-    pub backend: Box<dyn RenderBackend>,
-    pub shared_state: SharedPtr<SharedMutex<SharedState>>,
-    /// Editor registry moved from VelloBackend to Runtime (Task #10)
+    /// Editor registry — Logic worker owns text measurement and editor lifecycle
     pub editors: std::sync::Mutex<std::collections::HashMap<u32, dyxel_editor::Editor>>,
     /// Last recorded editor generations for staleness gating
     pub last_editor_generations:
@@ -37,9 +31,14 @@ pub struct RenderState {
     pub last_viewport_size: std::sync::Mutex<(u32, u32)>,
     /// Epoch incremented whenever layout is recomputed
     pub layout_epoch: std::sync::atomic::AtomicU64,
-    /// Raster cache policy manager — Runtime decides which nodes to bake,
-    /// Backend only executes bake plans and holds GPU texture storage.
+    /// Raster cache policy manager — Logic worker decides which nodes to bake
     pub raster_cache: std::sync::Mutex<Option<dyxel_render_api::raster_cache::RasterCache>>,
+}
+
+pub struct RenderState {
+    pub context: RenderContext,
+    pub backend: Box<dyn RenderBackend>,
+    pub shared_state: SharedPtr<SharedMutex<SharedState>>,
 }
 
 // LogicState contains Wasm3 components which are NOT Sync.
@@ -110,12 +109,6 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
         on_click_fn: Mutex::new(None),
         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
         shared_buffer_ptr: Mutex::new(None),
-    };
-
-    let render = RenderState {
-        context,
-        backend: Box::new(backend),
-        shared_state,
         editors: std::sync::Mutex::new(std::collections::HashMap::new()),
         last_editor_generations: std::sync::Mutex::new(std::collections::HashMap::new()),
         last_viewport_size: std::sync::Mutex::new((0, 0)),
@@ -125,6 +118,12 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
                 dyxel_render_api::raster_cache::RasterCacheConfig::default(),
             ),
         )),
+    };
+
+    let render = RenderState {
+        context,
+        backend: Box::new(backend),
+        shared_state,
     };
 
     Ok((logic, render))

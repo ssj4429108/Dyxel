@@ -1,7 +1,7 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::engine::RenderState;
+use crate::engine::{LogicState, RenderState};
 use dyxel_render_api::{
     BlurEffect, DeviceHandle, NodeContent, PreparedText, QueueHandle, RenderPackage, SceneNode,
     ShadowDesc, SurfaceState, TextDecoration, TextDrawPayload, TextGlyph, TextGlyphRun, Transform,
@@ -145,10 +145,10 @@ fn build_scene_snapshot(
     nodes
 }
 
-/// CPU-side prepare owned by Runtime: editor lifecycle, text measurement,
+/// CPU-side prepare owned by Logic Worker: editor lifecycle, text measurement,
 /// layout computation. Returns a fully populated RenderPackage.
-fn runtime_prepare(
-    e: &mut RenderState,
+pub fn runtime_prepare(
+    e: &mut LogicState,
     w: u32,
     h: u32,
 ) -> RenderPackage {
@@ -375,7 +375,13 @@ fn runtime_prepare(
     }
 }
 
-pub fn render_frame(e: &mut RenderState, s: &mut dyn SurfaceState) {
+/// GPU-side render owned by Render Worker.
+/// Consumes a pre-prepared RenderPackage snapshot from the mailbox.
+pub fn render_frame_with_package(
+    e: &mut RenderState,
+    s: &mut dyn SurfaceState,
+    package: &RenderPackage,
+) {
     if let Some(v_ctx) = e.context.downcast_ref::<vello::util::RenderContext>() {
         let device = &v_ctx.devices[0].device;
         let queue = &v_ctx.devices[0].queue;
@@ -389,26 +395,16 @@ pub fn render_frame(e: &mut RenderState, s: &mut dyn SurfaceState) {
             s.height()
         );
 
-        // === Phase 1: CPU-side prepare (owned by Runtime) ===
-        let prepare_start = std::time::Instant::now();
-        let package = runtime_prepare(e, s.width(), s.height());
-        let prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
-        if prepare_ms > 1.0 {
-            log::debug!("[RenderPackage] prepare took {:.2}ms", prepare_ms);
-        }
-
-        // === Phase 2: GPU render (owned by Backend) ===
         let render_result = e.backend.render_package(
             device_handle,
             queue_handle,
             s,
-            &package,
+            package,
         );
 
         if let Err(err) = render_result {
             log::error!("renderer: Render error: {:?}", err);
         }
-        // Note: dirty tracker is cleared by Logic Thread (bridge.rs) after sending RequestDraw.
     } else {
         log::error!("renderer: Failed to downcast RenderContext to Vello context");
     }
