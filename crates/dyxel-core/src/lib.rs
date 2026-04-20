@@ -5,12 +5,14 @@
 pub mod android_vblank;
 pub mod bridge;
 pub mod engine;
+pub mod frame_scheduler;
 pub mod handler_registry;
 pub mod input;
 pub mod input_proxy;
 pub mod pacer;
 pub mod platform;
 pub mod renderer;
+pub mod render_mailbox;
 pub mod runtime;
 pub mod spatial_index;
 pub mod state;

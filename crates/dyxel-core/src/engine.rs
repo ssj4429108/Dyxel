@@ -10,6 +10,9 @@ use dyxel_render_vello::VelloBackend;
 #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
 use std::sync::Mutex;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex as StdMutex};
+
 pub struct LogicState {
     pub shared_state: SharedPtr<SharedMutex<SharedState>>,
     #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
@@ -22,13 +25,7 @@ pub struct LogicState {
     pub on_click_fn: Mutex<Option<wasm3::Function<'static, (u32,), ()>>>,
     #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
     pub shared_buffer_ptr: Mutex<Option<u32>>,
-}
-
-pub struct RenderState {
-    pub context: RenderContext,
-    pub backend: Box<dyn RenderBackend>,
-    pub shared_state: SharedPtr<SharedMutex<SharedState>>,
-    /// Editor registry moved from VelloBackend to Runtime (Task #10)
+    /// Editor registry — moved from RenderState (Task #4)
     pub editors: std::sync::Mutex<std::collections::HashMap<u32, dyxel_editor::Editor>>,
     /// Last recorded editor generations for staleness gating
     pub last_editor_generations:
@@ -40,6 +37,17 @@ pub struct RenderState {
     /// Raster cache policy manager — Runtime decides which nodes to bake,
     /// Backend only executes bake plans and holds GPU texture storage.
     pub raster_cache: std::sync::Mutex<Option<dyxel_render_api::raster_cache::RasterCache>>,
+    /// Shared access to RenderState so the logic worker can access GPU context
+    /// and commit packages to the mailbox. Only the logic thread should mutate
+    /// the fields above through this handle.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub render_state: Option<Arc<StdMutex<RenderState>>>,
+}
+
+pub struct RenderState {
+    pub context: RenderContext,
+    pub backend: Box<dyn RenderBackend>,
+    pub shared_state: SharedPtr<SharedMutex<SharedState>>,
 }
 
 // LogicState contains Wasm3 components which are NOT Sync.
@@ -110,12 +118,6 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
         on_click_fn: Mutex::new(None),
         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
         shared_buffer_ptr: Mutex::new(None),
-    };
-
-    let render = RenderState {
-        context,
-        backend: Box::new(backend),
-        shared_state,
         editors: std::sync::Mutex::new(std::collections::HashMap::new()),
         last_editor_generations: std::sync::Mutex::new(std::collections::HashMap::new()),
         last_viewport_size: std::sync::Mutex::new((0, 0)),
@@ -125,6 +127,14 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
                 dyxel_render_api::raster_cache::RasterCacheConfig::default(),
             ),
         )),
+        #[cfg(not(target_arch = "wasm32"))]
+        render_state: None,
+    };
+
+    let render = RenderState {
+        context,
+        backend: Box::new(backend),
+        shared_state,
     };
 
     Ok((logic, render))

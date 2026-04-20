@@ -29,6 +29,7 @@ skrifa = "0.22"
 uniffi = { version = "0.28", features = ["cli"] }
 pollster = "0.3"
 log = "0.4"
+crossbeam-channel = "0.5"
 raw-window-handle = "0.6"
 parley.workspace = true
 

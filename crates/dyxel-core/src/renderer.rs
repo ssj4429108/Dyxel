@@ -1,7 +1,7 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::engine::RenderState;
+use crate::engine::{LogicState, RenderState};
 use dyxel_render_api::{
     BlurEffect, DeviceHandle, NodeContent, PreparedText, QueueHandle, RenderPackage, SceneNode,
     ShadowDesc, SurfaceState, TextDecoration, TextDrawPayload, TextGlyph, TextGlyphRun, Transform,
@@ -147,13 +147,16 @@ fn build_scene_snapshot(
 
 /// CPU-side prepare owned by Runtime: editor lifecycle, text measurement,
 /// layout computation. Returns a fully populated RenderPackage.
-fn runtime_prepare(
-    e: &mut RenderState,
+pub fn runtime_prepare(
+    logic: &LogicState,
+    render: &mut RenderState,
     w: u32,
     h: u32,
 ) -> RenderPackage {
     if w == 0 || h == 0 {
-        let epoch = e.layout_epoch.load(std::sync::atomic::Ordering::Relaxed);
+        let epoch = logic
+            .layout_epoch
+            .load(std::sync::atomic::Ordering::Relaxed);
         return RenderPackage {
             viewport: (w, h),
             root_id: None,
@@ -167,18 +170,18 @@ fn runtime_prepare(
     }
 
     let viewport_changed = {
-        let last = *e.last_viewport_size.lock().unwrap();
+        let last = *logic.last_viewport_size.lock().unwrap();
         last.0 != w || last.1 != h
     };
 
     let dirty_has_dirty = {
-        let g = e.shared_state.lock().unwrap();
+        let g = logic.shared_state.lock().unwrap();
         g.dirty_tracker.has_dirty()
     };
 
     let editor_stale = {
-        let editors = e.editors.lock().unwrap();
-        let mut last_gens = e.last_editor_generations.lock().unwrap();
+        let editors = logic.editors.lock().unwrap();
+        let mut last_gens = logic.last_editor_generations.lock().unwrap();
         let mut stale = false;
         for (&id, editor) in editors.iter() {
             let current_gen = editor.generation();
@@ -193,8 +196,8 @@ fn runtime_prepare(
     let needs_layout = viewport_changed || dirty_has_dirty || editor_stale;
 
     let (rid, nodes) = {
-        let mut g = e.shared_state.lock().unwrap();
-        let mut editors = e.editors.lock().unwrap();
+        let mut g = logic.shared_state.lock().unwrap();
+        let mut editors = logic.editors.lock().unwrap();
 
         // First pass: create/update editors for text nodes
         for (&id, node) in &g.nodes {
@@ -310,17 +313,22 @@ fn runtime_prepare(
         (g.root_id, nodes)
     };
 
-    *e.last_viewport_size.lock().unwrap() = (w, h);
+    *logic.last_viewport_size.lock().unwrap() = (w, h);
 
     let layout_epoch = if needs_layout {
-        e.layout_epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+        logic
+            .layout_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
     } else {
-        e.layout_epoch.load(std::sync::atomic::Ordering::Relaxed)
+        logic
+            .layout_epoch
+            .load(std::sync::atomic::Ordering::Relaxed)
     };
 
     // Snapshot dirty tracker for backend raster cache stability tracking
     let dirty_tracker = {
-        let g = e.shared_state.lock().unwrap();
+        let g = logic.shared_state.lock().unwrap();
         g.dirty_tracker.clone()
     };
 
@@ -328,7 +336,7 @@ fn runtime_prepare(
     // Runtime decides which nodes are stable enough to bake and which textures to recycle.
     // Backend only executes the resulting plans.
     let (bake_plans, recycle_plans) = {
-        let mut cache_guard = e.raster_cache.lock().unwrap();
+        let mut cache_guard = logic.raster_cache.lock().unwrap();
         if let Some(ref mut cache) = *cache_guard {
             cache.next_frame();
             let ready_nodes = cache.update_stability(&dirty_tracker);
@@ -375,6 +383,43 @@ fn runtime_prepare(
     }
 }
 
+/// Render a frame using a pre-built RenderPackage (scheduler-driven path).
+pub fn render_frame_with_package(
+    e: &mut RenderState,
+    s: &mut dyn SurfaceState,
+    package: &RenderPackage,
+) {
+    if let Some(v_ctx) = e.context.downcast_ref::<vello::util::RenderContext>() {
+        let device = &v_ctx.devices[0].device;
+        let queue = &v_ctx.devices[0].queue;
+
+        let device_handle = DeviceHandle::new(device);
+        let queue_handle = QueueHandle::new(queue);
+
+        log::trace!(
+            "renderer: Starting frame render, surface size: {}x{}",
+            s.width(),
+            s.height()
+        );
+
+        // === Phase 2: GPU render (owned by Backend) ===
+        let render_result = e.backend.render_package(
+            device_handle,
+            queue_handle,
+            s,
+            package,
+        );
+
+        if let Err(err) = render_result {
+            log::error!("renderer: Render error: {:?}", err);
+        }
+    } else {
+        log::error!("renderer: Failed to downcast RenderContext to Vello context");
+    }
+}
+
+/// Legacy render path: prepares and renders in one call.
+/// Kept for backward compatibility during migration.
 pub fn render_frame(e: &mut RenderState, s: &mut dyn SurfaceState) {
     if let Some(v_ctx) = e.context.downcast_ref::<vello::util::RenderContext>() {
         let device = &v_ctx.devices[0].device;
@@ -390,8 +435,33 @@ pub fn render_frame(e: &mut RenderState, s: &mut dyn SurfaceState) {
         );
 
         // === Phase 1: CPU-side prepare (owned by Runtime) ===
+        // Legacy path: prepare is done inline. This will be removed once all
+        // callers migrate to scheduler-driven prepare + render_frame_with_package.
         let prepare_start = std::time::Instant::now();
-        let package = runtime_prepare(e, s.width(), s.height());
+        // Legacy fallback: create a minimal LogicState on the stack for prepare.
+        // This is a temporary shim; the real scheduler-driven path passes
+        // LogicState from the logic worker.
+        let logic_shim = crate::engine::LogicState {
+            shared_state: e.shared_state.clone(),
+            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+            _env: unsafe { std::mem::zeroed() },
+            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+            _rt: unsafe { std::mem::zeroed() },
+            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+            tick_fn: std::sync::Mutex::new(None),
+            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+            on_click_fn: std::sync::Mutex::new(None),
+            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
+            shared_buffer_ptr: std::sync::Mutex::new(None),
+            editors: std::sync::Mutex::new(std::collections::HashMap::new()),
+            last_editor_generations: std::sync::Mutex::new(std::collections::HashMap::new()),
+            last_viewport_size: std::sync::Mutex::new((0, 0)),
+            layout_epoch: std::sync::atomic::AtomicU64::new(0),
+            raster_cache: std::sync::Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            render_state: None,
+        };
+        let package = runtime_prepare(&logic_shim, e, s.width(), s.height());
         let prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
         if prepare_ms > 1.0 {
             log::debug!("[RenderPackage] prepare took {:.2}ms", prepare_ms);
