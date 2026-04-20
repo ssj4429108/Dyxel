@@ -22,6 +22,7 @@ pub struct CadenceGovernor {
     divisor: u32,
     supported_divisors: Vec<u32>,
     vblank_counter: u64,
+    frame_time_window: Vec<f64>,
 }
 
 impl CadenceGovernor {
@@ -33,7 +34,13 @@ impl CadenceGovernor {
         } else {
             vec![1, 2, 3, 4]
         };
-        Self { display_hz, divisor: 1, supported_divisors, vblank_counter: 0 }
+        Self {
+            display_hz,
+            divisor: 1,
+            supported_divisors,
+            vblank_counter: 0,
+            frame_time_window: Vec::with_capacity(10),
+        }
     }
 
     pub fn supported_divisors(&self) -> &[u32] {
@@ -53,6 +60,77 @@ impl CadenceGovernor {
             divisor: self.divisor,
             effective_hz,
             target_frame_duration: Duration::from_secs_f64(1.0 / effective_hz),
+        }
+    }
+
+    pub fn current_decision(&self) -> CadenceDecision {
+        let effective_hz = self.display_hz / self.divisor as f64;
+        CadenceDecision {
+            should_present_this_tick: true,
+            divisor: self.divisor,
+            effective_hz,
+            target_frame_duration: Duration::from_secs_f64(1.0 / effective_hz),
+        }
+    }
+
+    pub fn info(&self) -> CadenceInfo {
+        let effective_hz = self.display_hz / self.divisor as f64;
+        CadenceInfo {
+            display_hz: self.display_hz,
+            divisor: self.divisor,
+            effective_hz,
+            target_frame_duration: Duration::from_secs_f64(1.0 / effective_hz),
+            expected_present_time: Instant::now(),
+        }
+    }
+
+    pub fn record_frame_duration(&mut self, frame_time_ms: f64) {
+        self.frame_time_window.push(frame_time_ms);
+        if self.frame_time_window.len() > 10 {
+            self.frame_time_window.remove(0);
+        }
+        self.evaluate_divisor();
+    }
+
+    fn evaluate_divisor(&mut self) {
+        if self.frame_time_window.len() < 5 {
+            return;
+        }
+        let avg = self.frame_time_window.iter().sum::<f64>() / self.frame_time_window.len() as f64;
+        let target_ms = 1000.0 / self.display_hz;
+        let current_target_ms = target_ms * self.divisor as f64;
+
+        // Upgrade (lower divisor = higher FPS) if we have headroom
+        if self.divisor > 1 && avg < current_target_ms * 0.7 {
+            let next = self
+                .supported_divisors
+                .iter()
+                .find(|&&d| d < self.divisor)
+                .copied();
+            if let Some(d) = next {
+                log::debug!("CadenceGovernor: upgrading divisor {} -> {}", self.divisor, d);
+                self.divisor = d;
+                self.frame_time_window.clear();
+            }
+        }
+        // Downgrade (higher divisor = lower FPS) if we're missing budget
+        else if avg > current_target_ms * 1.15 {
+            let next = self
+                .supported_divisors
+                .iter()
+                .find(|&&d| d > self.divisor)
+                .copied();
+            if let Some(d) = next {
+                log::info!(
+                    "CadenceGovernor: downgrading divisor {} -> {} (avg {:.2}ms > budget {:.2}ms)",
+                    self.divisor,
+                    d,
+                    avg,
+                    current_target_ms
+                );
+                self.divisor = d;
+                self.frame_time_window.clear();
+            }
         }
     }
 }

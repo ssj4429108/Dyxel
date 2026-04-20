@@ -1,6 +1,13 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameResultClass {
+    OnTime,
+    Late,
+    Dropped,
+}
+
 #[derive(Debug, Clone)]
 pub struct FrameRecord {
     pub frame_id: u64,
@@ -9,6 +16,8 @@ pub struct FrameRecord {
     pub vblank_at: Instant,
     pub render_started_at: Option<Instant>,
     pub render_completed_at: Option<Instant>,
+    pub frame_result: Option<FrameResultClass>,
+    pub presented_at: Option<Instant>,
 }
 
 pub struct FrameTimeline {
@@ -44,6 +53,8 @@ impl FrameTimeline {
             vblank_at,
             render_started_at: None,
             render_completed_at: None,
+            frame_result: None,
+            presented_at: None,
         });
     }
 
@@ -61,6 +72,10 @@ impl FrameTimeline {
 
     pub fn recent(&self) -> &VecDeque<FrameRecord> {
         &self.recent
+    }
+
+    pub fn recent_mut(&mut self) -> &mut VecDeque<FrameRecord> {
+        &mut self.recent
     }
 }
 

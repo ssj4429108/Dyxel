@@ -1034,11 +1034,13 @@ impl DyxelHost {
                                         let mut surfs = surfaces_ptr.lock_guard().unwrap();
                                         if let Some(s) = surfs.get_mut(&id.0) {
                                             log::trace!("RenderThread: Rendering frame for surface {:?}", id);
+                                            // Notify scheduler that render started
+                                            let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderStarted { frame_id: token.frame_id, epoch: token.epoch });
                                             r.backend.set_frame_timing(0.0, frame_interval_ms);
                                             let (epoch, package) = mailbox_for_render.snapshot();
                                             render_frame_with_package(r, s.as_mut(), &package);
                                             // Notify scheduler that render completed
-                                            let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderCompleted { frame_id: token.frame_id, epoch });
+                                            let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderCompleted { frame_id: token.frame_id, epoch, stats: crate::FrameStats::default() });
                                             // Legacy: also signal logic thread (to be removed in Task 6)
                                             let _ = render_complete_tx.send(());
                                         } else {
@@ -1067,61 +1069,16 @@ impl DyxelHost {
                 })
                 .expect("Failed to spawn RenderThread");
 
-            // 3. Minimal Scheduler Bridge (transitional until Task 6)
-            // Receives LogicCommitted / RenderCompleted and issues FrameTokens
-            let scheduler_rx = scheduler_rx;
-            let render_cmd_tx_for_scheduler = render_cmd_tx.clone();
+            // 3. FrameScheduler (single frame owner)
             thread::Builder::new()
                 .name("DyxelScheduler".into())
                 .spawn(move || {
-                    use crate::frame_scheduler::{FrameToken, RenderCommand};
-                    let mut in_flight = false;
-                    let mut latest_epoch = 0u64;
-                    let mut next_frame_id = 1u64;
-
-                    loop {
-                        match scheduler_rx.recv() {
-                            Ok(SchedulerEvent::LogicCommitted { epoch }) => {
-                                latest_epoch = epoch;
-                                if !in_flight {
-                                    let token = FrameToken {
-                                        frame_id: next_frame_id,
-                                        epoch,
-                                        vblank_at: std::time::Instant::now(),
-                                        target_frame_duration: std::time::Duration::from_millis(16),
-                                    };
-                                    next_frame_id += 1;
-                                    if render_cmd_tx_for_scheduler.send(RenderCommand::Render(token)).is_ok() {
-                                        in_flight = true;
-                                    }
-                                }
-                            }
-                            Ok(SchedulerEvent::RenderCompleted { .. }) => {
-                                in_flight = false;
-                                // If a newer epoch was committed while frame was in flight, issue another token
-                                if latest_epoch > 0 {
-                                    let token = FrameToken {
-                                        frame_id: next_frame_id,
-                                        epoch: latest_epoch,
-                                        vblank_at: std::time::Instant::now(),
-                                        target_frame_duration: std::time::Duration::from_millis(16),
-                                    };
-                                    next_frame_id += 1;
-                                    if render_cmd_tx_for_scheduler.send(RenderCommand::Render(token)).is_ok() {
-                                        in_flight = true;
-                                    }
-                                }
-                            }
-                            Ok(SchedulerEvent::Shutdown) => {
-                                let _ = render_cmd_tx_for_scheduler.send(RenderCommand::Shutdown);
-                                break;
-                            }
-                            Err(_) => {
-                                log::info!("SchedulerBridge: channel disconnected, exiting");
-                                break;
-                            }
-                        }
-                    }
+                    let scheduler = crate::frame_scheduler::FrameScheduler::new(
+                        render_cmd_tx,
+                        scheduler_rx,
+                        60.0,
+                    );
+                    scheduler.run();
                 })
                 .expect("Failed to spawn SchedulerBridge");
         }
