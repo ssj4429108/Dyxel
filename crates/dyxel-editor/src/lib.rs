@@ -340,11 +340,8 @@ impl Editor {
                     _ => [0, 0, 0, 255], // Default to black for non-solid brushes
                 };
 
-                // Use font data hash as a unique ID
-                let font_id = font.data.id();
-
                 callback(DrawCommand::DrawGlyphs {
-                    font_id,
+                    font_data: font.clone(),
                     font_size,
                     color,
                     glyphs,
@@ -451,7 +448,7 @@ pub enum DrawCommand {
     },
     /// Draw a run of glyphs
     DrawGlyphs {
-        font_id: u64,
+        font_data: peniko::FontData,
         font_size: f32,
         color: [u8; 4],
         glyphs: Vec<GlyphInfo>,

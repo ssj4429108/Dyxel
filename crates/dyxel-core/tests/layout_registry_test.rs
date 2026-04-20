@@ -8,7 +8,6 @@
 //! 2. 脏标记机制正常工作（避免重复读取未变更节点）
 
 use dyxel_core::transaction::*;
-use dyxel_shared::{DirtyField, OpCode};
 
 /// 模拟布局同步过程
 /// Host 侧布局计算完成后，sync_layout_to_wasm 将结果写入共享内存
@@ -48,15 +47,18 @@ fn test_layout_registry_basic() {
     assert_eq!(cmds.len(), 3); // Create + Width + Height
 
     // Verify dirty tracker marks layout as dirty
-    assert!(tx.dirty_tracker.is_node_dirty(0));
-    let fields = tx.dirty_tracker.get_dirty_fields(0);
+    let mut tracker = DirtyTracker::new();
+    for cmd in &cmds {
+        tracker.mark_dirty(0, cmd.dirty_fields);
+    }
+    assert!(tracker.is_node_dirty(0));
+    let fields = tracker.node_dirty_fields.get(&0).copied().unwrap_or(0);
     assert!(fields & DirtyField::Size.bits() != 0);
 }
 
 #[test]
 fn test_layout_registry_opcodes_handled() {
     //! Verify LayoutRegistry opcodes handled correctly (no transaction staging)
-    let mut tx = TransactionProcessor::new();
 
     // These opcodes should be handled directly, not staged
     let layout_ops = [
@@ -128,7 +130,7 @@ fn test_layout_read_after_write_pattern() {
     );
 
     // Step 5: WASM reads layout (simulated)
-    let fields = tracker.get_dirty_fields(10);
+    let fields = tracker.node_dirty_fields.get(&10).copied().unwrap_or(0);
     assert!(fields & DirtyField::Position.bits() != 0);
 
     // Step 6: WASM clears dirty

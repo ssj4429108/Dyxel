@@ -698,7 +698,7 @@ impl DyxelHost {
                                     if let Some(ref mut l) = logic_opt {
                                         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
                                         {
-                                            use crate::runtime::{process_commands, sync_layout_to_wasm, is_render_needed, clear_dirty_tracker};
+                                            use crate::runtime::{process_commands, sync_layout_to_wasm};
 
                                             let logic_tick_start = std::time::Instant::now();
 
@@ -743,33 +743,28 @@ impl DyxelHost {
                                                 let mem = unsafe { &mut *l._rt.memory_mut() };
                                                 let _ = process_commands(mem, bptr, &l.shared_state);
 
-                                                // Sync layout results back to WASM
-                                                let _ = sync_layout_to_wasm(
-                                                    mem,
-                                                    bptr,
-                                                    &l.shared_state.lock().unwrap(),
-                                                );
-                                            }
+                                                // Sync layout results back to WASM and check render need under shared-state lock
+                                                let mut state_guard = l.shared_state.lock().unwrap();
+                                                let _ = sync_layout_to_wasm(mem, bptr, &mut *state_guard);
 
-                                            // Only trigger render if transaction completed and dirty nodes exist
-                                            if is_render_needed() {
-                                                let dirty_count = crate::runtime::get_dirty_tracker()
-                                                    .map(|dt| dt.iter_dirty_nodes().count())
-                                                    .unwrap_or(0);
-                                                if dirty_count > 0 {
-                                                    // Core fix: if Render Thread is still busy, skip this frame's draw request (frame skip)
-                                                    if !is_rendering_for_logic.load(std::sync::atomic::Ordering::Acquire) {
-                                                        let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
-                                                    } else {
-                                                        let jank = render_jank_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                                                        if jank % 60 == 1 {
-                                                            log::warn!("LogicThread: RenderJank={}, skipping RequestDraw because render is still in progress", jank);
+                                                // Only trigger render if transaction completed and dirty nodes exist
+                                                if crate::runtime::is_render_needed(&*state_guard) {
+                                                    let dirty_count = state_guard.dirty_tracker.iter_dirty_nodes().count();
+                                                    if dirty_count > 0 {
+                                                        // Core fix: if Render Thread is still busy, skip this frame's draw request (frame skip)
+                                                        if !is_rendering_for_logic.load(std::sync::atomic::Ordering::Acquire) {
+                                                            let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
+                                                        } else {
+                                                            let jank = render_jank_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                                            if jank % 60 == 1 {
+                                                                log::warn!("LogicThread: RenderJank={}, skipping RequestDraw because render is still in progress", jank);
+                                                            }
                                                         }
+                                                    } else {
+                                                        let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
                                                     }
-                                                } else {
-                                                    let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
+                                                    crate::runtime::clear_dirty_tracker(&mut *state_guard);
                                                 }
-                                                clear_dirty_tracker();
                                             }
 
                                             // Wait for the render/VSync boundary before the next tick.

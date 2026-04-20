@@ -259,6 +259,52 @@ impl TexturePool {
     }
 }
 
+/// Opaque identifier for a pooled GPU texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureId(pub u32);
+
+/// GPU texture pool compatible with the `RasterCache` / `OffscreenContext` APIs.
+///
+/// This is a thin wrapper around `TexturePool` that maps stable `TextureId`
+/// handles to acquired `PooledTexture` entries.
+pub struct GpuTexturePool {
+    device: Arc<wgpu::Device>,
+    inner: TexturePool,
+    next_id: u32,
+    textures: HashMap<TextureId, PooledTexture>,
+}
+
+impl GpuTexturePool {
+    pub fn new(device: Arc<wgpu::Device>, config: TexturePoolConfig) -> Self {
+        Self {
+            device: device.clone(),
+            inner: TexturePool::new(device, config),
+            next_id: 1,
+            textures: HashMap::new(),
+        }
+    }
+
+    pub fn acquire(&mut self, width: u32, height: u32, format: wgpu::TextureFormat) -> TextureId {
+        let id = TextureId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let tex = self.inner.acquire(width, height, format);
+        self.textures.insert(id, tex);
+        id
+    }
+
+    pub fn release(&mut self, id: TextureId) {
+        self.textures.remove(&id);
+    }
+
+    pub fn get_texture(&self, id: TextureId) -> Option<&PooledTexture> {
+        self.textures.get(&id)
+    }
+
+    pub fn collect_returns(&mut self) {
+        self.inner.collect_returns();
+    }
+}
+
 /// Thread-safe wrapper for TexturePool
 ///
 /// Since wgpu::Texture is not Send + Sync, we use a separate pool per thread

@@ -5,13 +5,14 @@
 #![allow(unexpected_cfgs)]
 
 use dyxel_render_api::{
-    BackendConfig, DeviceHandle, QueueHandle, RenderResult, SurfaceHandle, SurfaceTargetHandle,
+    BackendConfig, DeviceHandle, QueueHandle, RenderPackage, RenderResult, SurfaceHandle,
+    SurfaceTargetHandle,
 };
 use dyxel_render_api::{LifecycleEvent, RenderBackend, RenderContext, SurfaceState};
 use dyxel_shared::SharedState;
 use impellers::{Color, Context, DisplayListBuilder, Paint, Point, Rect, Size};
 use kurbo::Vec2;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 #[cfg(target_os = "macos")]
 pub mod mac;
@@ -156,64 +157,14 @@ impl RenderBackend for ImpellerBackend {
         Ok(Box::new(ImpellerSurfaceState { width, height }))
     }
 
-    fn prepare(&self, _shared_state: &Arc<Mutex<SharedState>>, _width: u32, _height: u32) {}
-
-    fn render(
+    fn render_package(
         &self,
         _device: DeviceHandle,
         _queue: QueueHandle,
-        surface: &mut dyn SurfaceState,
-        shared_state: &Arc<Mutex<SharedState>>,
+        _surface: &mut dyn SurfaceState,
+        _package: &RenderPackage,
     ) -> RenderResult {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut context_lock = self.context.lock().unwrap();
-            let context = context_lock
-                .as_mut()
-                .ok_or_else(|| anyhow::anyhow!("Impeller context not initialized"))?;
-            let _w_phys = surface.width() as f32;
-            let _h_phys = surface.height() as f32;
-
-            // Probe config: no Bounds
-            let mut builder = DisplayListBuilder::new(None);
-
-            #[cfg(target_os = "android")]
-            {
-                // Fill background color with draw_paint (dark gray)
-                let mut bg_paint = Paint::default();
-                bg_paint.set_color(Color::new_srgba(0.2, 0.2, 0.2, 1.0));
-                builder.draw_paint(&bg_paint);
-            }
-            let rid = {
-                let g = shared_state.lock().unwrap();
-                g.root_id
-            };
-            if let Some(id) = rid {
-                let g = shared_state.lock().unwrap();
-                render_node_recursive(id, &g, &mut builder, Vec2::ZERO);
-            }
-
-            let display_list = builder
-                .build()
-                .ok_or_else(|| anyhow::anyhow!("Failed to build DL"))?;
-
-            #[cfg(target_os = "macos")]
-            if let Some(s) = surface
-                .as_any_mut()
-                .downcast_mut::<mac::MacImpellerSurfaceState>()
-            {
-                mac::render_mac(context, s, &display_list)?;
-            }
-
-            #[cfg(target_os = "android")]
-            if let Some(s) = surface
-                .as_any_mut()
-                .downcast_mut::<android::AndroidImpellerSurfaceState>()
-            {
-                android::render_android(context, s, &display_list)?;
-            }
-        }
-        Ok(())
+        Err(anyhow::anyhow!("Impeller backend not yet implemented"))
     }
 
     fn sync_gpu(&self, _device: DeviceHandle, _queue: QueueHandle) {

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dyxel_render_api::texture_pool::{TextureBucket, TextureId, TexturePoolConfig};
-use dyxel_shared::filters::{BlendMode, FilterId, LayerAttribute, Rect};
+use dyxel_render_api::filters::{BlendMode, FilterId, LayerAttribute, Rect};
 
 use crate::filter_pipeline::{FilterError, FilterPipeline};
 use crate::texture_pool::GpuTexturePool;
@@ -62,7 +62,7 @@ impl LayerState {
             node_id,
             bounds,
             alpha: attr.opacity,
-            filter: if attr.filter_type != dyxel_shared::filters::FilterType::None {
+            filter: if attr.filter_type != dyxel_render_api::filters::FilterType::None {
                 Some(FilterId(attr.filter_type as u16))
             } else {
                 None

@@ -908,6 +908,7 @@ dependencies = [
  "backtrace",
  "bytemuck",
  "console_log",
+ "dyxel-editor",
  "dyxel-gesture",
  "dyxel-perf",
  "dyxel-render-api",
@@ -1000,7 +1001,7 @@ name = "dyxel-render-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dyxel-shared",
+ "peniko",
 ]
 
 [[package]]
@@ -1036,7 +1037,6 @@ dependencies = [
  "dyxel-editor",
  "dyxel-perf",
  "dyxel-render-api",
- "dyxel-shared",
  "image",
  "kurbo",
  "log",
@@ -1066,6 +1066,7 @@ name = "dyxel-shared"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "dyxel-render-api",
  "log",
  "peniko",
  "serde",

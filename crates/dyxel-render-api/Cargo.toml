@@ -6,5 +6,5 @@ edition = "2021"
 description = "Renderer-agnostic abstraction layer for Dyxel"
 
 [dependencies]
-dyxel-shared = { path = "../dyxel-shared" }
+peniko = "0.6"
 anyhow = "1.0"

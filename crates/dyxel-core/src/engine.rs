@@ -28,6 +28,18 @@ pub struct RenderState {
     pub context: RenderContext,
     pub backend: Box<dyn RenderBackend>,
     pub shared_state: SharedPtr<SharedMutex<SharedState>>,
+    /// Editor registry moved from VelloBackend to Runtime (Task #10)
+    pub editors: std::sync::Mutex<std::collections::HashMap<u32, dyxel_editor::Editor>>,
+    /// Last recorded editor generations for staleness gating
+    pub last_editor_generations:
+        std::sync::Mutex<std::collections::HashMap<u32, dyxel_editor::Generation>>,
+    /// Last viewport size for detecting changes that require relayout
+    pub last_viewport_size: std::sync::Mutex<(u32, u32)>,
+    /// Epoch incremented whenever layout is recomputed
+    pub layout_epoch: std::sync::atomic::AtomicU64,
+    /// Raster cache policy manager — Runtime decides which nodes to bake,
+    /// Backend only executes bake plans and holds GPU texture storage.
+    pub raster_cache: std::sync::Mutex<Option<dyxel_render_api::raster_cache::RasterCache>>,
 }
 
 // LogicState contains Wasm3 components which are NOT Sync.
@@ -104,6 +116,15 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
         context,
         backend: Box::new(backend),
         shared_state,
+        editors: std::sync::Mutex::new(std::collections::HashMap::new()),
+        last_editor_generations: std::sync::Mutex::new(std::collections::HashMap::new()),
+        last_viewport_size: std::sync::Mutex::new((0, 0)),
+        layout_epoch: std::sync::atomic::AtomicU64::new(0),
+        raster_cache: std::sync::Mutex::new(Some(
+            dyxel_render_api::raster_cache::RasterCache::new(
+                dyxel_render_api::raster_cache::RasterCacheConfig::default(),
+            ),
+        )),
     };
 
     Ok((logic, render))

@@ -6,8 +6,7 @@
 //! This adapter maps the high-level Scene API to Vello's native layer system,
 //! enabling alpha blending, filters, and clipping using Vello's push_layer/pop_layer.
 
-use dyxel_render_api::{Scene as SceneTrait, Transform};
-use dyxel_shared::filters::{BlendMode as DyxelBlendMode, Filter, Rect};
+use dyxel_render_api::{filters::{BlendMode as DyxelBlendMode, Filter, Rect}, Scene as SceneTrait, Transform};
 use kurbo::{Affine, Rect as KRect, RoundedRect};
 use vello::Scene;
 use vello::peniko::{BlendMode as PenikoBlendMode, Color, Compose, Fill, Mix};

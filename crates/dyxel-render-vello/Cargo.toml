@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 dyxel-render-api = { path = "../dyxel-render-api" }
-dyxel-shared = { path = "../dyxel-shared" }
 dyxel-editor = { path = "../dyxel-editor" }
 dyxel-perf = { path = "../dyxel-perf" }
 vello = { workspace = true, features = ["wgpu"] }

@@ -2,12 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use dyxel_render_api::{RenderContext, SurfaceState};
-use vello::wgpu;
 
 pub struct MacVelloSurfaceState {
     pub surface: vello::util::RenderSurface<'static>,
-    pub blit_pipeline: wgpu::RenderPipeline,
-    pub triple_buffer: Option<crate::TripleBuffer>,
 }
 
 unsafe impl Send for MacVelloSurfaceState {}
@@ -21,7 +18,6 @@ impl SurfaceState for MacVelloSurfaceState {
         self
     }
     fn resize(&mut self, context: &mut RenderContext, width: u32, height: u32) {
-        // Downcast RenderContext to vello::util::RenderContext
         if let Some(v_ctx) = context.downcast_mut::<vello::util::RenderContext>() {
             v_ctx.resize_surface(&mut self.surface, width, height);
         }

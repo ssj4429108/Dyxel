@@ -6,22 +6,19 @@ use dyxel_perf::{PerfConfig, PerformanceDiagnostics, PerformanceMonitor, SharedP
 use dyxel_render_api::LockExt;
 use dyxel_render_api::{
     BackendConfig, DeviceHandle, LifecycleEvent, QueueHandle, RenderBackend, RenderBackendExt,
-    RenderContext, RenderResult, SharedMutex, SharedPtr, SurfaceHandle, SurfaceState,
+    RenderContext, RenderResult, SharedMutex, SurfaceHandle, SurfaceState,
     SurfaceTargetHandle, VelloBackendExt,
 };
-use dyxel_shared::{SharedState, ViewType};
 use kurbo::{Affine, Rect as KRect, Vec2};
 use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use taffy::style::AvailableSpace;
 use vello::wgpu;
 use vello::{
     Renderer, RendererOptions, Scene,
     peniko::{Color, Fill},
 };
 
-use dyxel_editor::Editor;
 // Two-stage init is implemented inline with cache header markers
 
 #[cfg(target_os = "android")]
@@ -51,6 +48,8 @@ type AsyncShared<T> = std::sync::Arc<std::sync::Mutex<T>>;
 struct BlurredTextureEntry {
     /// The blurred texture (contains blurred background for frosted glass)
     texture: wgpu::Texture,
+    /// Pre-created view of the blurred texture for composite reuse
+    texture_view: wgpu::TextureView,
     /// Width of the texture
     width: u32,
     /// Height of the texture
@@ -67,6 +66,12 @@ struct BlurredTextureEntry {
     source_rect: (f32, f32, f32, f32), // (x, y, width, height) in scene coordinates
     /// Deferred children to render on top of blurred background
     deferred_children: Vec<u32>,
+    /// Bounding box of deferred children in screen coordinates (x, y, width, height)
+    children_bounds: (f32, f32, f32, f32),
+    /// Cached children texture for local rendering (Pass 3)
+    children_texture: Option<wgpu::Texture>,
+    /// Cached view of the children texture
+    children_texture_view: Option<wgpu::TextureView>,
     /// View ID for deferred rendering
     view_id: u32,
     /// Blur radius
@@ -77,6 +82,19 @@ struct BlurredTextureEntry {
     skipped_due_to_size: bool,
     /// Whether this entry needs blur recalculation
     needs_recalculation: bool,
+}
+
+/// A cached subtree draw command for the post-scene blit pass.
+#[derive(Debug)]
+struct CachedDraw {
+    /// The cached texture identifier
+    texture_id: texture_pool::TextureId,
+    /// Transform that positions the texture on screen
+    transform: Affine,
+    /// Width of the cached texture in pixels
+    width: f32,
+    /// Height of the cached texture in pixels
+    height: f32,
 }
 
 /// Cached blur result for a view
@@ -139,6 +157,8 @@ pub struct VelloBackend {
     pub sampler: SharedMutex<Option<wgpu::Sampler>>,
     pub blit_shader: SharedMutex<Option<wgpu::ShaderModule>>,
     pub blit_pipeline: SharedMutex<Option<wgpu::RenderPipeline>>,
+    /// Triple buffer for offscreen compositing (managed internally, not per-surface).
+    triple_buffer: SharedMutex<Option<TripleBuffer>>,
     // Pipeline for rendering children texture with alpha blending
     children_blit_pipeline: SharedMutex<Option<wgpu::RenderPipeline>>,
     pub pipeline_cache: AsyncShared<Option<wgpu::PipelineCache>>,
@@ -146,7 +166,6 @@ pub struct VelloBackend {
     pub cache_saved: AtomicBool,
     // Current cache stage: None = no cache, Some(1) = Stage 1, Some(2) = Stage 2
     cache_stage: AsyncShared<Option<u8>>,
-    pub editors: SharedMutex<std::collections::HashMap<u32, Editor>>,
     // Deferred initialization - store device info for lazy init
     init_device_info: SharedMutex<Option<(String, Option<wgpu::PipelineCache>, Option<u8>)>>,
     // Performance monitoring
@@ -154,9 +173,7 @@ pub struct VelloBackend {
     // Detailed diagnostics (optional, for profiling)
     #[allow(dead_code)]
     diagnostics: SharedMutex<Option<PerformanceDiagnostics>>,
-    // Cached overlay editor (avoid creating every frame)
-    overlay_editor: SharedMutex<Option<Editor>>,
-    last_overlay_text: SharedMutex<String>,
+    // Performance overlay disabled (was using Editor; TODO: reimplement with PreparedText)
     // Memory optimizer for tiered memory configuration
     memory_optimizer: SharedMutex<dyxel_perf::MemoryOptimizer>,
     // Async initialization state tracking
@@ -179,6 +196,12 @@ pub struct VelloBackend {
     blurred_textures: SharedMutex<Vec<BlurredTextureEntry>>,
     // Texture pool for efficient blur texture reuse
     texture_pool: SharedMutex<Option<texture_pool::SharedTexturePool>>,
+    // GPU-local cache storage: node_id -> texture_id lookup table.
+    // Runtime decides which nodes to bake (via bake_plans in RenderPackage).
+    // Backend only executes bakes and performs read-only lookups during render.
+    cached_textures: SharedMutex<std::collections::HashMap<u32, dyxel_render_api::raster_cache::TextureId>>,
+    // GPU texture pool for raster cache baking
+    gpu_texture_pool: SharedMutex<Option<texture_pool::GpuTexturePool>>,
     // Cached blur results (view_id -> cached result)
     blur_cache: SharedMutex<std::collections::HashMap<u32, CachedBlurResult>>,
     // Frame timing from pacer (for DIAG logging)
@@ -207,19 +230,17 @@ impl VelloBackend {
             sampler: SharedMutex::new(None),
             blit_shader: SharedMutex::new(None),
             blit_pipeline: SharedMutex::new(None),
+            triple_buffer: SharedMutex::new(None),
             children_blit_pipeline: SharedMutex::new(None),
             pipeline_cache: AsyncShared::new(std::sync::Mutex::new(None)),
             cache_path: AsyncShared::new(std::sync::Mutex::new(None)),
             cache_saved: AtomicBool::new(false),
             cache_stage: AsyncShared::new(std::sync::Mutex::new(None)),
-            editors: SharedMutex::new(std::collections::HashMap::new()),
             init_device_info: SharedMutex::new(None),
             perf_monitor: std::sync::Arc::new(std::sync::Mutex::new(PerformanceMonitor::new(
                 perf_config,
             ))),
             diagnostics: SharedMutex::new(Some(PerformanceDiagnostics::new(120))),
-            overlay_editor: SharedMutex::new(None),
-            last_overlay_text: SharedMutex::new(String::new()),
             memory_optimizer: SharedMutex::new(memory_optimizer),
             is_loading: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             loading_handle: SharedMutex::new(None),
@@ -233,6 +254,8 @@ impl VelloBackend {
             blur_staging_offset: std::sync::atomic::AtomicUsize::new(0),
             blurred_textures: SharedMutex::new(Vec::new()),
             texture_pool: SharedMutex::new(None),
+            cached_textures: SharedMutex::new(std::collections::HashMap::new()),
+            gpu_texture_pool: SharedMutex::new(None),
             blur_cache: SharedMutex::new(std::collections::HashMap::new()),
             pacer_wait_ms: SharedMutex::new(0.0),
             frame_interval_ms: SharedMutex::new(0.0),
@@ -991,17 +1014,28 @@ impl VelloBackend {
         Ok(())
     }
 
-    fn render_internal(
+    fn render_internal_impl(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         v_surface_surface: &mut vello::util::RenderSurface<'static>,
-        blit_pipeline: &wgpu::RenderPipeline,
-        triple_buffer: &mut Option<TripleBuffer>,
-        shared_state: &SharedMutex<SharedState>,
+        package: &dyxel_render_api::RenderPackage,
     ) -> RenderResult {
+        // Derive render inputs from the immutable package (no runtime objects)
+        let node_map: std::collections::HashMap<u32, &dyxel_render_api::SceneNode> =
+            package.nodes.iter().map(|n| (n.id, n)).collect();
+        let rid = package.root_id;
+        let w = package.viewport.0;
+        let h = package.viewport.1;
+
+        // Backend-internal frame housekeeping (was prepare_internal)
+        if let Some(ref pool) = *self.texture_pool.lock().unwrap() {
+            pool.collect_returns();
+        }
+        self.blur_staging_offset
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
         // Detailed frame timing for diagnostics
-        #[cfg(not(target_os = "android"))]
         let frame_start = std::time::Instant::now();
         let mut stage_timer = dyxel_perf::FrameTimer::new();
 
@@ -1026,172 +1060,20 @@ impl VelloBackend {
         };
 
         // Begin frame timing for performance monitoring
-        let should_show_overlay = {
+        {
             let monitor = self.perf_monitor.lock().unwrap();
             monitor.begin_frame();
-            monitor.should_show_overlay()
-        };
+        }
         stage_timer.mark("perf_start");
 
-        // Collect returned textures from previous frame
-        if let Some(ref pool) = *self.texture_pool.lock().unwrap() {
-            pool.collect_returns();
-        }
-
-        // Reset blur uniform staging offset for this frame
-        self.blur_staging_offset
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-
-        let w = v_surface_surface.config.width;
-        let h = v_surface_surface.config.height;
         if w == 0 || h == 0 {
             return Ok(());
         }
 
-        // Get or create editors for text nodes and compute layout
-        let rid = {
-            let mut g = shared_state.lock().unwrap();
-            let mut editors = self.editors.lock().unwrap();
-
-            // First pass: create/update editors for text nodes
-            for (&id, node) in &g.nodes {
-                if node.view_type == ViewType::Text {
-                    let editor = editors.entry(id).or_insert_with(|| {
-                        let mut ed = Editor::new(node.font_size);
-                        ed.set_text(&node.text);
-                        log::info!(
-                            "[Editor] Creating editor for node {} with text_color: {:?}",
-                            id,
-                            node.text_color
-                        );
-                        ed.set_text_color(node.text_color);
-                        ed
-                    });
-
-                    // Update editor if text changed
-                    if editor.text() != node.text {
-                        editor.set_text(&node.text);
-                    }
-                }
-            }
-
-            // Remove editors for deleted nodes
-            let node_ids: std::collections::HashSet<u32> = g.nodes.keys().copied().collect();
-            editors.retain(|id, _| node_ids.contains(id));
-
-            // Build map from taffy_node to editor id for measurement
-            let taffy_to_id: std::collections::HashMap<taffy::NodeId, u32> = g
-                .nodes
-                .iter()
-                .filter(|(_, n)| n.view_type == ViewType::Text)
-                .map(|(id, n)| (n.taffy_node, *id))
-                .collect();
-
-            // Second pass: measure text nodes and detect size changes
-            // Collect nodes whose size changed significantly
-            let mut nodes_to_update: Vec<(u32, f32, f32)> = Vec::new();
-            for (&id, node) in &g.nodes {
-                if node.view_type == ViewType::Text {
-                    if let Some(editor) = editors.get_mut(&id) {
-                        editor.set_width(None);
-                        let (new_width, new_height) = editor.layout_size();
-                        let (old_width, old_height) = node.last_measured_size;
-
-                        // If size changed significantly (more than 0.5px), record for update
-                        if (new_width - old_width).abs() > 0.5
-                            || (new_height - old_height).abs() > 0.5
-                        {
-                            nodes_to_update.push((id, new_width, new_height));
-                        }
-                    }
-                }
-            }
-
-            // Update last_measured_size and mark dirty (triggers Taffy relayout via set_style)
-            for (id, new_width, new_height) in nodes_to_update {
-                if let Some(node_mut) = g.nodes.get_mut(&id) {
-                    node_mut.last_measured_size = (new_width, new_height);
-                }
-                g.mark_dirty(id);
-            }
-
-            let rid = g.root_id.map(|id| {
-                if let Some(rn) = g.nodes.get(&id).map(|n| n.taffy_node) {
-                    let _ = g.taffy.compute_layout_with_measure(
-                        rn,
-                        taffy::prelude::Size {
-                            width: AvailableSpace::Definite(w as f32),
-                            height: AvailableSpace::Definite(h as f32),
-                        },
-                        |_known_dimensions, _available_space, node_id, _node_context, _style| {
-                            // Look up editor by taffy_node
-                            if let Some(&editor_id) = taffy_to_id.get(&node_id) {
-                                if let Some(editor) = editors.get_mut(&editor_id) {
-                                    // For text nodes: always use natural width (no wrapping)
-                                    // This prevents unwanted wrapping from parent flex constraints
-                                    // In the future, we could respect explicit width settings here
-                                    editor.set_width(None);
-                                    let (lw, lh) = editor.layout_size();
-                                    return taffy::geometry::Size {
-                                        width: lw,
-                                        height: lh,
-                                    };
-                                }
-                            }
-                            // Not a text node, return default
-                            taffy::geometry::Size {
-                                width: _known_dimensions.width.unwrap_or(0.0),
-                                height: _known_dimensions.height.unwrap_or(0.0),
-                            }
-                        },
-                    );
-
-                    // Register all nodes as layout-dirty after computation
-                    // This ensures Logic Thread will sync layout to WASM memory
-                    let changed_layout_nodes = g.sync_to_shared_buffer();
-                    if !changed_layout_nodes.is_empty() {
-                        dyxel_shared::layout_sync::register_layout_dirty_nodes(
-                            &changed_layout_nodes,
-                        );
-                    }
-
-                    // Phase 2: Auto-expand capacity if needed (pre-expand at 80% usage)
-                    if g.should_pre_expand() {
-                        if g.auto_expand() {
-                            log::info!("Auto-expanded node capacity to {}", g.get_capacity());
-                        }
-                    }
-
-                    // 每 300 帧（约 5 秒 @ 60fps）输出一次节点统计
-                    #[cfg(target_os = "android")]
-                    {
-                        static mut FRAME_COUNTER: u32 = 0;
-                        unsafe {
-                            FRAME_COUNTER += 1;
-                            if FRAME_COUNTER % 300 == 0 {
-                                let stats = g.get_stats();
-                                log::info!(
-                                    "[NodeStats] capacity={} active={} free={} usage={:.1}%",
-                                    stats.capacity,
-                                    stats.active_count,
-                                    stats.free_count,
-                                    (stats.active_count as f32 / stats.capacity as f32) * 100.0
-                                );
-                            }
-                        }
-                    }
-                }
-                id
-            });
-
-            rid
-        };
-
         let mut scene = Scene::new();
+        let mut cached_draws: Vec<CachedDraw> = Vec::new();
 
         if let Some(id) = rid {
-            let g = shared_state.lock().unwrap();
-            let mut editors = self.editors.lock().unwrap();
             stage_timer.mark("state_lock");
 
             // Apply platform correction at the root level
@@ -1201,10 +1083,9 @@ impl VelloBackend {
             let filter_pipeline = self.filter_pipeline.lock().unwrap();
             let mut blurred_textures = self.blurred_textures.lock().unwrap();
 
-            render_node_recursive_with_transform(
+            self.render_node_recursive_with_transform(
                 id,
-                &g,
-                &mut editors,
+                &node_map,
                 &mut scene,
                 Vec2::ZERO,
                 root_transform,
@@ -1213,56 +1094,79 @@ impl VelloBackend {
                 renderer,
                 filter_pipeline.as_ref(),
                 &mut blurred_textures,
+                &mut cached_draws,
+                false,
             );
             stage_timer.mark("scene_build");
         }
 
-        // Get performance stats and draw overlay directly to scene if enabled
-        let stats = self.perf_monitor.lock().unwrap().get_stats();
-        if should_show_overlay {
-            let overlay_text = format!(
-                "FPS: {:.1}\nFrame: {:.2}ms\nMem: {:.1}MB\nCPU: {:.1}%",
-                stats.fps, stats.frame_time_ms, stats.memory_used_mb, stats.cpu_usage
-            );
-
-            // Calculate overlay position (top-left corner with padding)
-            let (overlay_x, overlay_y, _) = self.perf_monitor.lock().unwrap().get_overlay_config();
-            let padding = 10.0;
-            let pos_x = padding + overlay_x as f64;
-            let pos_y = padding + overlay_y as f64;
-
-            // Draw semi-transparent background directly to main scene
-            let bg_rect = KRect::new(pos_x - 5.0, pos_y - 5.0, pos_x + 140.0, pos_y + 70.0);
-            scene.fill(
-                Fill::NonZero,
-                Affine::IDENTITY,
-                Color::from_rgba8(0, 0, 0, 180),
-                None,
-                &bg_rect,
-            );
-
-            // Use cached editor (avoid creating every frame)
-            let mut editor_lock = self.overlay_editor.lock().unwrap();
-            let mut last_text_lock = self.last_overlay_text.lock().unwrap();
-
-            if editor_lock.is_none() {
-                *editor_lock = Some(Editor::new(14.0));
-            }
-
-            if let Some(ref mut editor) = *editor_lock {
-                // Only update text if changed (avoid expensive re-layout)
-                if *last_text_lock != overlay_text {
-                    editor.set_text(&overlay_text);
-                    editor.set_text_color(Color::WHITE);
-                    *last_text_lock = overlay_text;
+        // === Execute recycle plans produced by Runtime cache policy ===
+        {
+            let mut cached_textures_guard = self.cached_textures.lock().unwrap();
+            let mut gpu_texture_pool = self.gpu_texture_pool.lock().unwrap();
+            if let Some(pool) = gpu_texture_pool.as_mut() {
+                for plan in &package.recycle_plans {
+                    pool.release(texture_pool::TextureId(plan.texture_id.0));
+                    cached_textures_guard.remove(&plan.node_id);
                 }
+            }
+        }
 
-                // Draw text directly to main scene using cached editor
-                editor.draw(&mut scene, Affine::translate((pos_x, pos_y)));
+        // === Execute bake plans produced by Runtime cache policy ===
+        {
+            let mut cached_textures_guard = self.cached_textures.lock().unwrap();
+            let mut gpu_texture_pool = self.gpu_texture_pool.lock().unwrap();
+            if let Some(pool) = gpu_texture_pool.as_mut() {
+                for plan in &package.bake_plans {
+                    let tex_w = plan.width;
+                    let tex_h = plan.height;
+                    if tex_w == 0 || tex_h == 0 {
+                        continue;
+                    }
+
+                    let texture_id =
+                        pool.acquire(tex_w, tex_h, wgpu::TextureFormat::Rgba8Unorm);
+                    if let Some(ptex) = pool.get_texture(texture_id) {
+                        let mut bake_scene = Scene::new();
+                        let mut bake_blurred = Vec::new();
+                        VelloBackend::render_node_recursive_internal(
+                            plan.node_id,
+                            &node_map,
+                            &mut bake_scene,
+                            Vec2::ZERO,
+                            Affine::IDENTITY,
+                            device,
+                            queue,
+                            renderer,
+                            None,
+                            &mut bake_blurred,
+                            &*cached_textures_guard,
+                            &mut Vec::new(),
+                            false,
+                        );
+                        let _ = renderer.render_to_texture(
+                            device,
+                            queue,
+                            &bake_scene,
+                            ptex.view(),
+                            &vello::RenderParams {
+                                base_color: Color::TRANSPARENT,
+                                width: tex_w,
+                                height: tex_h,
+                                antialiasing_method: vello::AaConfig::Area,
+                            },
+                        );
+                        cached_textures_guard.insert(
+                            plan.node_id,
+                            dyxel_render_api::raster_cache::TextureId(texture_id.0),
+                        );
+                    }
+                }
             }
         }
 
         // Triple-buffering: create / resize the ring when dimensions change.
+        let mut triple_buffer = self.triple_buffer.lock().unwrap();
         let needs_recreate = triple_buffer
             .as_ref()
             .map_or(true, |tb| tb.width != w || tb.height != h);
@@ -1631,90 +1535,105 @@ impl VelloBackend {
 
         stage_timer.mark("pass3_start");
 
-        // === PASS 3: Render deferred children to separate texture ===
-        let mut children_scene = Scene::new();
-        let mut has_children = false;
-
+        // === PASS 3: Render deferred children to per-entry local textures ===
         {
-            let blurred_textures = self.blurred_textures.lock().unwrap();
-
-            for entry in blurred_textures.iter() {
+            let mut blurred_textures = self.blurred_textures.lock().unwrap();
+            for entry in blurred_textures.iter_mut() {
                 if entry.deferred_children.is_empty() {
                     continue;
                 }
-                has_children = true;
+                if entry.children_bounds.2 <= 0.0 || entry.children_bounds.3 <= 0.0 {
+                    continue;
+                }
 
-                let g = shared_state.lock().unwrap();
-                let mut editors = self.editors.lock().unwrap();
+                let mut children_scene = Scene::new();
 
                 let global_x = entry.source_rect.0 as f64;
                 let global_y = entry.source_rect.1 as f64;
+                let origin_offset = Vec2::new(entry.children_bounds.0 as f64, entry.children_bounds.1 as f64);
 
                 for &child_id in &entry.deferred_children {
                     render_deferred_child(
                         child_id,
-                        &g,
-                        &mut editors,
+                        &node_map,
                         &mut children_scene,
                         Vec2::new(global_x, global_y),
+                        origin_offset,
                     );
+                }
+
+                let cw = entry.children_bounds.2.ceil() as u32;
+                let ch = entry.children_bounds.3.ceil() as u32;
+
+                let needs_new_children_texture = entry.children_texture.as_ref().map_or(true, |t| {
+                    t.width() != cw || t.height() != ch
+                });
+
+                if needs_new_children_texture {
+                    log::debug!(
+                        "[Blur] Pass 3: Creating local children texture {}x{} for view_id={}",
+                        cw, ch, entry.view_id
+                    );
+                    let texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Children Local Texture"),
+                        size: wgpu::Extent3d {
+                            width: cw,
+                            height: ch,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::STORAGE_BINDING
+                            | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    entry.children_texture = Some(texture);
+                    entry.children_texture_view = Some(view);
+                }
+
+                if let Some(ref view) = entry.children_texture_view {
+                    if let Err(e) = renderer.render_to_texture(
+                        device,
+                        queue,
+                        &children_scene,
+                        view,
+                        &vello::RenderParams {
+                            base_color: Color::TRANSPARENT,
+                            width: cw,
+                            height: ch,
+                            antialiasing_method: aa_config,
+                        },
+                    ) {
+                        log::warn!(
+                            "[Blur] Failed to render children texture for view_id={}: {:?}",
+                            entry.view_id, e
+                        );
+                    } else {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if self.debug_frames_enabled() {
+                            let frame_num = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let debug_dir = self.debug_output_dir();
+                            let path = debug_dir.join(format!(
+                                "frame_{:06}_pass3_children_view_{}.png",
+                                frame_num % 1000,
+                                entry.view_id
+                            ));
+                            if let Some(ref tex) = entry.children_texture {
+                                self.save_texture_to_png(device, queue, tex, path.to_str().unwrap());
+                            }
+                        }
+                    }
                 }
             }
         }
-
-        // Create or update children texture
-        let children_texture = if has_children {
-            log::debug!("[Blur] Pass 3: Rendering children texture");
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Children Texture"),
-                size: wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-            if let Err(e) = renderer.render_to_texture(
-                device,
-                queue,
-                &children_scene,
-                &view,
-                &vello::RenderParams {
-                    base_color: Color::TRANSPARENT,
-                    width: w,
-                    height: h,
-                    antialiasing_method: aa_config,
-                },
-            ) {
-                log::warn!("[Blur] Failed to render children texture: {:?}", e);
-                None
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                if self.debug_frames_enabled() {
-                    let frame_num = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let debug_dir = self.debug_output_dir();
-                    let path =
-                        debug_dir.join(format!("frame_{:06}_pass3_children.png", frame_num % 1000));
-                    self.save_texture_to_png(device, queue, &texture, path.to_str().unwrap());
-                }
-                Some((texture, view))
-            }
-        } else {
-            None
-        };
         stage_timer.mark("pass3_done");
 
         // Defer surface acquisition until the very last moment: this gives the
@@ -1795,9 +1714,12 @@ impl VelloBackend {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            let blit_pipeline_guard = self.blit_pipeline.lock().unwrap();
+            let blit_pipeline = blit_pipeline_guard.as_ref().unwrap();
             rp.set_pipeline(blit_pipeline);
             rp.set_bind_group(0, &tb.current().bind_group, &[]);
             rp.draw(0..3, 0..1);
+            drop(blit_pipeline_guard);
 
             // Draw blurred textures using composite pipeline
             log::debug!("[Blur Pass 4] About to lock blurred_textures for compositing");
@@ -1806,10 +1728,11 @@ impl VelloBackend {
                 "[Blur Pass 4] Locked blurred_textures, count = {}",
                 blurred_textures.len()
             );
-            if !blurred_textures.is_empty() {
+            if !blurred_textures.is_empty() || !cached_draws.is_empty() {
                 log::debug!(
-                    "[Blur] COMPOSITING {} blurred textures",
-                    blurred_textures.len()
+                    "[Blur] COMPOSITING {} blurred textures, {} cached draws",
+                    blurred_textures.len(),
+                    cached_draws.len()
                 );
 
                 let surface_format = v_surface_surface.config.format;
@@ -1886,13 +1809,108 @@ impl VelloBackend {
                     uniform_buffer.as_ref(),
                     overlay_uniform_buffer.as_ref(),
                 ) {
-                    log::debug!(
-                        "[Blur] All resources ready, starting draw loop for {} textures",
-                        blurred_textures.len()
-                    );
-
                     let sampler = self.sampler.lock().unwrap();
                     let sampler = sampler.as_ref().expect("Sampler should be initialized");
+
+                    // === Draw cached subtrees first (before blur composite) ===
+                    if !cached_draws.is_empty() {
+                        log::debug!("[RasterCache] Drawing {} cached subtrees", cached_draws.len());
+                        let staging_buffer = self.blur_staging_buffer.lock().unwrap();
+                        let staging = staging_buffer
+                            .as_ref()
+                            .expect("blur staging buffer not initialized");
+                        let alignment = *self.blur_staging_alignment.lock().unwrap();
+                        let stride = alignment * 2;
+
+                        let scale_x = 2.0 / w as f32;
+                        let scale_y = -2.0 / h as f32;
+                        let offset_x = -1.0;
+                        let offset_y = 1.0;
+
+                        for draw in &cached_draws {
+                            let affine = draw.transform;
+                            let mat = affine.as_coeffs();
+                            let tex_width = draw.width;
+                            let tex_height = draw.height;
+
+                            let uniform_data: [f32; 12] = [
+                                mat[0] as f32 * tex_width * scale_x,
+                                mat[2] as f32 * tex_width * scale_x,
+                                0.0,
+                                0.0,
+                                mat[1] as f32 * tex_height * scale_y,
+                                mat[3] as f32 * tex_height * scale_y,
+                                0.0,
+                                0.0,
+                                mat[4] as f32 * scale_x + offset_x,
+                                mat[5] as f32 * scale_y + offset_y,
+                                1.0,
+                                0.0,
+                            ];
+
+                            let base_offset = self
+                                .blur_staging_offset
+                                .fetch_add(stride, std::sync::atomic::Ordering::Relaxed);
+                            if base_offset + stride > 1024 * 1024 {
+                                log::warn!(
+                                    "[RasterCache] Staging buffer overflow, skipping remaining draws"
+                                );
+                                break;
+                            }
+
+                            let overlay_data: [f32; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, tex_width, tex_height, 0.0];
+
+                            queue.write_buffer(
+                                staging,
+                                base_offset as u64,
+                                bytemuck::cast_slice(&uniform_data),
+                            );
+                            queue.write_buffer(
+                                staging,
+                                (base_offset + alignment) as u64,
+                                bytemuck::cast_slice(&overlay_data),
+                            );
+
+                            let gpu_pool = self.gpu_texture_pool.lock().unwrap();
+                            if let Some(pool) = gpu_pool.as_ref() {
+                                if let Some(ptex) = pool.get_texture(draw.texture_id) {
+                                    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                        label: Some("RasterCache Composite Bind Group"),
+                                        layout,
+                                        entries: &[
+                                            wgpu::BindGroupEntry {
+                                                binding: 0,
+                                                resource: wgpu::BindingResource::TextureView(ptex.view()),
+                                            },
+                                            wgpu::BindGroupEntry {
+                                                binding: 1,
+                                                resource: wgpu::BindingResource::Sampler(&sampler),
+                                            },
+                                            wgpu::BindGroupEntry {
+                                                binding: 2,
+                                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                                    buffer: staging,
+                                                    offset: base_offset as u64,
+                                                    size: Some(std::num::NonZeroU64::new(48).unwrap()),
+                                                }),
+                                            },
+                                            wgpu::BindGroupEntry {
+                                                binding: 3,
+                                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                                    buffer: staging,
+                                                    offset: (base_offset + alignment) as u64,
+                                                    size: Some(std::num::NonZeroU64::new(32).unwrap()),
+                                                }),
+                                            },
+                                        ],
+                                    });
+                                    rp.set_pipeline(pipeline);
+                                    rp.set_bind_group(0, &bind_group, &[]);
+                                    rp.draw(0..6, 0..1);
+                                }
+                            }
+                        }
+                    }
 
                     log::debug!(
                         "[Blur Pass 4] Starting compositing loop for {} textures",
@@ -1973,17 +1991,13 @@ impl VelloBackend {
                         log::debug!("[Blur] Overlay data: {:?}", overlay_data);
                         log::debug!("[Blur] Texture size: {}x{}", entry.width, entry.height);
 
-                        let texture_view = entry
-                            .texture
-                            .create_view(&wgpu::TextureViewDescriptor::default());
-
                         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some(&format!("Blur Composite Bind Group {}", entry.view_id)),
                             layout,
                             entries: &[
                                 wgpu::BindGroupEntry {
                                     binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                                    resource: wgpu::BindingResource::TextureView(&entry.texture_view),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
@@ -2018,6 +2032,110 @@ impl VelloBackend {
                         rp.set_bind_group(0, &bind_group, &[]);
                         rp.draw(0..6, 0..1);
                         log::debug!("[Blur Pass 4] Drew view_id={}", entry.view_id);
+
+                        // === Draw per-entry children overlay ===
+                        if let Some(ref children_view) = entry.children_texture_view {
+                            let bx = entry.children_bounds.0 as f64;
+                            let by = entry.children_bounds.1 as f64;
+                            let bw = entry.children_bounds.2 as f64;
+                            let bh = entry.children_bounds.3 as f64;
+                            let children_transform = Affine::translate((bx, by));
+                            let cmat = children_transform.as_coeffs();
+                            let ctex_width = bw as f32;
+                            let ctex_height = bh as f32;
+                            let children_uniform_data: [f32; 12] = [
+                                cmat[0] as f32 * ctex_width * scale_x,
+                                cmat[2] as f32 * ctex_width * scale_x,
+                                0.0,
+                                0.0,
+                                cmat[1] as f32 * ctex_height * scale_y,
+                                cmat[3] as f32 * ctex_height * scale_y,
+                                0.0,
+                                0.0,
+                                cmat[4] as f32 * scale_x + offset_x,
+                                cmat[5] as f32 * scale_y + offset_y,
+                                1.0,
+                                0.0,
+                            ];
+                            let children_overlay_data: [f32; 8] = [
+                                0.0, 0.0, 0.0, 0.0,
+                                0.0,
+                                ctex_width,
+                                ctex_height,
+                                0.0,
+                            ];
+                            let children_base_offset = self
+                                .blur_staging_offset
+                                .fetch_add(stride, std::sync::atomic::Ordering::Relaxed);
+                            if children_base_offset + stride > 1024 * 1024 {
+                                log::warn!(
+                                    "[Blur] Staging buffer overflow for children, skipping"
+                                );
+                                break;
+                            }
+                            queue.write_buffer(
+                                staging,
+                                children_base_offset as u64,
+                                bytemuck::cast_slice(&children_uniform_data),
+                            );
+                            queue.write_buffer(
+                                staging,
+                                (children_base_offset + alignment) as u64,
+                                bytemuck::cast_slice(&children_overlay_data),
+                            );
+                            let children_bind_group = device.create_bind_group(
+                                &wgpu::BindGroupDescriptor {
+                                    label: Some(&format!(
+                                        "Children Composite Bind Group {}",
+                                        entry.view_id
+                                    )),
+                                    layout,
+                                    entries: &[
+                                        wgpu::BindGroupEntry {
+                                            binding: 0,
+                                            resource: wgpu::BindingResource::TextureView(
+                                                children_view,
+                                            ),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 1,
+                                            resource: wgpu::BindingResource::Sampler(&sampler),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 2,
+                                            resource: wgpu::BindingResource::Buffer(
+                                                wgpu::BufferBinding {
+                                                    buffer: staging,
+                                                    offset: children_base_offset as u64,
+                                                    size: Some(
+                                                        std::num::NonZeroU64::new(48).unwrap(),
+                                                    ),
+                                                },
+                                            ),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 3,
+                                            resource: wgpu::BindingResource::Buffer(
+                                                wgpu::BufferBinding {
+                                                    buffer: staging,
+                                                    offset: (children_base_offset + alignment)
+                                                        as u64,
+                                                    size: Some(
+                                                        std::num::NonZeroU64::new(32).unwrap(),
+                                                    ),
+                                                },
+                                            ),
+                                        },
+                                    ],
+                                },
+                            );
+                            rp.set_bind_group(0, &children_bind_group, &[]);
+                            rp.draw(0..6, 0..1);
+                            log::debug!(
+                                "[Blur Pass 4] Drew children for view_id={}",
+                                entry.view_id
+                            );
+                        }
                     }
                 }
             }
@@ -2028,39 +2146,6 @@ impl VelloBackend {
                 had_blur_textures
             );
             drop(blurred_textures);
-
-            // Draw children texture on top of blur
-            if let Some((_, ref children_view)) = children_texture {
-                let children_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Children Blit Bind Group"),
-                    layout: self
-                        .blit_bind_group_layout
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap(),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(children_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(
-                                self.sampler.lock().unwrap().as_ref().unwrap(),
-                            ),
-                        },
-                    ],
-                });
-
-                if let Some(ref children_pipeline) = *self.children_blit_pipeline.lock().unwrap() {
-                    rp.set_pipeline(children_pipeline);
-                } else {
-                    rp.set_pipeline(blit_pipeline);
-                }
-                rp.set_bind_group(0, &children_bind_group, &[]);
-                rp.draw(0..3, 0..1);
-            }
         }
 
         // If using capture texture, blit it to surface before present (same encoder)
@@ -2106,6 +2191,8 @@ impl VelloBackend {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
+                let blit_pipeline_guard = self.blit_pipeline.lock().unwrap();
+                let blit_pipeline = blit_pipeline_guard.as_ref().unwrap();
                 rp.set_pipeline(blit_pipeline);
                 rp.set_bind_group(0, &capture_bind_group, &[]);
                 rp.draw(0..3, 0..1);
@@ -2158,32 +2245,20 @@ impl VelloBackend {
         {
             let report = stage_timer.report();
 
-            #[cfg(not(target_os = "android"))]
             let state_lock_time =
                 report.get("init_check_to_perf_start") + report.get("perf_start_to_state_lock");
-            #[cfg(not(target_os = "android"))]
             let scene_build_time = report.get("state_lock_to_scene_build");
-            #[cfg(not(target_os = "android"))]
             let gpu_time = report.get("scene_build_to_gpu_render");
-            #[cfg(not(target_os = "android"))]
             let blur_copy_time = report.get("gpu_render_to_blur_copy_submit");
-            #[cfg(not(target_os = "android"))]
             let blur_render_time = report.get("blur_copy_submit_to_blur_render_submit");
-            #[cfg(not(target_os = "android"))]
             let pass3_time = report.get("blur_render_submit_to_pass3_done");
-            #[cfg(not(target_os = "android"))]
             let get_texture_time = report.get("pass3_done_to_before_get_texture");
-            #[cfg(not(target_os = "android"))]
             let texture_wait_time = report.get("before_get_texture_to_after_get_texture");
-            #[cfg(not(target_os = "android"))]
             let blit_time = report.get("after_get_texture_to_blit_submit");
-            #[cfg(not(target_os = "android"))]
             let present_time = report.get("blit_submit_to_present_return");
-            #[cfg(not(target_os = "android"))]
             let total = frame_start.elapsed().as_secs_f32() * 1000.0;
 
             // PERF tag logic
-            #[cfg(not(target_os = "android"))]
             let perf_tag = if frame_interval_ms > (1000.0 / 60.0 + 1.0) {
                 "JANK"
             } else if pacer_wait_ms < 2.0 {
@@ -2192,33 +2267,25 @@ impl VelloBackend {
                 "OK"
             };
 
-            #[cfg(target_os = "android")]
-            {
-                // Android logging unchanged
-            }
-
-            #[cfg(not(target_os = "android"))]
-            {
-                log::info!(
-                    "[DIAG] Frame {}: Total={:.2}ms, PacerWait={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, BlurCopy={:.2}ms, BlurRender={:.2}ms, Pass3={:.2}ms, GetTex={:.2}ms, TexWait={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FrameInterval={:.2}ms, FPS={:.1} [PERF: {}]",
-                    stats.total_frames,
-                    total,
-                    pacer_wait_ms,
-                    state_lock_time,
-                    scene_build_time,
-                    gpu_time,
-                    blur_copy_time,
-                    blur_render_time,
-                    pass3_time,
-                    get_texture_time,
-                    texture_wait_time,
-                    blit_time,
-                    present_time,
-                    frame_interval_ms,
-                    stats.fps,
-                    perf_tag
-                );
-            }
+            log::info!(
+                "[DIAG] Frame {}: Total={:.2}ms, PacerWait={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, BlurCopy={:.2}ms, BlurRender={:.2}ms, Pass3={:.2}ms, GetTex={:.2}ms, TexWait={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FrameInterval={:.2}ms, FPS={:.1} [PERF: {}]",
+                stats.total_frames,
+                total,
+                pacer_wait_ms,
+                state_lock_time,
+                scene_build_time,
+                gpu_time,
+                blur_copy_time,
+                blur_render_time,
+                pass3_time,
+                get_texture_time,
+                texture_wait_time,
+                blit_time,
+                present_time,
+                frame_interval_ms,
+                stats.fps,
+                perf_tag
+            );
 
             if stats.total_frames % 300 == 0 && log::log_enabled!(log::Level::Debug) {
                 report.print();
@@ -2226,6 +2293,40 @@ impl VelloBackend {
         }
 
         Ok(())
+    }
+
+    /// Public entry point: acquires cached_textures lock once, then delegates to internal recursive renderer.
+    fn render_node_recursive_with_transform(
+        &self,
+        id: u32,
+        nodes: &std::collections::HashMap<u32, &dyxel_render_api::SceneNode>,
+        scene: &mut Scene,
+        parent_pos: Vec2,
+        transform: Affine,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut vello::Renderer,
+        filter_pipeline: Option<&crate::filter_pipeline::FilterPipeline>,
+        blurred_textures: &mut Vec<BlurredTextureEntry>,
+        cached_draws: &mut Vec<CachedDraw>,
+        in_blur_subtree: bool,
+    ) {
+        let cache_guard = self.cached_textures.lock().unwrap();
+        Self::render_node_recursive_internal(
+            id,
+            nodes,
+            scene,
+            parent_pos,
+            transform,
+            device,
+            queue,
+            renderer,
+            filter_pipeline,
+            blurred_textures,
+            &*cache_guard,
+            cached_draws,
+            in_blur_subtree,
+        );
     }
 }
 
@@ -2278,10 +2379,9 @@ pub fn platform_correction(viewport_height: f64) -> Affine {
 ///
 /// This function prepares the blur entry for the second pass.
 fn render_with_blur(
-    node: &dyxel_shared::ViewNode,
+    blur: &dyxel_render_api::BlurEffect,
     id: u32,
-    _state: &SharedState,
-    _editors: &mut std::collections::HashMap<u32, Editor>,
+    nodes: &std::collections::HashMap<u32, &dyxel_render_api::SceneNode>,
     _scene: &mut Scene,
     local_transform: Affine,
     device: &wgpu::Device,
@@ -2298,7 +2398,7 @@ fn render_with_blur(
     // use kurbo::{Rect as KRect, RoundedRect};
 
     // Calculate padded size for blur (need extra space for blur bleed)
-    let blur_radius = node.blur_radius as f64;
+    let blur_radius = blur.blur_radius as f64;
     let padding = (blur_radius * 2.5).ceil() as u32;
     let texture_width = (node_width as u32 + padding * 2).max(1);
     let texture_height = (node_height as u32 + padding * 2).max(1);
@@ -2323,7 +2423,20 @@ fn render_with_blur(
         view_formats: &[],
     };
 
-    let offscreen_texture = device.create_texture(&texture_desc);
+    // Check if we already have an entry for this view_id (caching)
+    let existing_index = blurred_textures.iter().position(|e| e.view_id == id);
+    let needs_new_texture = existing_index.map_or(true, |idx| {
+        let entry = &blurred_textures[idx];
+        entry.width != texture_width || entry.height != texture_height
+    });
+
+    let offscreen_texture = if needs_new_texture {
+        let tex = device.create_texture(&texture_desc);
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        Some((tex, view))
+    } else {
+        None
+    };
 
     // NOTE: For true two-pass frosted glass, we don't render anything here.
     // The blur texture will be created AFTER the main scene is rendered,
@@ -2354,10 +2467,27 @@ fn render_with_blur(
     // Instead, we'll store the Taffy Y value and let the copy code handle the conversion
 
     // Collect deferred children - they will be rendered after the blurred background
-    let deferred_children: Vec<u32> = node.children.clone();
+    let deferred_children: Vec<u32> = blur.deferred_children.clone();
 
-    // Check if we already have an entry for this view_id (caching)
-    let existing_index = blurred_textures.iter().position(|e| e.view_id == id);
+    // Compute bounding box of deferred children for local rendering
+    let mut children_bounds_rect: Option<kurbo::Rect> = None;
+    for &child_id in &deferred_children {
+        if let Some(bounds) = compute_subtree_bounds(
+            child_id,
+            nodes,
+            Vec2::new(source_x as f64, source_y_taffy as f64),
+        ) {
+            children_bounds_rect = Some(children_bounds_rect.map_or(bounds, |r| r.union(bounds)));
+        }
+    }
+    let padding_px = 2.0f64;
+    let children_bounds = children_bounds_rect.map_or((0.0f32, 0.0f32, 0.0f32, 0.0f32), |r| {
+        let x0 = (r.x0 - padding_px).max(0.0) as f32;
+        let y0 = (r.y0 - padding_px).max(0.0) as f32;
+        let x1 = (r.x1 + padding_px) as f32;
+        let y1 = (r.y1 + padding_px) as f32;
+        (x0, y0, x1 - x0, y1 - y0)
+    });
 
     // Store the source rectangle
     // On macOS/iOS: source_y_taffy is Y-down from top, so we store it directly
@@ -2377,9 +2507,9 @@ fn render_with_blur(
         // Update existing entry's metadata but reuse the texture
         let entry = &mut blurred_textures[index];
         entry.transform = final_transform;
-        entry.opacity = node.opacity;
-        entry.overlay_color = node.color;
-        entry.border_radius = node.border_radius as f64;
+        entry.opacity = blur.opacity;
+        entry.overlay_color = blur.overlay_color;
+        entry.border_radius = blur.border_radius as f64;
         entry.source_rect = (
             source_x,
             source_y_taffy,
@@ -2387,8 +2517,16 @@ fn render_with_blur(
             node_height as f32,
         );
         entry.deferred_children = deferred_children;
-        entry.blur_radius = node.blur_radius;
-        entry.blur_style = node.blur_style;
+        entry.children_bounds = children_bounds;
+        // Children texture lifecycle is managed in Pass 3; reset only when bounds change significantly
+        let children_size_changed = entry.children_bounds.2 != children_bounds.2
+            || entry.children_bounds.3 != children_bounds.3;
+        if children_size_changed {
+            entry.children_texture = None;
+            entry.children_texture_view = None;
+        }
+        entry.blur_radius = blur.blur_radius;
+        entry.blur_style = blur.blur_style;
         entry.skipped_due_to_size = false;
         // Check if blur params changed significantly
         let size_changed = entry.width != texture_width || entry.height != texture_height;
@@ -2403,7 +2541,9 @@ fn render_with_blur(
                 texture_width,
                 texture_height
             );
-            entry.texture = offscreen_texture;
+            let (tex, view) = offscreen_texture.expect("size_changed implies needs_new_texture");
+            entry.texture = tex;
+            entry.texture_view = view;
             entry.width = texture_width;
             entry.height = texture_height;
         } else {
@@ -2411,14 +2551,16 @@ fn render_with_blur(
         }
     } else {
         // Create new entry
+        let (tex, view) = offscreen_texture.expect("new entry must have texture");
         blurred_textures.push(BlurredTextureEntry {
-            texture: offscreen_texture,
+            texture: tex,
+            texture_view: view,
             width: texture_width,
             height: texture_height,
             transform: final_transform,
-            opacity: node.opacity,
-            overlay_color: node.color,
-            border_radius: node.border_radius as f64,
+            opacity: blur.opacity,
+            overlay_color: blur.overlay_color,
+            border_radius: blur.border_radius as f64,
             source_rect: (
                 source_x,
                 source_y_taffy,
@@ -2426,9 +2568,12 @@ fn render_with_blur(
                 node_height as f32,
             ),
             deferred_children,
+            children_bounds,
+            children_texture: None,
+            children_texture_view: None,
             view_id: id,
-            blur_radius: node.blur_radius,
-            blur_style: node.blur_style,
+            blur_radius: blur.blur_radius,
+            blur_style: blur.blur_style,
             skipped_due_to_size: false,
             needs_recalculation: true,
         });
@@ -2449,8 +2594,7 @@ fn render_with_blur(
 /// Helper to render a child node to the blur temp scene
 fn render_child_to_blur_scene(
     id: u32,
-    state: &SharedState,
-    editors: &mut std::collections::HashMap<u32, Editor>,
+    nodes: &std::collections::HashMap<u32, &dyxel_render_api::SceneNode>,
     scene: &mut Scene,
     transform: Affine,
     padding_offset: f64,
@@ -2458,51 +2602,80 @@ fn render_child_to_blur_scene(
     use kurbo::{Rect as KRect, RoundedRect};
     use vello::peniko::Fill;
 
-    if let Some(node) = state.nodes.get(&id) {
-        let layout = state.taffy.layout(node.taffy_node).unwrap();
-        let x = layout.location.x as f64 + node.position_x as f64 + padding_offset;
-        let y = layout.location.y as f64 + node.position_y as f64 + padding_offset;
-        let width = layout.size.width as f64;
-        let height = layout.size.height as f64;
+    if let Some(node) = nodes.get(&id).copied() {
+        let x = node.x as f64 + node.position_x as f64 + padding_offset;
+        let y = node.y as f64 + node.position_y as f64 + padding_offset;
+        let width = node.width as f64;
+        let height = node.height as f64;
 
         let local_transform = transform * Affine::translate((x, y));
 
         // Draw the child
         let rect = KRect::from_origin_size((0.0, 0.0), (width, height));
+        let color = match node.content {
+            dyxel_render_api::NodeContent::Rect { color } => color,
+            _ => vello::peniko::Color::TRANSPARENT,
+        };
         if node.border_radius > 0.0 {
             let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
-            scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
+            scene.fill(Fill::NonZero, local_transform, color, None, &rounded);
         } else {
-            scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
+            scene.fill(Fill::NonZero, local_transform, color, None, &rect);
         }
 
         // Recursively render grandchildren
         for &child_id in &node.children {
-            render_child_to_blur_scene(child_id, state, editors, scene, local_transform, 0.0);
+            render_child_to_blur_scene(child_id, nodes, scene, local_transform, 0.0);
         }
     }
+}
+
+/// Compute the axis-aligned bounding box of a subtree in screen coordinates.
+/// Returns None if the node does not exist.
+fn compute_subtree_bounds(
+    id: u32,
+    nodes: &std::collections::HashMap<u32, &dyxel_render_api::SceneNode>,
+    parent_pos: Vec2,
+) -> Option<kurbo::Rect> {
+    let node = nodes.get(&id).copied()?;
+    let x = node.x as f64 + node.position_x as f64;
+    let y = node.y as f64 + node.position_y as f64;
+    let width = node.width as f64;
+    let height = node.height as f64;
+
+    let global_x = parent_pos.x + x;
+    let global_y = parent_pos.y + y;
+    let mut bounds = kurbo::Rect::from_origin_size((global_x, global_y), (width, height));
+
+    let child_pos = parent_pos + Vec2::new(x, y);
+    for &child_id in &node.children {
+        if let Some(child_bounds) = compute_subtree_bounds(child_id, nodes, child_pos) {
+            bounds = bounds.union(child_bounds);
+        }
+    }
+
+    Some(bounds)
 }
 
 /// Render a deferred child (for frosted glass effect)
 /// This renders children of blur views on top of the blurred background
 fn render_deferred_child(
     id: u32,
-    state: &SharedState,
-    editors: &mut std::collections::HashMap<u32, Editor>,
+    nodes: &std::collections::HashMap<u32, &dyxel_render_api::SceneNode>,
     scene: &mut Scene,
     parent_pos: Vec2,
+    origin_offset: Vec2,
 ) {
     use kurbo::{Rect as KRect, RoundedRect};
     use vello::peniko::{BlendMode as PenikoBlendMode, Compose, Fill, Mix};
 
-    if let Some(node) = state.nodes.get(&id) {
-        let layout = state.taffy.layout(node.taffy_node).unwrap();
-        let x = layout.location.x as f64 + node.position_x as f64;
-        let y = layout.location.y as f64 + node.position_y as f64;
-        let width = layout.size.width as f64;
-        let height = layout.size.height as f64;
+    if let Some(node) = nodes.get(&id).copied() {
+        let x = node.x as f64 + node.position_x as f64;
+        let y = node.y as f64 + node.position_y as f64;
+        let width = node.width as f64;
+        let height = node.height as f64;
 
-        let local_transform = Affine::translate((parent_pos.x + x, parent_pos.y + y));
+        let local_transform = Affine::translate((parent_pos.x + x - origin_offset.x, parent_pos.y + y - origin_offset.y));
 
         // Apply opacity using layer if needed
         let needs_layer = node.opacity < 1.0;
@@ -2514,18 +2687,15 @@ fn render_deferred_child(
         }
 
         // Draw the child
-        if node.view_type == ViewType::Text {
-            if let Some(editor) = editors.get_mut(&id) {
-                editor.set_width(None);
-                editor.draw(scene, local_transform);
-            }
-        } else {
+        if let dyxel_render_api::NodeContent::Text(ref payload) = node.content {
+            draw_prepared_text(scene, payload, local_transform);
+        } else if let dyxel_render_api::NodeContent::Rect { color } = node.content {
             let rect = KRect::from_origin_size((0.0, 0.0), (width, height));
             if node.border_radius > 0.0 {
                 let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
-                scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
+                scene.fill(Fill::NonZero, local_transform, color, None, &rounded);
             } else {
-                scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
+                scene.fill(Fill::NonZero, local_transform, color, None, &rect);
             }
         }
 
@@ -2537,35 +2707,80 @@ fn render_deferred_child(
         // Recursively render grandchildren
         let child_pos = parent_pos + Vec2::new(x, y);
         for &child_id in &node.children {
-            render_deferred_child(child_id, state, editors, scene, child_pos);
+            render_deferred_child(child_id, nodes, scene, child_pos, origin_offset);
         }
     }
 }
 
-/// Render a node with layer effects (alpha, blur, shadow, clip)
-/// Following Xilem's pattern: shadow -> content -> children
-fn render_node_recursive_with_transform(
-    id: u32,
-    state: &SharedState,
-    editors: &mut std::collections::HashMap<u32, Editor>,
+/// Draw prepared text payload into the scene.
+/// Consumes PreparedText directly: decorations (selection/cursor) + glyph runs.
+fn draw_prepared_text(
     scene: &mut Scene,
-    parent_pos: Vec2,
+    payload: &dyxel_render_api::TextDrawPayload,
     transform: Affine,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    renderer: &mut vello::Renderer,
-    filter_pipeline: Option<&crate::filter_pipeline::FilterPipeline>,
-    blurred_textures: &mut Vec<BlurredTextureEntry>,
 ) {
+    use peniko::{Brush, Fill};
+
+    // 1. Draw decorations (selection background, cursor)
+    for deco in &payload.prepared.decorations {
+        let rect = kurbo::Rect::new(
+            deco.x as f64,
+            deco.y as f64,
+            (deco.x + deco.width) as f64,
+            (deco.y + deco.height) as f64,
+        );
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            deco.color,
+            None,
+            &rect,
+        );
+    }
+
+    // 2. Draw glyph runs
+    for run in &payload.prepared.glyph_runs {
+        let glyphs = run.glyphs.iter().map(|g| vello::Glyph {
+            id: g.id,
+            x: g.x,
+            y: g.y,
+        });
+        scene
+            .draw_glyphs(&run.font_data)
+            .brush(Brush::Solid(run.color))
+            .hint(true)
+            .transform(transform)
+            .font_size(run.font_size)
+            .draw(Fill::NonZero, glyphs);
+    }
+}
+
+impl VelloBackend {
+    /// Render a node with layer effects (alpha, blur, shadow, clip)
+    /// Following Xilem's pattern: shadow -> content -> children
+    fn render_node_recursive_internal(
+        id: u32,
+        nodes: &std::collections::HashMap<u32, &dyxel_render_api::SceneNode>,
+        scene: &mut Scene,
+        parent_pos: Vec2,
+        transform: Affine,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut vello::Renderer,
+        filter_pipeline: Option<&crate::filter_pipeline::FilterPipeline>,
+        blurred_textures: &mut Vec<BlurredTextureEntry>,
+        cached_textures: &std::collections::HashMap<u32, dyxel_render_api::raster_cache::TextureId>,
+        cached_draws: &mut Vec<CachedDraw>,
+        in_blur_subtree: bool,
+    ) {
     use kurbo::{Affine, Rect as KRect, RoundedRect};
     use vello::peniko::{BlendMode as PenikoBlendMode, Compose, Fill, Mix};
 
-    if let Some(node) = state.nodes.get(&id) {
-        let layout = state.taffy.layout(node.taffy_node).unwrap();
-        let taffy_x = layout.location.x as f64;
-        let taffy_y = layout.location.y as f64;
-        let node_width = layout.size.width as f64;
-        let node_height = layout.size.height as f64;
+    if let Some(node) = nodes.get(&id).copied() {
+        let taffy_x = node.x as f64;
+        let taffy_y = node.y as f64;
+        let node_width = node.width as f64;
+        let node_height = node.height as f64;
         let global_pos = parent_pos + Vec2::new(taffy_x, taffy_y);
 
         // Build local transform for this node
@@ -2575,12 +2790,26 @@ fn render_node_recursive_with_transform(
             * Affine::translate((global_pos.x + pos_offset.x, global_pos.y + pos_offset.y));
 
         // Determine if we need layer effects
-        let needs_layer = node.opacity < 1.0 || node.clip_to_bounds || node.blur_radius > 0.0;
-        let has_shadow = node.shadow_blur > 0.0
-            && (node.shadow_offset_x != 0.0
-                || node.shadow_offset_y != 0.0
-                || node.shadow_blur > 0.0);
-        let has_blur = node.blur_radius > 0.0;
+        let needs_layer = node.opacity < 1.0 || node.clip_to_bounds || node.blur.is_some();
+        let has_shadow = node.shadow.is_some();
+        let has_blur = node.blur.is_some();
+
+        // === Raster Cache Check ===
+        // Conservative eligibility: only nodes fully outside any blur subtree.
+        // Backend performs read-only lookup; Runtime decides which nodes to bake.
+        let node_in_blur_subtree = in_blur_subtree || has_blur;
+        if !node_in_blur_subtree {
+            if let Some(&texture_id) = cached_textures.get(&id) {
+                let draw_pos = global_pos + pos_offset;
+                cached_draws.push(CachedDraw {
+                    texture_id: texture_pool::TextureId(texture_id.0),
+                    transform: Affine::translate((draw_pos.x, draw_pos.y)),
+                    width: node_width as f32,
+                    height: node_height as f32,
+                });
+                return;
+            }
+        }
 
         // NOTE: When blur is enabled, we skip layer creation here because:
         // 1. The node's background should NOT be drawn to the main scene
@@ -2590,10 +2819,9 @@ fn render_node_recursive_with_transform(
         // Debug: Log blur node info
         if has_blur {
             log::debug!(
-                "[Debug] Blur node id={} color={:?} blur_radius={} opacity={}",
+                "[Debug] Blur node id={} blur_radius={} opacity={}",
                 id,
-                node.color,
-                node.blur_radius,
+                node.blur.as_ref().map(|b| b.blur_radius).unwrap_or(0.0),
                 node.opacity
             );
             log::debug!(
@@ -2618,37 +2846,33 @@ fn render_node_recursive_with_transform(
         // Xilem pattern: Draw shadow first, then content on top
         // NOTE: When blur is enabled, skip shadow in Pass 1. Shadow will be handled
         // by the blur compositing pipeline to avoid double-rendering.
-        if has_shadow && !has_blur {
-            let shadow_x = node.shadow_offset_x as f64;
-            let shadow_y = node.shadow_offset_y as f64;
-            let blur_radius = node.shadow_blur as f64;
+        if let Some(ref shadow) = node.shadow {
+            if !has_blur {
+                let shadow_x = shadow.offset_x as f64;
+                let shadow_y = shadow.offset_y as f64;
+                let blur_radius = shadow.blur as f64;
+                let shadow_color = shadow.color;
 
-            // Extract shadow color components
-            let r = ((node.shadow_color >> 16) & 0xFF) as u8;
-            let g = ((node.shadow_color >> 8) & 0xFF) as u8;
-            let b = (node.shadow_color & 0xFF) as u8;
-            let a = ((node.shadow_color >> 24) & 0xFF) as u8;
-            let shadow_color = vello::peniko::Color::from_rgba8(r, g, b, a);
+                // Draw blurred shadow using Vello's draw_blurred_rounded_rect
+                let rect = KRect::from_origin_size((shadow_x, shadow_y), (node_width, node_height));
 
-            // Draw blurred shadow using Vello's draw_blurred_rounded_rect
-            let rect = KRect::from_origin_size((shadow_x, shadow_y), (node_width, node_height));
-
-            if node.border_radius > 0.0 {
-                scene.draw_blurred_rounded_rect(
-                    local_transform,
-                    rect,
-                    shadow_color,
-                    node.border_radius as f64,
-                    blur_radius,
-                );
-            } else {
-                scene.draw_blurred_rounded_rect(
-                    local_transform,
-                    rect,
-                    shadow_color,
-                    0.0,
-                    blur_radius,
-                );
+                if node.border_radius > 0.0 {
+                    scene.draw_blurred_rounded_rect(
+                        local_transform,
+                        rect,
+                        shadow_color,
+                        node.border_radius as f64,
+                        blur_radius,
+                    );
+                } else {
+                    scene.draw_blurred_rounded_rect(
+                        local_transform,
+                        rect,
+                        shadow_color,
+                        0.0,
+                        blur_radius,
+                    );
+                }
             }
         }
 
@@ -2684,23 +2908,26 @@ fn render_node_recursive_with_transform(
 
         // === Step 3: Handle Blur Effect ===
         // If blur is enabled, render to offscreen texture and apply blur
-        let blur_applied = if has_blur && filter_pipeline.is_some() {
-            render_with_blur(
-                node,
-                id,
-                state,
-                editors,
-                scene,
-                local_transform,
-                device,
-                queue,
-                renderer,
-                filter_pipeline.unwrap(),
-                node_width,
-                node_height,
-                needs_layer,
-                blurred_textures,
-            )
+        let blur_applied = if let Some(ref blur) = node.blur {
+            if filter_pipeline.is_some() {
+                render_with_blur(
+                    blur,
+                    id,
+                    nodes,
+                    scene,
+                    local_transform,
+                    device,
+                    queue,
+                    renderer,
+                    filter_pipeline.unwrap(),
+                    node_width,
+                    node_height,
+                    needs_layer,
+                    blurred_textures,
+                )
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -2708,31 +2935,29 @@ fn render_node_recursive_with_transform(
         // === Step 4: Draw Node Content ===
         // Skip normal drawing if blur was applied (blur texture will be drawn in blit pass)
         if !blur_applied {
-            if node.view_type == ViewType::Text {
-                // Render text using Editor
-                if let Some(editor) = editors.get_mut(&id) {
-                    editor.set_width(None);
-                    editor.draw(scene, local_transform);
+            match node.content {
+                dyxel_render_api::NodeContent::Text(ref payload) => {
+                    draw_prepared_text(scene, payload, local_transform);
                 }
-            } else {
-                // Render rectangle at local position
-                let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
+                dyxel_render_api::NodeContent::Rect { color } => {
+                    let rect = KRect::from_origin_size((0.0, 0.0), (node_width, node_height));
 
-                // Debug: Log fill operations for non-text nodes
-                log::debug!(
-                    "[DebugFill] id={} color={:?} size={}x{} transform={:?}",
-                    id,
-                    node.color,
-                    node_width,
-                    node_height,
-                    local_transform
-                );
+                    // Debug: Log fill operations for non-text nodes
+                    log::debug!(
+                        "[DebugFill] id={} color={:?} size={}x{} transform={:?}",
+                        id,
+                        color,
+                        node_width,
+                        node_height,
+                        local_transform
+                    );
 
-                if node.border_radius > 0.0 {
-                    let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
-                    scene.fill(Fill::NonZero, local_transform, node.color, None, &rounded);
-                } else {
-                    scene.fill(Fill::NonZero, local_transform, node.color, None, &rect);
+                    if node.border_radius > 0.0 {
+                        let rounded = RoundedRect::from_rect(rect, node.border_radius as f64);
+                        scene.fill(Fill::NonZero, local_transform, color, None, &rounded);
+                    } else {
+                        scene.fill(Fill::NonZero, local_transform, color, None, &rect);
+                    }
                 }
             }
         }
@@ -2754,10 +2979,9 @@ fn render_node_recursive_with_transform(
             let local_pos = global_pos + pos_offset;
             for &child_id in &node.children {
                 log::debug!("[DebugChildren] id={} rendering child_id={}", id, child_id);
-                render_node_recursive_with_transform(
+                Self::render_node_recursive_internal(
                     child_id,
-                    state,
-                    editors,
+                    nodes,
                     scene,
                     local_pos,
                     transform,
@@ -2766,6 +2990,9 @@ fn render_node_recursive_with_transform(
                     renderer,
                     filter_pipeline,
                     blurred_textures,
+                    cached_textures,
+                    cached_draws,
+                    node_in_blur_subtree,
                 );
             }
         }
@@ -2776,6 +3003,7 @@ fn render_node_recursive_with_transform(
             scene.pop_layer();
         }
     }
+}
 }
 
 impl RenderBackend for VelloBackend {
@@ -2941,12 +3169,19 @@ impl RenderBackend for VelloBackend {
         {
             let device_arc = Arc::new(device.clone());
             let pool = texture_pool::SharedTexturePool::new(
-                device_arc,
+                device_arc.clone(),
                 texture_pool::TexturePoolConfig::default(),
             );
             *self.texture_pool.lock().unwrap() = Some(pool);
+            let gpu_pool = texture_pool::GpuTexturePool::new(
+                device_arc,
+                texture_pool::TexturePoolConfig::default(),
+            );
+            *self.gpu_texture_pool.lock().unwrap() = Some(gpu_pool);
             log::info!("[TexturePool] Initialized blur texture pool");
         }
+
+        // Raster cache initialization has moved to Runtime.
 
         // Store info for deferred renderer initialization (includes cache stage)
         *self.init_device_info.lock().unwrap() = Some((cache_path, pipeline_cache, cache_stage));
@@ -3109,14 +3344,13 @@ impl RenderBackend for VelloBackend {
             cache: self.pipeline_cache.lock().unwrap().as_ref(),
         });
         *self.children_blit_pipeline.lock().unwrap() = Some(children_blit_p);
+        *self.blit_pipeline.lock().unwrap() = Some(blit_p);
 
         #[cfg(target_os = "macos")]
         {
             log::info!("VelloBackend: Creating MacVelloSurfaceState");
             return Ok(Box::new(mac::MacVelloSurfaceState {
                 surface: v_surface,
-                blit_pipeline: blit_p,
-                triple_buffer: None,
             }));
         }
 
@@ -3125,8 +3359,6 @@ impl RenderBackend for VelloBackend {
             log::info!("VelloBackend: Creating AndroidVelloSurfaceState");
             return Ok(Box::new(android::AndroidVelloSurfaceState {
                 surface: v_surface,
-                blit_pipeline: blit_p,
-                triple_buffer: None,
             }));
         }
 
@@ -3135,8 +3367,6 @@ impl RenderBackend for VelloBackend {
             log::info!("VelloBackend: Creating WebVelloSurfaceState");
             return Ok(Box::new(web::WebVelloSurfaceState {
                 surface: v_surface,
-                blit_pipeline: blit_p,
-                triple_buffer: None,
             }));
         }
 
@@ -3148,27 +3378,18 @@ impl RenderBackend for VelloBackend {
         Err(anyhow::anyhow!("Unsupported platform"))
     }
 
-    fn prepare(
-        &self,
-        _shared_state: &SharedPtr<SharedMutex<SharedState>>,
-        _width: u32,
-        _height: u32,
-    ) {
-    }
-
     fn set_frame_timing(&self, pacer_wait_ms: f64, frame_interval_ms: f64) {
         *self.pacer_wait_ms.lock().unwrap() = pacer_wait_ms;
         *self.frame_interval_ms.lock().unwrap() = frame_interval_ms;
     }
 
-    fn render(
+    fn render_package(
         &self,
         device: DeviceHandle,
         queue: QueueHandle,
         surface: &mut dyn SurfaceState,
-        shared_state: &SharedPtr<SharedMutex<SharedState>>,
+        package: &dyxel_render_api::RenderPackage,
     ) -> RenderResult {
-        // Convert handles to references
         let device = unsafe { &*device.as_ptr::<wgpu::Device>() };
         let queue = unsafe { &*queue.as_ptr::<wgpu::Queue>() };
 
@@ -3180,13 +3401,11 @@ impl RenderBackend for VelloBackend {
                 .ok_or_else(|| {
                     anyhow::anyhow!("Invalid surface state (not MacVelloSurfaceState)")
                 })?;
-            return self.render_internal(
+            return self.render_internal_impl(
                 device,
                 queue,
                 &mut v_surface.surface,
-                &v_surface.blit_pipeline,
-                &mut v_surface.triple_buffer,
-                shared_state,
+                package,
             );
         }
 
@@ -3198,13 +3417,11 @@ impl RenderBackend for VelloBackend {
                 .ok_or_else(|| {
                     anyhow::anyhow!("Invalid surface state (not AndroidVelloSurfaceState)")
                 })?;
-            return self.render_internal(
+            return self.render_internal_impl(
                 device,
                 queue,
                 &mut v_surface.surface,
-                &v_surface.blit_pipeline,
-                &mut v_surface.triple_buffer,
-                shared_state,
+                package,
             );
         }
 
@@ -3216,13 +3433,11 @@ impl RenderBackend for VelloBackend {
                 .ok_or_else(|| {
                     anyhow::anyhow!("Invalid surface state (not WebVelloSurfaceState)")
                 })?;
-            return self.render_internal(
+            return self.render_internal_impl(
                 device,
                 queue,
                 &mut v_surface.surface,
-                &v_surface.blit_pipeline,
-                &mut v_surface.triple_buffer,
-                shared_state,
+                package,
             );
         }
 

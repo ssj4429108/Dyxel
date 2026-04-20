@@ -145,8 +145,8 @@ fn test_dirty_tracker() {
     assert!(!tracker.is_node_dirty(2));
 
     // Check dirty fields using helper
-    assert!(has_field(tracker.get_dirty_fields(0), DirtyField::Style));
-    assert!(has_field(tracker.get_dirty_fields(1), DirtyField::Size));
+    assert!(has_field(tracker.node_dirty_fields.get(&0).copied().unwrap_or(0), DirtyField::Style));
+    assert!(has_field(tracker.node_dirty_fields.get(&1).copied().unwrap_or(0), DirtyField::Size));
 
     // Test iterator
     let dirty_nodes: Vec<u32> = tracker.iter_dirty_nodes().collect();
@@ -168,12 +168,12 @@ fn test_dirty_field_combinations() {
 
     // Mark Style first
     tracker.mark_dirty(0, DirtyField::Style);
-    assert!(has_field(tracker.get_dirty_fields(0), DirtyField::Style));
-    assert!(!has_field(tracker.get_dirty_fields(0), DirtyField::Size));
+    assert!(has_field(tracker.node_dirty_fields.get(&0).copied().unwrap_or(0), DirtyField::Style));
+    assert!(!has_field(tracker.node_dirty_fields.get(&0).copied().unwrap_or(0), DirtyField::Size));
 
     // Mark Size - should combine with existing Style
     tracker.mark_dirty(0, DirtyField::Size);
-    let fields = tracker.get_dirty_fields(0);
+    let fields = tracker.node_dirty_fields.get(&0).copied().unwrap_or(0);
     assert!(
         has_field(fields, DirtyField::Style),
         "Style should still be set"
@@ -185,7 +185,7 @@ fn test_dirty_field_combinations() {
 
     // Mark Layout - should combine with existing fields
     tracker.mark_dirty(0, DirtyField::Layout);
-    let fields = tracker.get_dirty_fields(0);
+    let fields = tracker.node_dirty_fields.get(&0).copied().unwrap_or(0);
     assert!(
         has_field(fields, DirtyField::Style),
         "Style should still be set"
@@ -415,9 +415,15 @@ fn test_no_tearing_background_and_position_sync() {
     // All 4 commands should be present (different fields)
     assert_eq!(cmds.len(), 4, "Different fields should all be preserved");
 
+    // Simulate what the runtime does: apply committed commands and mark dirty fields
+    let mut tracker = DirtyTracker::new();
+    for cmd in &cmds {
+        tracker.mark_dirty(0, cmd.dirty_fields);
+    }
+
     // Verify dirty tracker has all the right fields marked (using u8 bits)
-    assert!(tx.dirty_tracker.is_node_dirty(0));
-    let fields = tx.dirty_tracker.get_dirty_fields(0);
+    assert!(tracker.is_node_dirty(0));
+    let fields = tracker.node_dirty_fields.get(&0).copied().unwrap_or(0);
     assert!(
         has_field(fields, DirtyField::Style),
         "Style should be dirty"

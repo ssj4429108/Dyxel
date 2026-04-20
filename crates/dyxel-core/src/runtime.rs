@@ -4,7 +4,7 @@
 use crate::handler_registry::{HandlerRegistry, HandlerType};
 use crate::state::SharedState;
 use crate::transaction::{
-    get_dirty_field_for_opcode, DirtyTracker, StagedCommand, TransactionProcessor, TransactionState,
+    get_dirty_field_for_opcode, StagedCommand, TransactionProcessor, TransactionState,
 };
 use dyxel_shared::{DirtyField, OpCode, MAX_COMMAND_BYTES, MAX_NODES};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -27,32 +27,24 @@ pub fn get_handler_registry() -> &'static Mutex<HandlerRegistry> {
     HANDLER_REGISTRY.get_or_init(|| Mutex::new(HandlerRegistry::new()))
 }
 
-/// Check if render is needed based on dirty tracker
+/// Check if render is needed based on shared state dirty tracker
 #[cfg(not(target_arch = "wasm32"))]
-pub fn is_render_needed() -> bool {
-    get_tx_processor().lock().unwrap().take_render_pending()
-}
-
-/// Get the dirty tracker for render optimization
-#[cfg(not(target_arch = "wasm32"))]
-pub fn get_dirty_tracker() -> Option<DirtyTracker> {
-    // Return a clone since we can't hold the lock across the return
-    Some(get_tx_processor().lock().unwrap().dirty_tracker.clone())
+pub fn is_render_needed(state: &SharedState) -> bool {
+    state.dirty_tracker.has_dirty() || get_tx_processor().lock().unwrap().take_render_pending()
 }
 
 /// Clear dirty tracker after render
 #[cfg(not(target_arch = "wasm32"))]
-pub fn clear_dirty_tracker() {
-    get_tx_processor().lock().unwrap().dirty_tracker.clear();
+pub fn clear_dirty_tracker(state: &mut SharedState) {
+    state.dirty_tracker.clear();
 }
 
 /// Mark all nodes as dirty after layout computation
 /// Called by Render thread after compute_layout to ensure Logic thread syncs layout to WASM
 #[cfg(not(target_arch = "wasm32"))]
-pub fn mark_all_nodes_dirty(node_ids: &[u32]) {
-    let mut tx = get_tx_processor().lock().unwrap();
+pub fn mark_all_nodes_dirty(state: &mut SharedState, node_ids: &[u32]) {
     for &id in node_ids {
-        tx.dirty_tracker.mark_dirty(id, DirtyField::Layout);
+        state.dirty_tracker.mark_dirty(id, DirtyField::Layout);
     }
 }
 
@@ -868,9 +860,12 @@ fn process_command_stream_with_tx(
                     offset += 4;
 
                     if let Ok(commands) = tx_processor.commit(seq_id) {
-                        // Apply committed commands immediately
+                        // Apply committed commands immediately and record dirty in SharedState
                         for cmd in &commands {
                             apply_staged_command(state, cmd, &mut ctx);
+                            if cmd.dirty_fields != DirtyField::None {
+                                state.dirty_tracker.mark_dirty(cmd.node_id, cmd.dirty_fields);
+                            }
                         }
                     } else {
                         log::warn!("[TX] Failed to commit transaction");
@@ -1020,8 +1015,27 @@ fn process_command_stream_with_tx(
                 let _ = tx_processor.stage_command(staged);
             }
             _ => {
-                // No active transaction, apply immediately
+                // No active transaction, apply immediately and record dirty
                 apply_command_immediate(state, &op, payload, &mut ctx);
+                let dirty_fields = get_dirty_field_for_opcode(&op);
+                if dirty_fields != DirtyField::None {
+                    let node_id = match op {
+                        OpCode::CreateNode | OpCode::CreateTextNode | OpCode::SelectNode => {
+                            ctx.cur_id.unwrap_or(0)
+                        }
+                        OpCode::SetColorCompact
+                        | OpCode::SetWidthCompact
+                        | OpCode::SetHeightCompact => ctx.cur_id.unwrap_or(0),
+                        _ => {
+                            if payload.len() >= 4 {
+                                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])
+                            } else {
+                                ctx.cur_id.unwrap_or(0)
+                            }
+                        }
+                    };
+                    state.dirty_tracker.mark_dirty(node_id, dirty_fields);
+                }
             }
         }
     }
@@ -1130,7 +1144,7 @@ pub fn process_commands(
 pub fn sync_layout_to_wasm(
     memory: &mut [u8],
     buffer_ptr: u32,
-    state: &SharedState,
+    state: &mut SharedState,
 ) -> anyhow::Result<()> {
     let bs = buffer_ptr as usize;
     let ls = bs + 16 + MAX_COMMAND_BYTES;
@@ -1144,19 +1158,10 @@ pub fn sync_layout_to_wasm(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let layout_dirty_nodes = dyxel_shared::layout_sync::take_layout_dirty_nodes();
-        if !layout_dirty_nodes.is_empty() {
-            let mut tx = get_tx_processor().lock().unwrap();
-            for id in layout_dirty_nodes {
-                tx.dirty_tracker.mark_dirty(id, DirtyField::Layout);
-            }
+        for id in layout_dirty_nodes {
+            state.dirty_tracker.mark_dirty(id, DirtyField::Layout);
         }
     }
-
-    // Get dirty tracker for this sync
-    #[cfg(not(target_arch = "wasm32"))]
-    let _dirty_tracker_opt = get_dirty_tracker();
-    #[cfg(target_arch = "wasm32")]
-    let _dirty_tracker_opt: Option<DirtyTracker> = None;
 
     // Build parent -> children mapping for topological traversal
     let mut children_map: std::collections::HashMap<u32, Vec<u32>> =
@@ -1232,10 +1237,6 @@ pub fn sync_layout_to_wasm(
             }
         }
     }
-
-    // Clear dirty tracker after sync
-    #[cfg(not(target_arch = "wasm32"))]
-    clear_dirty_tracker();
 
     Ok(())
 }

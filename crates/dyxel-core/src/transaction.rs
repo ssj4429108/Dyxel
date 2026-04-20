@@ -171,7 +171,6 @@ impl CommandAccumulator {
 pub struct TransactionProcessor {
     pub state: TransactionState,
     pub accumulator: CommandAccumulator,
-    pub dirty_tracker: DirtyTracker,
     /// Pending render flag - set when transaction commits
     pub render_pending: bool,
 }
@@ -212,7 +211,6 @@ impl TransactionProcessor {
     pub fn stage_command(&mut self, cmd: StagedCommand) -> Result<(), String> {
         match self.state {
             TransactionState::Active { .. } => {
-                self.dirty_tracker.mark_dirty(cmd.node_id, cmd.dirty_fields);
                 self.accumulator.stage(cmd);
                 Ok(())
             }

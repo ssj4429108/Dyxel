@@ -53,11 +53,15 @@ struct KawaseTexturePool {
     full_height: u32,
     // Half-res texture (full/2)
     half: wgpu::Texture,
+    half_view: wgpu::TextureView,
     // Quarter-res texture (full/8 for reduced fill rate)
     quarter: wgpu::Texture,
+    quarter_view: wgpu::TextureView,
     // Two ping-pong buffers at quarter-res (full/8) for Kawase iterations
     ping: wgpu::Texture,
+    ping_view: wgpu::TextureView,
     pong: wgpu::Texture,
+    pong_view: wgpu::TextureView,
 }
 
 impl KawaseTexturePool {
@@ -70,7 +74,7 @@ impl KawaseTexturePool {
         let quarter_h = (full_height / 8).max(1);
 
         let make = |w: u32, h: u32, label: &'static str| {
-            device.create_texture(&wgpu::TextureDescriptor {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
                     width: w,
@@ -84,16 +88,27 @@ impl KawaseTexturePool {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
-            })
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            (tex, view)
         };
+
+        let (half, half_view) = make(half_w, half_h, "Kawase Half");
+        let (quarter, quarter_view) = make(quarter_w, quarter_h, "Kawase Quarter");
+        let (ping, ping_view) = make(quarter_w, quarter_h, "Kawase Ping");
+        let (pong, pong_view) = make(quarter_w, quarter_h, "Kawase Pong");
 
         Self {
             full_width,
             full_height,
-            half: make(half_w, half_h, "Kawase Half"),
-            quarter: make(quarter_w, quarter_h, "Kawase Quarter"),
-            ping: make(quarter_w, quarter_h, "Kawase Ping"),
-            pong: make(quarter_w, quarter_h, "Kawase Pong"),
+            half,
+            half_view,
+            quarter,
+            quarter_view,
+            ping,
+            ping_view,
+            pong,
+            pong_view,
         }
     }
 
@@ -1089,17 +1104,17 @@ impl FilterPipeline {
         let (half_tex, quarter_tex, ping_tex, pong_tex) =
             if let Some(ref tex_set) = external_tex_set {
                 (
-                    tex_set.ds_half.texture(),
-                    tex_set.ds_quarter.texture(),
-                    tex_set.ping.texture(),
-                    tex_set.pong.texture(),
+                    tex_set.ds_half.view(),
+                    tex_set.ds_quarter.view(),
+                    tex_set.ping.view(),
+                    tex_set.pong.view(),
                 )
             } else {
                 (
-                    &internal_pool.half,
-                    &internal_pool.quarter,
-                    &internal_pool.ping,
-                    &internal_pool.pong,
+                    &internal_pool.half_view,
+                    &internal_pool.quarter_view,
+                    &internal_pool.ping_view,
+                    &internal_pool.pong_view,
                 )
             };
 
@@ -1107,7 +1122,7 @@ impl FilterPipeline {
         run_pass(
             &mut encoder,
             &input.create_view(&Default::default()),
-            &half_tex.create_view(&Default::default()),
+            half_tex,
             0,
             0,
             &self.kawase_pipeline,
@@ -1116,8 +1131,8 @@ impl FilterPipeline {
         // 2. Downsample half → quarter
         run_pass(
             &mut encoder,
-            &half_tex.create_view(&Default::default()),
-            &quarter_tex.create_view(&Default::default()),
+            half_tex,
+            quarter_tex,
             0,
             0,
             &self.kawase_pipeline,
@@ -1134,8 +1149,8 @@ impl FilterPipeline {
             let dst_idx = kawase_dsts[i as usize];
             run_pass(
                 &mut encoder,
-                &textures[src_idx].create_view(&Default::default()),
-                &textures[dst_idx].create_view(&Default::default()),
+                textures[src_idx],
+                textures[dst_idx],
                 1,
                 i,
                 &self.kawase_pipeline,
@@ -1149,8 +1164,8 @@ impl FilterPipeline {
         // We need to upsample it. Use the half buffer as intermediate.
         run_pass(
             &mut encoder,
-            &textures[last_dst_idx].create_view(&Default::default()),
-            &half_tex.create_view(&Default::default()),
+            textures[last_dst_idx],
+            half_tex,
             2,
             0,
             &self.kawase_pipeline,
@@ -1161,7 +1176,7 @@ impl FilterPipeline {
         // into a single pass, eliminating the full-res temp texture and one render pass.
         run_pass(
             &mut encoder,
-            &half_tex.create_view(&Default::default()),
+            half_tex,
             &output.create_view(&Default::default()),
             2,
             0,

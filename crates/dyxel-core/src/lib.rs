@@ -26,7 +26,7 @@ pub use state::{SharedState, ViewNode};
 // Re-exports for other crates (like host-web)
 pub use input::hit_test_recursive;
 pub use runtime::{
-    clear_dirty_tracker, get_dirty_tracker, is_render_needed, mark_all_nodes_dirty,
+    clear_dirty_tracker, is_render_needed, mark_all_nodes_dirty,
     process_command_stream, process_commands, sync_layout_to_wasm,
 };
 pub use state::{Role, ViewType};

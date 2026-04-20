@@ -10,11 +10,16 @@
 //! - dyxel-render-vello: Vello + wgpu implementation
 //! - dyxel-render-impeller: Impeller implementation (future)
 
-use dyxel_shared::{
-    filters::{BlendMode, Filter, Rect},
-    SharedState,
-};
 use std::any::Any;
+
+pub mod dirty;
+pub mod filters;
+pub mod raster_cache;
+
+// Re-export commonly-used types at crate root for convenience.
+pub use dirty::{DirtyField, DirtyTracker};
+pub use filters::{BlendMode, Filter, FilterId, FilterType, LayerAttribute, Rect};
+pub use raster_cache::TextureId;
 
 /// Callback type for marking nodes as dirty after layout computation
 /// Render backend calls this after compute_layout to notify core
@@ -223,6 +228,159 @@ pub struct BackendConfig {
 /// Render result type
 pub type RenderResult = anyhow::Result<()>;
 
+#[derive(Clone, Debug)]
+pub struct ShadowDesc {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur: f32,
+    pub color: peniko::Color,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextGlyph {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextGlyphRun {
+    pub font_data: peniko::FontData,
+    pub font_size: f32,
+    pub color: peniko::Color,
+    pub glyphs: Vec<TextGlyph>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextDecoration {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: peniko::Color,
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedText {
+    pub glyph_runs: Vec<TextGlyphRun>,
+    pub decorations: Vec<TextDecoration>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextDrawPayload {
+    pub node_id: u32,
+    pub text: String,
+    pub font_size: f32,
+    pub font_family: String,
+    pub font_weight: u16,
+    pub text_color: peniko::Color,
+    pub measured_width: f32,
+    pub measured_height: f32,
+    pub prepared: PreparedText,
+}
+
+#[derive(Clone, Debug)]
+pub enum NodeContent {
+    Rect { color: peniko::Color },
+    Text(TextDrawPayload),
+}
+
+#[derive(Clone, Debug)]
+pub struct BlurEffect {
+    pub node_id: u32,
+    pub local_transform: Transform,
+    pub width: f64,
+    pub height: f64,
+    pub blur_radius: f32,
+    pub blur_style: u8,
+    pub opacity: f32,
+    pub overlay_color: peniko::Color,
+    pub border_radius: f32,
+    pub source_rect: (f32, f32, f32, f32),
+    pub deferred_children: Vec<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SceneNode {
+    pub id: u32,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub position_x: f32,
+    pub position_y: f32,
+    pub content: NodeContent,
+    pub border_radius: f32,
+    pub opacity: f32,
+    pub clip_to_bounds: bool,
+    pub shadow: Option<ShadowDesc>,
+    pub blur: Option<BlurEffect>,
+    pub children: Vec<u32>,
+}
+
+/// Bake plan — an explicit instruction from Runtime to Backend to render a
+/// specific node subtree into a GPU texture for raster caching.
+#[derive(Clone, Debug)]
+pub struct BakePlan {
+    pub node_id: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Recycle plan — an explicit instruction from Runtime to Backend to release
+/// a cached GPU texture for a given node.
+#[derive(Clone, Debug)]
+pub struct RecyclePlan {
+    pub node_id: u32,
+    pub texture_id: TextureId,
+}
+
+/// Render package - all data needed for a single frame render.
+///
+/// This is produced by the Runtime layer and consumed by the RenderBackend.
+/// It separates "what to render" (prepared by Runtime) from "how to render it"
+/// (executed by the backend).
+#[derive(Clone)]
+pub struct RenderPackage {
+    /// Viewport dimensions in pixels
+    pub viewport: (u32, u32),
+    /// Root node id (if any)
+    pub root_id: Option<u32>,
+    /// Flattened scene snapshot produced by Runtime
+    pub nodes: Vec<SceneNode>,
+    /// Epoch incremented whenever layout is recomputed
+    pub layout_epoch: u64,
+    /// Set to true when the Runtime performed layout this frame
+    pub did_layout: bool,
+    /// Dirty tracker snapshot for this frame (used by Runtime cache policy)
+    pub dirty_tracker: crate::dirty::DirtyTracker,
+    /// Explicit bake plans produced by Runtime cache policy.
+    /// Backend executes these by rendering each node subtree into a GPU texture.
+    pub bake_plans: Vec<BakePlan>,
+    /// Texture IDs to recycle this frame (produced by Runtime cache policy).
+    /// Backend releases these from its GPU texture pool.
+    pub recycle_plans: Vec<RecyclePlan>,
+}
+
+impl RenderPackage {
+    pub fn new(
+        viewport: (u32, u32),
+        root_id: Option<u32>,
+        nodes: Vec<SceneNode>,
+    ) -> Self {
+        Self {
+            viewport,
+            root_id,
+            nodes,
+            layout_epoch: 0,
+            did_layout: false,
+            dirty_tracker: crate::dirty::DirtyTracker::new(),
+            bake_plans: Vec::new(),
+            recycle_plans: Vec::new(),
+        }
+    }
+}
+
 /// Render backend trait - implemented by concrete backends (Vello, Impeller, etc.)
 #[cfg(not(target_arch = "wasm32"))]
 pub trait RenderBackend: Send + Sync {
@@ -241,20 +399,19 @@ pub trait RenderBackend: Send + Sync {
         height: u32,
     ) -> anyhow::Result<Box<dyn SurfaceState>>;
 
-    /// Prepare for rendering (called before render)
-    fn prepare(&self, shared_state: &SharedPtr<SharedMutex<SharedState>>, width: u32, height: u32);
-
     /// Set frame timing data from the pacer (optional; default no-op)
     fn set_frame_timing(&self, _pacer_wait_ms: f64, _frame_interval_ms: f64) {}
 
-    /// Render a frame
-    fn render(
+    /// Render a frame from a prepared package
+    fn render_package(
         &self,
-        device: DeviceHandle,
-        queue: QueueHandle,
-        surface: &mut dyn SurfaceState,
-        shared_state: &SharedPtr<SharedMutex<SharedState>>,
-    ) -> RenderResult;
+        _device: DeviceHandle,
+        _queue: QueueHandle,
+        _surface: &mut dyn SurfaceState,
+        _package: &RenderPackage,
+    ) -> RenderResult {
+        Err(anyhow::anyhow!("render_package not implemented by backend"))
+    }
 
     /// Handle lifecycle events
     fn on_lifecycle_event(&self, event: LifecycleEvent);
@@ -281,15 +438,16 @@ pub trait RenderBackend {
         height: u32,
     ) -> anyhow::Result<Box<dyn SurfaceState>>;
 
-    fn prepare(&self, shared_state: &SharedPtr<SharedMutex<SharedState>>, width: u32, height: u32);
-
-    fn render(
+    /// Render a frame from a prepared package
+    fn render_package(
         &self,
-        device: DeviceHandle,
-        queue: QueueHandle,
-        surface: &mut dyn SurfaceState,
-        shared_state: &SharedPtr<SharedMutex<SharedState>>,
-    ) -> RenderResult;
+        _device: DeviceHandle,
+        _queue: QueueHandle,
+        _surface: &mut dyn SurfaceState,
+        _package: &RenderPackage,
+    ) -> RenderResult {
+        Err(anyhow::anyhow!("render_package not implemented by backend"))
+    }
 
     fn on_lifecycle_event(&self, event: LifecycleEvent);
 
@@ -423,29 +581,6 @@ impl Transform {
             y0: self.x0 * other.yx + self.y0 * other.yy + other.y0,
         }
     }
-}
-
-/// Text rendering interface
-///
-/// Abstraction for text layout and rendering
-pub trait TextRenderer {
-    /// Set text content
-    fn set_text(&mut self, text: &str);
-
-    /// Set font size
-    fn set_font_size(&mut self, size: f32);
-
-    /// Set text color
-    fn set_text_color(&mut self, r: u8, g: u8, b: u8, a: u8);
-
-    /// Set layout width (for wrapping)
-    fn set_width(&mut self, width: Option<f32>);
-
-    /// Get layout size
-    fn layout_size(&mut self) -> (f32, f32);
-
-    /// Draw text to a scene
-    fn draw(&mut self, scene: &mut dyn Scene, transform: Transform);
 }
 
 /// Render backend extensions for specific capabilities

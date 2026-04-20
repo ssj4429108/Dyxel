@@ -1,6 +1,7 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use crate::protocol::{DirtyField, DirtyTracker};
 use crate::types::{Role, ViewType};
 use crate::{INITIAL_CAPACITY, MAX_CAPACITY, NodeHandle};
 use peniko::Color;
@@ -77,6 +78,9 @@ pub struct SharedState {
     // === SharedBuffer 同步 ===
     /// SharedBuffer 指针（用于 Render 线程同步布局结果）
     shared_buffer_ptr: Option<*mut crate::SharedBuffer>,
+
+    // === 脏跟踪（用于渲染门控） ===
+    pub dirty_tracker: DirtyTracker,
 }
 
 unsafe impl Send for SharedState {}
@@ -99,6 +103,7 @@ impl SharedState {
             free_ids: Vec::new(),
             active_handles: HashMap::new(),
             shared_buffer_ptr: None,
+            dirty_tracker: DirtyTracker::new(),
         }
     }
 
@@ -118,6 +123,7 @@ impl SharedState {
             self.generations = [0; MAX_CAPACITY];
             self.free_ids.clear();
             self.active_handles.clear();
+            self.dirty_tracker.clear();
             // 注意：不清除 shared_buffer_ptr，因为缓冲区通常不变
         }
     }
@@ -552,8 +558,10 @@ impl SharedState {
     }
 
     /// Mark a node as dirty by re-setting its Taffy style
-    /// Taffy's set_style automatically calls mark_dirty which recursively marks all ancestors
+    /// Taffy's set_style automatically calls mark_dirty which recursively marks all ancestors.
+    /// Also records the change in DirtyTracker for render-path gating.
     pub fn mark_dirty(&mut self, node_id: u32) {
+        self.dirty_tracker.mark_dirty(node_id, DirtyField::Layout);
         if let Some(node) = self.nodes.get(&node_id) {
             if let Ok(style) = self.taffy.style(node.taffy_node) {
                 let new_style = style.clone();
