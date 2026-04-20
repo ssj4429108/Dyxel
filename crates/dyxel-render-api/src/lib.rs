@@ -228,6 +228,21 @@ pub struct BackendConfig {
 /// Render result type
 pub type RenderResult = anyhow::Result<()>;
 
+/// Classification for frame outcomes used by the CadenceGovernor
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameResultClass {
+    /// Frame presented successfully
+    OnTime,
+    /// Frame missed its cadence tick
+    MissedCadence,
+    /// No new content to present
+    SkippedIdle,
+    /// Skipped due to cadence divisor
+    SkippedDivisor,
+    /// Skipped because another frame was still rendering
+    SkippedInFlight,
+}
+
 #[derive(Clone, Debug)]
 pub struct ShadowDesc {
     pub offset_x: f32,

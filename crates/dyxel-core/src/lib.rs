@@ -7,6 +7,7 @@ pub mod bridge;
 pub mod cadence;
 pub mod engine;
 pub mod frame_scheduler;
+pub mod frame_timeline;
 pub mod handler_registry;
 pub mod input;
 pub mod input_proxy;
