@@ -4,6 +4,7 @@
 #[cfg(target_os = "android")]
 pub mod android_vblank;
 pub mod bridge;
+pub mod cadence;
 pub mod engine;
 pub mod frame_scheduler;
 pub mod handler_registry;
