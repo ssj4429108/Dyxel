@@ -6,6 +6,7 @@ interface DyxelHost {
     [Async]
     void init_native(u64 native_window_ptr, string data_dir, u32 width, u32 height);
     void resize_native(u32 width, u32 height);
+    void notify_surface_changed(u32 width, u32 height, double refresh_hz);
     void stop_native();
     void tick();
     

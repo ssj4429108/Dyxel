@@ -8,3 +8,4 @@ description = "Renderer-agnostic abstraction layer for Dyxel"
 [dependencies]
 peniko = "0.6"
 anyhow = "1.0"
+dyxel-perf = { path = "../dyxel-perf" }

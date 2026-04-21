@@ -27,12 +27,21 @@ pub struct LogicState {
     /// Last recorded editor generations for staleness gating
     pub last_editor_generations:
         std::sync::Mutex<std::collections::HashMap<u32, dyxel_editor::Generation>>,
-    /// Last viewport size for detecting changes that require relayout
+    /// Current viewport size (updated by Resize messages)
     pub last_viewport_size: std::sync::Mutex<(u32, u32)>,
+    /// Viewport size used for the last layout computation (detects changes)
+    pub last_layout_viewport: std::sync::Mutex<(u32, u32)>,
     /// Epoch incremented whenever layout is recomputed
     pub layout_epoch: std::sync::atomic::AtomicU64,
     /// Raster cache policy manager — Logic worker decides which nodes to bake
     pub raster_cache: std::sync::Mutex<Option<dyxel_render_api::raster_cache::RasterCache>>,
+    /// Current cadence info from scheduler (display_hz, divisor, effective_hz).
+    /// Used by animation logic to understand real cadence.
+    pub cadence_info: std::sync::Mutex<Option<crate::cadence::CadenceInfo>>,
+    /// Shared font context — pre-built once, cloned to all Editors.
+    /// Eliminates repeated system font scans (each `FontContext::default()`
+    /// triggers a full `~/Library/Fonts` scan on macOS).
+    pub font_context: std::sync::Mutex<parley::FontContext>,
 }
 
 pub struct RenderState {
@@ -87,6 +96,12 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
 
     let shared_state = SharedPtr::new(SharedMutex::new(SharedState::new()));
 
+    // Pre-build a single FontContext, then clone it for each Editor.
+    // This eliminates N repeated system font scans (one per Editor creation).
+    // Each clone copies the already-populated font collection metadata,
+    // which is orders of magnitude cheaper than re-scanning ~/Library/Fonts.
+    let font_context = parley::FontContext::default();
+
     #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
     let (env, rt) = {
         let env =
@@ -112,12 +127,15 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
         editors: std::sync::Mutex::new(std::collections::HashMap::new()),
         last_editor_generations: std::sync::Mutex::new(std::collections::HashMap::new()),
         last_viewport_size: std::sync::Mutex::new((0, 0)),
+        last_layout_viewport: std::sync::Mutex::new((0, 0)),
         layout_epoch: std::sync::atomic::AtomicU64::new(0),
         raster_cache: std::sync::Mutex::new(Some(
             dyxel_render_api::raster_cache::RasterCache::new(
                 dyxel_render_api::raster_cache::RasterCacheConfig::default(),
             ),
         )),
+        cadence_info: std::sync::Mutex::new(None),
+        font_context: std::sync::Mutex::new(font_context),
     };
 
     let render = RenderState {

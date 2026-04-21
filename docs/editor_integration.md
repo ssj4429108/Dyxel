@@ -85,7 +85,7 @@ pub fn handle_drag(&mut self, x: f32, y: f32)
 for (&id, node) in &g.nodes {
     if node.view_type == ViewType::Text {
         let editor = editors.entry(id).or_insert_with(|| {
-            let mut ed = Editor::new(node.font_size);
+            let mut ed = Editor::new(node.font_size, shared_font_cx.clone());
             ed.set_text(&node.text);
             ed.set_text_color(node.color);
             ed

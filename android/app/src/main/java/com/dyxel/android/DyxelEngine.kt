@@ -81,7 +81,7 @@ class DyxelEngine {
 
     companion object {
         @JvmStatic
-        external fun nativeOnVBlank()
+        external fun nativeOnVBlank(refreshHz: Double)
 
         init {
             System.setProperty("uniffi.component.dyxel_core.libraryOverride", "dyxel_core")

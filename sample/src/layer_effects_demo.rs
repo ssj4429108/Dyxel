@@ -4,7 +4,7 @@
 //! Layer Effects Demo - 图层效果演示
 
 use dyxel_app::prelude::*;
-use dyxel_view::{BaseView, FlexDirection, AlignItems, JustifyContent};
+use dyxel_view::{AlignItems, BaseView, FlexDirection, JustifyContent};
 
 #[app]
 pub fn LayerEffectsDemo() -> impl BaseView {
@@ -104,7 +104,7 @@ pub fn LayerEffectsDemo() -> impl BaseView {
                     height: 80.0,
                     color: (100u32, 150, 255, 255),
                     borderRadius: 12.0,
-                    shadow: (4.0, 6.0, 12.0, 0x60448AFFu32),
+                    shadow: (4.0, 6.0, 12.0, 0xA0404040u32),
                     Text { value: "Rounded", fontSize: 12.0, textColor: (255u8, 255, 255, 255) }
                 }
             }
@@ -320,7 +320,7 @@ pub fn LayerEffectsDemo() -> impl BaseView {
                     borderRadius: 16.0,
                     opacity: 0.9,
                     blur: 2.0,
-                    shadow: (4.0, 6.0, 14.0, 0x50448AFFu32),
+                    shadow: (4.0, 6.0, 14.0, 0x80404040u32),
                     flexDirection: FlexDirection::Column,
                     alignItems: AlignItems::Center,
                     justifyContent: JustifyContent::Center,

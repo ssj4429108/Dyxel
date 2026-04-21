@@ -13,6 +13,8 @@
 use crate::pacer::VBlankWaiter;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 /// Shared physical VBlank state.
@@ -28,6 +30,7 @@ struct VBlankState {
 /// Android Choreographer-based VBlank waiter.
 pub struct AndroidVBlankWaiter {
     state: Arc<VBlankState>,
+    scheduler_event_tx: StdMutex<Option<crossbeam_channel::Sender<crate::frame_scheduler::SchedulerEvent>>>,
 }
 
 unsafe impl Send for AndroidVBlankWaiter {}
@@ -45,17 +48,35 @@ impl AndroidVBlankWaiter {
                 condvar: Condvar::new(),
                 mutex: Mutex::new(()),
             }),
+            scheduler_event_tx: StdMutex::new(None),
         });
         *ANDROID_VBLANK.lock().unwrap() = Some(waiter.clone());
         waiter
     }
 
+    /// Set the scheduler event sender so VBlank signals also drive the FrameScheduler.
+    pub fn set_scheduler_tx(&self, tx: crossbeam_channel::Sender<crate::frame_scheduler::SchedulerEvent>) {
+        *self.scheduler_event_tx.lock().unwrap() = Some(tx);
+    }
+
     /// Called from the Kotlin UI thread (Choreographer.doFrame) via JNI.
+    /// `refresh_hz` is the display's current refresh rate (e.g. from
+    /// `Display.getRefreshRate()`).
     /// This must be lock-free and non-blocking on the UI thread.
-    pub fn on_vblank(&self) {
+    pub fn on_vblank(&self, refresh_hz: f64) {
         self.state.counter.fetch_add(1, Ordering::Release);
         let _guard = self.state.mutex.lock().unwrap();
         self.state.condvar.notify_all();
+
+        // Also notify the FrameScheduler so cadence control is VBlank-driven.
+        if let Ok(lock) = self.scheduler_event_tx.lock() {
+            if let Some(ref tx) = *lock {
+                let _ = tx.send(crate::frame_scheduler::SchedulerEvent::VBlank {
+                    timestamp: std::time::Instant::now(),
+                    refresh_hz,
+                });
+            }
+        }
     }
 }
 
@@ -85,14 +106,23 @@ impl VBlankWaiter for AndroidVBlankWaiter {
     }
 }
 
+/// Set the scheduler event sender on the globally registered AndroidVBlankWaiter.
+/// Called from bridge.rs after the FrameScheduler is created.
+pub fn set_scheduler_tx(tx: crossbeam_channel::Sender<crate::frame_scheduler::SchedulerEvent>) {
+    if let Some(waiter) = ANDROID_VBLANK.lock().unwrap().as_ref() {
+        waiter.set_scheduler_tx(tx);
+    }
+}
+
 /// JNI entry point called by `Choreographer.FrameCallback` on the Android UI thread.
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_com_dyxel_android_DyxelEngine_nativeOnVBlank(
     _env: *mut jni::sys::JNIEnv,
     _class: jni::sys::jobject,
+    refresh_hz: f64,
 ) {
     if let Some(waiter) = ANDROID_VBLANK.lock().unwrap().as_ref() {
-        waiter.on_vblank();
+        waiter.on_vblank(refresh_hz);
     }
 }

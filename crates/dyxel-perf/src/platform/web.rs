@@ -5,21 +5,32 @@
 
 use crate::SystemInfoProvider;
 use wasm_bindgen::prelude::*;
-use web_sys::{window, Navigator, Performance};
+use web_sys::{window, Navigator};
 
 pub struct WebSystemInfo;
 
 impl SystemInfoProvider for WebSystemInfo {
     fn get_memory_usage(&self) -> Option<(u64, Option<u64>)> {
         if let Some(window) = window() {
-            if let Ok(memory) = window.performance()?.memory() {
-                let used = memory.used_js_heap_size() as u64;
-                let total = memory.total_js_heap_size() as u64;
-                let limit = memory.js_heap_size_limit() as u64;
+            if let Some(performance) = window.performance() {
+                // memory() is a Chrome-specific extension; use Reflect to access it dynamically
+                let memory = js_sys::Reflect::get(&performance, &JsValue::from_str("memory")).ok()?;
+                if memory.is_undefined() || memory.is_null() {
+                    return None;
+                }
+                let used = js_sys::Reflect::get(&memory, &JsValue::from_str("usedJSHeapSize"))
+                    .ok()?
+                    .as_f64()? as u64;
+                let total = js_sys::Reflect::get(&memory, &JsValue::from_str("totalJSHeapSize"))
+                    .ok()?
+                    .as_f64()? as u64;
+                let limit = js_sys::Reflect::get(&memory, &JsValue::from_str("jsHeapSizeLimit"))
+                    .ok()?
+                    .as_f64()? as u64;
 
-                // used is in bytes, available is limit - used
-                let available = Some(limit);
-                return Some((used, available));
+                // available is limit - used
+                let _available = Some(limit);
+                return Some((used, Some(total)));
             }
         }
         None
@@ -57,7 +68,7 @@ pub fn get_device_memory_gb() -> Option<f32> {
 pub fn get_hardware_concurrency() -> Option<u32> {
     if let Some(window) = window() {
         if let Ok(navigator) = window.navigator().dyn_into::<Navigator>() {
-            return Some(navigator.hardware_concurrency());
+            return Some(navigator.hardware_concurrency() as u32);
         }
     }
     None
