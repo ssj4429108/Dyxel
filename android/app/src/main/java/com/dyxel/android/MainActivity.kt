@@ -15,14 +15,15 @@ class MainActivity : AppCompatActivity() {
     private var choreographerCallback: Choreographer.FrameCallback? = null
 
     private fun startChoreographer() {
+        val refreshRate = display?.refreshRate?.toDouble() ?: 60.0
         choreographerCallback = object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
-                DyxelEngine.nativeOnVBlank()
+                DyxelEngine.nativeOnVBlank(refreshRate)
                 Choreographer.getInstance().postFrameCallback(this)
             }
         }
         Choreographer.getInstance().postFrameCallback(choreographerCallback!!)
-        android.util.Log.i("DyxelMain", "Choreographer VBlank callback started")
+        android.util.Log.i("DyxelMain", "Choreographer VBlank callback started (refreshRate=${refreshRate}Hz)")
     }
 
     private fun stopChoreographer() {
@@ -51,9 +52,11 @@ class MainActivity : AppCompatActivity() {
             override fun surfaceCreated(holder: SurfaceHolder) {}
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                val refreshRate = display?.refreshRate?.toDouble() ?: 60.0
                 if (isInitialized) {
                     lifecycleScope.launch(Dispatchers.Default) {
                         engine.host.resizeNative(width.toUInt(), height.toUInt())
+                        engine.host.notifySurfaceChanged(width.toUInt(), height.toUInt(), refreshRate)
                     }
                     return
                 }
@@ -87,6 +90,7 @@ class MainActivity : AppCompatActivity() {
                         val initStartTime = System.currentTimeMillis()
                         val ptr = engine.getNativeSurface(holder.surface)
                         engine.host.initNative(ptr.toULong(), dataDir, width.toUInt(), height.toUInt())
+                        engine.host.notifySurfaceChanged(width.toUInt(), height.toUInt(), refreshRate)
                         val initElapsed = System.currentTimeMillis() - initStartTime
                         android.util.Log.i("DyxelPerf", "[ColdStart] Init native surface: ${initElapsed}ms")
 

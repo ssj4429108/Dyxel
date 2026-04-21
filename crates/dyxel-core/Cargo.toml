@@ -22,6 +22,7 @@ dyxel-editor = { path = "../dyxel-editor" }
 wgpu = { workspace = true, features = ["spirv"] }
 vello = { workspace = true, features = ["wgpu"] }
 peniko = { version = "0.6" }
+crossbeam-channel = "0.5"
 taffy.workspace = true
 anyhow = "1.0"
 kurbo = "0.13"

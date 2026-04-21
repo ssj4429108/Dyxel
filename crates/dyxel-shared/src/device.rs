@@ -36,8 +36,12 @@ pub struct DeviceInfo {
     pub safe_area_bottom: f32,
     /// Platform type (0=Android, 1=iOS, 2=macOS, 3=Web, 4=Other)
     pub platform: u32,
-    /// Reserved for future use
-    pub _padding: [f32; 3],
+    /// Display refresh rate in Hz (from scheduler cadence info)
+    pub refresh_rate_hz: f32,
+    /// Effective refresh rate after cadence divisor (Hz)
+    pub effective_refresh_rate_hz: f32,
+    /// Target frame time in milliseconds (from cadence)
+    pub frame_time_target_ms: f32,
 }
 
 impl DeviceInfo {
@@ -229,7 +233,9 @@ mod tests {
             safe_area_top: 44.0,
             safe_area_bottom: 34.0,
             platform: 0,
-            _padding: [0.0; 3],
+            refresh_rate_hz: 60.0,
+            effective_refresh_rate_hz: 60.0,
+            frame_time_target_ms: 16.67,
         };
 
         // LP to PX

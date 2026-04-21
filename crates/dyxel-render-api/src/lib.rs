@@ -228,6 +228,21 @@ pub struct BackendConfig {
 /// Render result type
 pub type RenderResult = anyhow::Result<()>;
 
+/// Classification for frame outcomes used by the CadenceGovernor
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameResultClass {
+    /// Frame presented successfully
+    OnTime,
+    /// Frame missed its cadence tick
+    MissedCadence,
+    /// No new content to present
+    SkippedIdle,
+    /// Skipped due to cadence divisor
+    SkippedDivisor,
+    /// Skipped because another frame was still rendering
+    SkippedInFlight,
+}
+
 #[derive(Clone, Debug)]
 pub struct ShadowDesc {
     pub offset_x: f32,
@@ -402,6 +417,9 @@ pub trait RenderBackend: Send + Sync {
     /// Set frame timing data from the pacer (optional; default no-op)
     fn set_frame_timing(&self, _pacer_wait_ms: f64, _frame_interval_ms: f64) {}
 
+    /// Set frame performance stats from the scheduler (optional; default no-op)
+    fn set_frame_performance_stats(&self, _stats: dyxel_perf::FramePerformanceStats) {}
+
     /// Render a frame from a prepared package
     fn render_package(
         &self,
@@ -448,6 +466,9 @@ pub trait RenderBackend {
     ) -> RenderResult {
         Err(anyhow::anyhow!("render_package not implemented by backend"))
     }
+
+    /// Set frame performance stats from the scheduler (optional; default no-op)
+    fn set_frame_performance_stats(&self, _stats: dyxel_perf::FramePerformanceStats) {}
 
     fn on_lifecycle_event(&self, event: LifecycleEvent);
 

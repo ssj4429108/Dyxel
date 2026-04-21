@@ -88,10 +88,10 @@ fn build_scene_snapshot(
                 offset_y: node.shadow_offset_y,
                 blur: node.shadow_blur,
                 color: peniko::Color::from_rgba8(
-                    ((node.shadow_color >> 24) & 0xFF) as u8,
                     ((node.shadow_color >> 16) & 0xFF) as u8,
                     ((node.shadow_color >> 8) & 0xFF) as u8,
                     (node.shadow_color & 0xFF) as u8,
+                    ((node.shadow_color >> 24) & 0xFF) as u8,
                 ),
             })
         } else {
@@ -145,18 +145,16 @@ fn build_scene_snapshot(
     nodes
 }
 
-/// CPU-side prepare owned by Runtime: editor lifecycle, text measurement,
+/// CPU-side prepare owned by Logic Worker: editor lifecycle, text measurement,
 /// layout computation. Returns a fully populated RenderPackage.
 pub fn runtime_prepare(
-    logic: &LogicState,
-    render: &mut RenderState,
+    e: &mut LogicState,
     w: u32,
     h: u32,
 ) -> RenderPackage {
+    let runtime_prepare_start = std::time::Instant::now();
     if w == 0 || h == 0 {
-        let epoch = logic
-            .layout_epoch
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let epoch = e.layout_epoch.load(std::sync::atomic::Ordering::Relaxed);
         return RenderPackage {
             viewport: (w, h),
             root_id: None,
@@ -170,18 +168,19 @@ pub fn runtime_prepare(
     }
 
     let viewport_changed = {
-        let last = *logic.last_viewport_size.lock().unwrap();
+        let last = *e.last_layout_viewport.lock().unwrap();
         last.0 != w || last.1 != h
     };
 
     let dirty_has_dirty = {
-        let g = logic.shared_state.lock().unwrap();
+        let g = e.shared_state.lock().unwrap();
         g.dirty_tracker.has_dirty()
     };
 
-    let editor_stale = {
-        let editors = logic.editors.lock().unwrap();
-        let mut last_gens = logic.last_editor_generations.lock().unwrap();
+    let editor_generation_scan_ms = {
+        let editor_gen_scan_start = std::time::Instant::now();
+        let editors = e.editors.lock().unwrap();
+        let mut last_gens = e.last_editor_generations.lock().unwrap();
         let mut stale = false;
         for (&id, editor) in editors.iter() {
             let current_gen = editor.generation();
@@ -190,34 +189,57 @@ pub fn runtime_prepare(
                 last_gens.insert(id, current_gen);
             }
         }
-        stale
+        let ms = editor_gen_scan_start.elapsed().as_secs_f64() * 1000.0;
+        drop(editors);
+        drop(last_gens);
+        (stale, ms)
     };
 
-    let needs_layout = viewport_changed || dirty_has_dirty || editor_stale;
+    let needs_layout = viewport_changed || dirty_has_dirty || editor_generation_scan_ms.0;
 
+    let state_build_start = std::time::Instant::now();
     let (rid, nodes) = {
-        let mut g = logic.shared_state.lock().unwrap();
-        let mut editors = logic.editors.lock().unwrap();
+        let mut g = e.shared_state.lock().unwrap();
+        let mut editors = e.editors.lock().unwrap();
 
-        // First pass: create/update editors for text nodes
+        // Phase 1: create editors for new text nodes
+        let editor_create_start = std::time::Instant::now();
+        let shared_font_cx = e.font_context.lock().unwrap().clone();
         for (&id, node) in &g.nodes {
             if node.view_type == ViewType::Text {
-                let editor = editors.entry(id).or_insert_with(|| {
-                    let mut ed = dyxel_editor::Editor::new(node.font_size);
+                editors.entry(id).or_insert_with(|| {
+                    let mut ed = dyxel_editor::Editor::new(node.font_size, shared_font_cx.clone());
                     ed.set_text(&node.text);
                     ed.set_text_color(node.text_color);
                     ed
                 });
+            }
+        }
+        let editor_create_update_ms = editor_create_start.elapsed().as_secs_f64() * 1000.0;
 
-                if editor.text() != node.text {
-                    editor.set_text(&node.text);
+        // Phase 2: sync text changes into existing editors
+        let editor_text_start = std::time::Instant::now();
+        for (&id, node) in &g.nodes {
+            if node.view_type == ViewType::Text {
+                if let Some(editor) = editors.get_mut(&id) {
+                    if editor.text() != node.text {
+                        editor.set_text(&node.text);
+                    }
                 }
             }
         }
+        let editor_text_compare_ms = editor_text_start.elapsed().as_secs_f64() * 1000.0;
 
-        // Remove editors for deleted nodes
+        // Phase 3: remove editors for deleted nodes
+        let editor_retain_start = std::time::Instant::now();
         let node_ids: HashSet<u32> = g.nodes.keys().copied().collect();
         editors.retain(|id, _| node_ids.contains(id));
+        let editor_retain_ms = editor_retain_start.elapsed().as_secs_f64() * 1000.0;
+
+        let mut text_measure_ms = 0.0f64;
+        let mut taffy_layout_ms = 0.0f64;
+        let mut sync_shared_ms = 0.0f64;
+        let mut auto_expand_ms = 0.0f64;
 
         if needs_layout {
             let taffy_to_id: HashMap<taffy::NodeId, u32> = g
@@ -227,6 +249,7 @@ pub fn runtime_prepare(
                 .map(|(id, n)| (n.taffy_node, *id))
                 .collect();
 
+            let editor_layout_size_prepass_start = std::time::Instant::now();
             let mut nodes_to_update: Vec<(u32, f32, f32)> = Vec::new();
             for (&id, node) in &g.nodes {
                 if node.view_type == ViewType::Text {
@@ -243,6 +266,8 @@ pub fn runtime_prepare(
                     }
                 }
             }
+            let editor_layout_size_prepass_ms = editor_layout_size_prepass_start.elapsed().as_secs_f64() * 1000.0;
+            text_measure_ms = editor_layout_size_prepass_ms;
 
             for (id, new_width, new_height) in nodes_to_update {
                 if let Some(node_mut) = g.nodes.get_mut(&id) {
@@ -252,6 +277,7 @@ pub fn runtime_prepare(
             }
 
             if let Some(rn) = g.root_id.and_then(|id| g.nodes.get(&id).map(|n| n.taffy_node)) {
+                let taffy_layout_start = std::time::Instant::now();
                 let _ = g.taffy.compute_layout_with_measure(
                     rn,
                     taffy::prelude::Size {
@@ -275,19 +301,24 @@ pub fn runtime_prepare(
                         }
                     },
                 );
+                taffy_layout_ms = taffy_layout_start.elapsed().as_secs_f64() * 1000.0;
 
+                let sync_shared_start = std::time::Instant::now();
                 let changed_layout_nodes = g.sync_to_shared_buffer();
                 if !changed_layout_nodes.is_empty() {
                     dyxel_shared::layout_sync::register_layout_dirty_nodes(
                         &changed_layout_nodes,
                     );
                 }
+                sync_shared_ms = sync_shared_start.elapsed().as_secs_f64() * 1000.0;
 
+                let auto_expand_start = std::time::Instant::now();
                 if g.should_pre_expand() {
                     if g.auto_expand() {
                         log::info!("Auto-expanded node capacity to {}", g.get_capacity());
                     }
                 }
+                auto_expand_ms = auto_expand_start.elapsed().as_secs_f64() * 1000.0;
 
                 #[cfg(target_os = "android")]
                 {
@@ -309,34 +340,49 @@ pub fn runtime_prepare(
             }
         }
 
+        let snapshot_start = std::time::Instant::now();
         let nodes = build_scene_snapshot(&g, &mut editors);
+        let scene_snapshot_ms = snapshot_start.elapsed().as_secs_f64() * 1000.0;
+        let state_build_total_ms = state_build_start.elapsed().as_secs_f64() * 1000.0;
+        if state_build_total_ms > 8.0 {
+            log::info!(
+                "DIAG RuntimePrepareStateBuild={:.2}ms GenScan={:.2}ms EditorCreate={:.2}ms EditorTextCmp={:.2}ms EditorRetain={:.2}ms LayoutSizePrepass={:.2}ms TaffyLayout={:.2}ms SyncShared={:.2}ms AutoExpand={:.2}ms SceneSnapshot={:.2}ms NeedsLayout={}",
+                state_build_total_ms,
+                editor_generation_scan_ms.1,
+                editor_create_update_ms,
+                editor_text_compare_ms,
+                editor_retain_ms,
+                text_measure_ms,
+                taffy_layout_ms,
+                sync_shared_ms,
+                auto_expand_ms,
+                scene_snapshot_ms,
+                needs_layout
+            );
+        }
         (g.root_id, nodes)
     };
 
-    *logic.last_viewport_size.lock().unwrap() = (w, h);
+    *e.last_layout_viewport.lock().unwrap() = (w, h);
 
     let layout_epoch = if needs_layout {
-        logic
-            .layout_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1
+        e.layout_epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
     } else {
-        logic
-            .layout_epoch
-            .load(std::sync::atomic::Ordering::Relaxed)
+        e.layout_epoch.load(std::sync::atomic::Ordering::Relaxed)
     };
 
     // Snapshot dirty tracker for backend raster cache stability tracking
     let dirty_tracker = {
-        let g = logic.shared_state.lock().unwrap();
+        let g = e.shared_state.lock().unwrap();
         g.dirty_tracker.clone()
     };
 
     // === Raster Cache Policy (Runtime-owned) ===
     // Runtime decides which nodes are stable enough to bake and which textures to recycle.
     // Backend only executes the resulting plans.
+    let raster_cache_start = std::time::Instant::now();
     let (bake_plans, recycle_plans) = {
-        let mut cache_guard = logic.raster_cache.lock().unwrap();
+        let mut cache_guard = e.raster_cache.lock().unwrap();
         if let Some(ref mut cache) = *cache_guard {
             cache.next_frame();
             let ready_nodes = cache.update_stability(&dirty_tracker);
@@ -370,6 +416,19 @@ pub fn runtime_prepare(
             (Vec::new(), Vec::new())
         }
     };
+    let raster_cache_ms = raster_cache_start.elapsed().as_secs_f64() * 1000.0;
+    let runtime_prepare_total_ms = runtime_prepare_start.elapsed().as_secs_f64() * 1000.0;
+    if runtime_prepare_total_ms > 8.0 {
+        log::info!(
+            "DIAG RuntimePrepareTotal={:.2}ms RasterCache={:.2}ms BakePlans={} RecyclePlans={} NeedsLayout={} Nodes={}",
+            runtime_prepare_total_ms,
+            raster_cache_ms,
+            bake_plans.len(),
+            recycle_plans.len(),
+            needs_layout,
+            nodes.len()
+        );
+    }
 
     RenderPackage {
         viewport: (w, h),
@@ -383,7 +442,8 @@ pub fn runtime_prepare(
     }
 }
 
-/// Render a frame using a pre-built RenderPackage (scheduler-driven path).
+/// GPU-side render owned by Render Worker.
+/// Consumes a pre-prepared RenderPackage snapshot from the mailbox.
 pub fn render_frame_with_package(
     e: &mut RenderState,
     s: &mut dyn SurfaceState,
@@ -402,7 +462,6 @@ pub fn render_frame_with_package(
             s.height()
         );
 
-        // === Phase 2: GPU render (owned by Backend) ===
         let render_result = e.backend.render_package(
             device_handle,
             queue_handle,
@@ -413,72 +472,6 @@ pub fn render_frame_with_package(
         if let Err(err) = render_result {
             log::error!("renderer: Render error: {:?}", err);
         }
-    } else {
-        log::error!("renderer: Failed to downcast RenderContext to Vello context");
-    }
-}
-
-/// Legacy render path: prepares and renders in one call.
-/// Kept for backward compatibility during migration.
-pub fn render_frame(e: &mut RenderState, s: &mut dyn SurfaceState) {
-    if let Some(v_ctx) = e.context.downcast_ref::<vello::util::RenderContext>() {
-        let device = &v_ctx.devices[0].device;
-        let queue = &v_ctx.devices[0].queue;
-
-        let device_handle = DeviceHandle::new(device);
-        let queue_handle = QueueHandle::new(queue);
-
-        log::trace!(
-            "renderer: Starting frame render, surface size: {}x{}",
-            s.width(),
-            s.height()
-        );
-
-        // === Phase 1: CPU-side prepare (owned by Runtime) ===
-        // Legacy path: prepare is done inline. This will be removed once all
-        // callers migrate to scheduler-driven prepare + render_frame_with_package.
-        let prepare_start = std::time::Instant::now();
-        // Legacy fallback: create a minimal LogicState on the stack for prepare.
-        // This is a temporary shim; the real scheduler-driven path passes
-        // LogicState from the logic worker.
-        let logic_shim = crate::engine::LogicState {
-            shared_state: e.shared_state.clone(),
-            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-            _env: unsafe { std::mem::zeroed() },
-            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-            _rt: unsafe { std::mem::zeroed() },
-            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-            tick_fn: std::sync::Mutex::new(None),
-            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-            on_click_fn: std::sync::Mutex::new(None),
-            #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
-            shared_buffer_ptr: std::sync::Mutex::new(None),
-            editors: std::sync::Mutex::new(std::collections::HashMap::new()),
-            last_editor_generations: std::sync::Mutex::new(std::collections::HashMap::new()),
-            last_viewport_size: std::sync::Mutex::new((0, 0)),
-            layout_epoch: std::sync::atomic::AtomicU64::new(0),
-            raster_cache: std::sync::Mutex::new(None),
-            #[cfg(not(target_arch = "wasm32"))]
-            render_state: None,
-        };
-        let package = runtime_prepare(&logic_shim, e, s.width(), s.height());
-        let prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
-        if prepare_ms > 1.0 {
-            log::debug!("[RenderPackage] prepare took {:.2}ms", prepare_ms);
-        }
-
-        // === Phase 2: GPU render (owned by Backend) ===
-        let render_result = e.backend.render_package(
-            device_handle,
-            queue_handle,
-            s,
-            &package,
-        );
-
-        if let Err(err) = render_result {
-            log::error!("renderer: Render error: {:?}", err);
-        }
-        // Note: dirty tracker is cleared by Logic Thread (bridge.rs) after sending RequestDraw.
     } else {
         log::error!("renderer: Failed to downcast RenderContext to Vello context");
     }

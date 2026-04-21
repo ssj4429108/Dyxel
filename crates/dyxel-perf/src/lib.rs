@@ -21,6 +21,25 @@ pub use detailed_diag::*;
 pub mod memory_optimizer;
 pub use memory_optimizer::*;
 
+/// Unified frame performance statistics for UI and Raster pipelines
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FramePerformanceStats {
+    /// UI frames per second (logic commit rate)
+    pub ui_fps: f32,
+    /// Raster frames per second (actual render present rate)
+    pub raster_fps: f32,
+    /// Target frames per second (effective refresh rate from cadence)
+    pub target_fps: f32,
+    /// Cumulative jank count (missed cadence)
+    pub jank_count: u64,
+    /// Cumulative dropped epoch count
+    pub dropped_count: u64,
+    /// Jank rate (0.0 - 1.0)
+    pub jank_rate: f32,
+    /// Drop rate (0.0 - 1.0)
+    pub drop_rate: f32,
+}
+
 /// Performance statistics for a single frame
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameStats {
@@ -155,6 +174,59 @@ impl FrameTimeBuffer {
 
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
+    }
+}
+
+/// Ring buffer for tracking event timestamps to compute stable FPS.
+///
+/// Stores recent event Instants. FPS is calculated as (n-1) / (last - first),
+/// which is more stable than averaging per-interval rates for bursty events.
+pub struct EventRateBuffer {
+    buffer: Vec<Instant>,
+    capacity: usize,
+}
+
+impl EventRateBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            buffer: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Record an event occurrence at the given time.
+    pub fn push(&mut self, at: Instant) {
+        if self.buffer.len() == self.capacity {
+            self.buffer.remove(0);
+        }
+        self.buffer.push(at);
+    }
+
+    /// Calculate events per second over the stored window.
+    /// Returns 0.0 if fewer than 2 events are recorded.
+    pub fn fps(&self) -> f32 {
+        if self.buffer.len() < 2 {
+            return 0.0;
+        }
+        let first = self.buffer[0];
+        let last = *self.buffer.last().unwrap();
+        let duration = last.duration_since(first).as_secs_f32();
+        if duration <= 0.0 {
+            return 0.0;
+        }
+        (self.buffer.len() - 1) as f32 / duration
+    }
+
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.buffer.clear();
     }
 }
 
@@ -414,5 +486,54 @@ mod tests {
 
         let stats = monitor.get_stats();
         assert!(stats.total_frames >= 5);
+    }
+
+    #[test]
+    fn test_event_rate_buffer_fps() {
+        let mut buf = EventRateBuffer::new(10);
+        let base = Instant::now();
+
+        // Push events at exactly 60Hz (16.67ms apart)
+        for i in 0..5 {
+            buf.push(base + Duration::from_millis(i * 17));
+        }
+
+        // 4 intervals over 68ms = ~58.8 fps
+        let fps = buf.fps();
+        assert!(fps > 50.0 && fps < 70.0, "fps should be ~60, got {}", fps);
+    }
+
+    #[test]
+    fn test_event_rate_buffer_window_wraps() {
+        let mut buf = EventRateBuffer::new(3);
+        let base = Instant::now();
+
+        buf.push(base);
+        buf.push(base + Duration::from_millis(50));
+        buf.push(base + Duration::from_millis(100));
+        buf.push(base + Duration::from_millis(150));
+
+        // Window should contain last 3: 50ms apart, 2 intervals over 100ms = 20 fps
+        let fps = buf.fps();
+        assert!((fps - 20.0).abs() < 1.0, "fps should be ~20, got {}", fps);
+    }
+
+    #[test]
+    fn test_event_rate_buffer_insufficient_data() {
+        let mut buf = EventRateBuffer::new(10);
+        buf.push(Instant::now());
+        assert_eq!(buf.fps(), 0.0);
+    }
+
+    #[test]
+    fn test_frame_performance_stats_default() {
+        let stats = FramePerformanceStats::default();
+        assert_eq!(stats.ui_fps, 0.0);
+        assert_eq!(stats.raster_fps, 0.0);
+        assert_eq!(stats.target_fps, 0.0);
+        assert_eq!(stats.jank_count, 0);
+        assert_eq!(stats.dropped_count, 0);
+        assert_eq!(stats.jank_rate, 0.0);
+        assert_eq!(stats.drop_rate, 0.0);
     }
 }

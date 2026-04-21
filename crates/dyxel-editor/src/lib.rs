@@ -25,8 +25,13 @@ pub struct Editor {
 }
 
 impl Editor {
-    /// Create new editor with default font size
-    pub fn new(font_size: f32) -> Self {
+    /// Create new editor with default font size, using a shared [`FontContext`].
+    ///
+    /// Pass a pre-built `FontContext` (typically cloned from a global/shared
+    /// instance) to avoid repeated system font scans. The `FontContext` should
+    /// be constructed with `CollectionOptions { shared: true, .. }` if it will
+    /// be cloned across many editors.
+    pub fn new(font_size: f32, font_cx: FontContext) -> Self {
         let mut editor = PlainEditor::new(font_size);
         editor.set_scale(1.0);
 
@@ -38,7 +43,7 @@ impl Editor {
         )));
 
         Self {
-            font_cx: FontContext::default(),
+            font_cx,
             layout_cx: LayoutContext::default(),
             editor,
             cursor_visible: false,
@@ -388,7 +393,6 @@ impl Editor {
                     continue;
                 };
 
-                let style = glyph_run.style();
                 let run = glyph_run.run();
                 let font = run.font();
                 let font_size = run.font_size();

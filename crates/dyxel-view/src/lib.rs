@@ -83,7 +83,9 @@ pub static mut SHARED_BUFFER: SharedBuffer = SharedBuffer {
         safe_area_top: 0.0,
         safe_area_bottom: 0.0,
         platform: 0,
-        _padding: [0.0; 3],
+        refresh_rate_hz: 60.0,
+        effective_refresh_rate_hz: 60.0,
+        frame_time_target_ms: 16.67,
     },
 };
 

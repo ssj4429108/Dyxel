@@ -207,6 +207,8 @@ pub struct VelloBackend {
     // Frame timing from pacer (for DIAG logging)
     pacer_wait_ms: SharedMutex<f64>,
     frame_interval_ms: SharedMutex<f64>,
+    // Frame performance stats from scheduler (for DIAG logging)
+    frame_perf_stats: SharedMutex<dyxel_perf::FramePerformanceStats>,
 }
 
 const BLIT_SHADER_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.spv"));
@@ -259,6 +261,7 @@ impl VelloBackend {
             blur_cache: SharedMutex::new(std::collections::HashMap::new()),
             pacer_wait_ms: SharedMutex::new(0.0),
             frame_interval_ms: SharedMutex::new(0.0),
+            frame_perf_stats: SharedMutex::new(dyxel_perf::FramePerformanceStats::default()),
         }
     }
 
@@ -2238,9 +2241,10 @@ impl VelloBackend {
             self.save_cache();
         }
 
-        // Log detailed frame timing for diagnostics
-        let pacer_wait_ms = *self.pacer_wait_ms.lock().unwrap();
+        // Log detailed frame timing and performance stats for diagnostics
+        let _pacer_wait_ms = *self.pacer_wait_ms.lock().unwrap();
         let frame_interval_ms = *self.frame_interval_ms.lock().unwrap();
+        let perf_stats = self.frame_perf_stats.lock().unwrap();
         let stats = self.perf_monitor.lock().unwrap().get_stats();
         {
             let report = stage_timer.report();
@@ -2258,20 +2262,17 @@ impl VelloBackend {
             let present_time = report.get("blit_submit_to_present_return");
             let total = frame_start.elapsed().as_secs_f32() * 1000.0;
 
-            // PERF tag logic
-            let perf_tag = if frame_interval_ms > (1000.0 / 60.0 + 1.0) {
-                "JANK"
-            } else if pacer_wait_ms < 2.0 {
-                "WARM"
-            } else {
-                "OK"
-            };
-
             log::info!(
-                "[DIAG] Frame {}: Total={:.2}ms, PacerWait={:.2}ms, State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, BlurCopy={:.2}ms, BlurRender={:.2}ms, Pass3={:.2}ms, GetTex={:.2}ms, TexWait={:.2}ms, Blit={:.2}ms, Present={:.2}ms, FrameInterval={:.2}ms, FPS={:.1} [PERF: {}]",
+                "[DIAG] Frame {}: Total={:.2}ms, UI={:.1}fps, Raster={:.1}fps, Target={:.1}fps, Jank={}({:.1}%), Drop={}({:.1}%) | State={:.2}ms, Scene={:.2}ms, GPU={:.2}ms, BlurCopy={:.2}ms, BlurRender={:.2}ms, Pass3={:.2}ms, GetTex={:.2}ms, TexWait={:.2}ms, Blit={:.2}ms, Present={:.2}ms, Interval={:.2}ms",
                 stats.total_frames,
                 total,
-                pacer_wait_ms,
+                perf_stats.ui_fps,
+                perf_stats.raster_fps,
+                perf_stats.target_fps,
+                perf_stats.jank_count,
+                perf_stats.jank_rate * 100.0,
+                perf_stats.dropped_count,
+                perf_stats.drop_rate * 100.0,
                 state_lock_time,
                 scene_build_time,
                 gpu_time,
@@ -2283,8 +2284,6 @@ impl VelloBackend {
                 blit_time,
                 present_time,
                 frame_interval_ms,
-                stats.fps,
-                perf_tag
             );
 
             if stats.total_frames % 300 == 0 && log::log_enabled!(log::Level::Debug) {
@@ -2781,13 +2780,19 @@ impl VelloBackend {
         let taffy_y = node.y as f64;
         let node_width = node.width as f64;
         let node_height = node.height as f64;
-        let global_pos = parent_pos + Vec2::new(taffy_x, taffy_y);
+        let pos_offset = Vec2::new(node.position_x as f64, node.position_y as f64);
+
+        // When position is set, treat it as absolute coordinates within the parent
+        // (ignoring Taffy layout position) rather than an offset on top of layout.
+        let is_absolute = node.position_x != 0.0 || node.position_y != 0.0;
+        let global_pos = if is_absolute {
+            parent_pos + pos_offset
+        } else {
+            parent_pos + Vec2::new(taffy_x, taffy_y)
+        };
 
         // Build local transform for this node
-        // Apply position offset if set (for absolute positioning within parent)
-        let pos_offset = Vec2::new(node.position_x as f64, node.position_y as f64);
-        let local_transform = transform
-            * Affine::translate((global_pos.x + pos_offset.x, global_pos.y + pos_offset.y));
+        let local_transform = transform * Affine::translate((global_pos.x, global_pos.y));
 
         // Determine if we need layer effects
         let needs_layer = node.opacity < 1.0 || node.clip_to_bounds || node.blur.is_some();
@@ -2800,10 +2805,9 @@ impl VelloBackend {
         let node_in_blur_subtree = in_blur_subtree || has_blur;
         if !node_in_blur_subtree {
             if let Some(&texture_id) = cached_textures.get(&id) {
-                let draw_pos = global_pos + pos_offset;
                 cached_draws.push(CachedDraw {
                     texture_id: texture_pool::TextureId(texture_id.0),
-                    transform: Affine::translate((draw_pos.x, draw_pos.y)),
+                    transform: Affine::translate((global_pos.x, global_pos.y)),
                     width: node_width as f32,
                     height: node_height as f32,
                 });
@@ -2846,8 +2850,10 @@ impl VelloBackend {
         // Xilem pattern: Draw shadow first, then content on top
         // NOTE: When blur is enabled, skip shadow in Pass 1. Shadow will be handled
         // by the blur compositing pipeline to avoid double-rendering.
+        log::debug!("[ShadowCheck] id={} has_shadow={} has_blur={}", id, node.shadow.is_some(), has_blur);
         if let Some(ref shadow) = node.shadow {
             if !has_blur {
+                log::debug!("[ShadowDraw] id={} offset=({},{}) blur={} color={:?}", id, shadow.offset_x, shadow.offset_y, shadow.blur, shadow.color);
                 let shadow_x = shadow.offset_x as f64;
                 let shadow_y = shadow.offset_y as f64;
                 let blur_radius = shadow.blur as f64;
@@ -2881,6 +2887,7 @@ impl VelloBackend {
         // 1. The node's background should NOT be drawn to the main scene
         // 2. Blur effect handles opacity and compositing separately
 
+        log::debug!("[LayerCheck] id={} needs_layer={} clip_to_bounds={} opacity={} border_radius={}", id, needs_layer_without_blur, node.clip_to_bounds, node.opacity, node.border_radius);
         if needs_layer_without_blur {
             // Convert opacity to layer alpha
             let alpha = node.opacity.clamp(0.0, 1.0);
@@ -2976,14 +2983,12 @@ impl VelloBackend {
             );
         }
         if !blur_applied {
-            let local_pos = global_pos + pos_offset;
             for &child_id in &node.children {
-                log::debug!("[DebugChildren] id={} rendering child_id={}", id, child_id);
                 Self::render_node_recursive_internal(
                     child_id,
                     nodes,
                     scene,
-                    local_pos,
+                    global_pos,
                     transform,
                     device,
                     queue,
@@ -3381,6 +3386,10 @@ impl RenderBackend for VelloBackend {
     fn set_frame_timing(&self, pacer_wait_ms: f64, frame_interval_ms: f64) {
         *self.pacer_wait_ms.lock().unwrap() = pacer_wait_ms;
         *self.frame_interval_ms.lock().unwrap() = frame_interval_ms;
+    }
+
+    fn set_frame_performance_stats(&self, stats: dyxel_perf::FramePerformanceStats) {
+        *self.frame_perf_stats.lock().unwrap() = stats;
     }
 
     fn render_package(

@@ -66,22 +66,24 @@ fn main() -> anyhow::Result<()> {
                     ));
                     surface_setup_done = true;
 
-                    // Detect display refresh rate and inject into engine
-                    if let Some(monitor) = w.primary_monitor() {
+                    // Detect display refresh rate and notify scheduler.
+                    // The scheduler owns cadence; set_target_fps is deprecated.
+                    let refresh_hz = if let Some(monitor) = w.primary_monitor() {
                         if let Some(video_mode) = monitor.video_modes().next() {
                             let mhz = video_mode.refresh_rate_millihertz();
                             let fps = mhz as f64 / 1000.0;
-                            let effective_fps = if fps >= 119.0 { 120.0 } else if fps >= 59.0 { 60.0 } else { fps.max(30.0) };
-                            log::info!("macOS: Detected refresh rate {:.3} Hz ({} mHz), using target FPS {:.2}", fps, mhz, effective_fps);
-                            host.set_target_fps(effective_fps);
+                            let effective = if fps >= 119.0 { 120.0 } else if fps >= 59.0 { 60.0 } else { fps.max(30.0) };
+                            log::info!("macOS: Detected refresh rate {:.3} Hz ({} mHz), using effective {:.2}", fps, mhz, effective);
+                            effective
                         } else {
                             log::warn!("macOS: Could not detect video mode, falling back to 60 Hz");
-                            host.set_target_fps(60.0);
+                            60.0
                         }
                     } else {
                         log::warn!("macOS: Could not get primary monitor, falling back to 60 Hz");
-                        host.set_target_fps(60.0);
-                    }
+                        60.0
+                    };
+                    host.notify_surface_changed(size.width, size.height, refresh_hz);
 
                     // Attach hardware VBlank sync for precise frame pacing on macOS.
                     if !DEBUG_FORCE_CONTINUOUS {

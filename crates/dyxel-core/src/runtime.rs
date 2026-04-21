@@ -771,6 +771,8 @@ fn apply_command_immediate(
                 let color =
                     u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
                 state.set_shadow(id, offset_x, offset_y, blur, color);
+            } else {
+                log::warn!("[CMD] SetShadow payload too short: {}", payload.len());
             }
         }
         OpCode::SetBlur => {

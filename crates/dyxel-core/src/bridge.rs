@@ -14,14 +14,11 @@ use std::thread;
 use std::time::Duration;
 use tokio::sync::Notify;
 
-#[cfg(not(target_arch = "wasm32"))]
-use crossbeam_channel;
-
 use crate::engine::{LogicState, RenderState, setup_engine};
-use crate::frame_scheduler::{LogicCommand, SchedulerEvent};
+use crate::frame_scheduler::{SchedulerEvent};
 use crate::platform::{SafeWindowHandle, SurfaceId};
 use crate::render_mailbox::RenderMailbox;
-use crate::renderer::{render_frame, render_frame_with_package, runtime_prepare};
+use crate::renderer::{render_frame_with_package, runtime_prepare};
 use crate::state::SharedState;
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
@@ -33,11 +30,21 @@ use dyxel_render_vello::VelloBackend;
 const LOGIC_FRAME_WAIT_TIMEOUT: Duration = Duration::from_millis(33);
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn wait_for_render_or_vsync(render_complete_rx: &mpsc::Receiver<()>) {
     let _ = render_complete_rx.recv_timeout(LOGIC_FRAME_WAIT_TIMEOUT);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+static INPUT_BATCH_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn next_input_batch_id() -> u64 {
+    INPUT_BATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn render_needs_retry(render_state: &RenderState) -> bool {
     render_state
         .backend
@@ -100,8 +107,12 @@ pub enum Lifecycle {
 #[cfg(not(target_arch = "wasm32"))]
 pub enum LogicMessage {
     SetReady(LogicState),
-    Input(InputEvent),
+    /// Scheduler-driven input processing: drain the input queue and tick.
+    ProcessPendingInput,
+    /// Cadence info update from scheduler (display_hz, divisor, effective_hz).
+    CadenceUpdated(crate::cadence::CadenceInfo),
     LoadWasm(String),
+    Resize { width: u32, height: u32 },
     Pause,
     Resume,
     Shutdown,
@@ -109,7 +120,7 @@ pub enum LogicMessage {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub enum RenderMessage {
-    SetReady(Arc<StdMutex<RenderState>>),
+    SetReady(RenderState),
     CreateSurface {
         target: Option<dyxel_render_api::SurfaceTargetHandle>,
         surface: Option<dyxel_render_api::SurfaceHandle>,
@@ -122,7 +133,6 @@ pub enum RenderMessage {
         width: u32,
         height: u32,
     },
-    RequestDraw,
     Suspend(mpsc::Sender<()>), // Sync barrier with ACK
     Shutdown,
     TogglePerfOverlay,
@@ -610,6 +620,24 @@ pub struct DyxelHost {
     logic_tx: StdMutex<Option<mpsc::Sender<LogicMessage>>>,
     #[cfg(not(target_arch = "wasm32"))]
     render_tx: StdMutex<Option<mpsc::Sender<RenderMessage>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    render_cmd_tx: StdMutex<Option<crossbeam_channel::Sender<crate::frame_scheduler::RenderCommand>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    scheduler_tx: StdMutex<Option<crossbeam_channel::Sender<SchedulerEvent>>>,
+    /// Thread-safe input event queue. Input source pushes here; logic worker
+    /// drains when scheduler dispatches ProcessPendingInput.
+    #[cfg(not(target_arch = "wasm32"))]
+    input_queue: Arc<StdMutex<std::collections::VecDeque<InputEvent>>>,
+    /// Current display refresh rate in Hz. Updated by platform layer via
+    /// notify_surface_changed. VBlank emulator reads this to emit correct
+    /// refresh-locked cadence on all platforms.
+    #[cfg(not(target_arch = "wasm32"))]
+    display_hz: Arc<StdMutex<f64>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    vblank_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared frame performance stats written by scheduler and render threads.
+    #[cfg(not(target_arch = "wasm32"))]
+    frame_perf_state: Arc<StdMutex<dyxel_perf::FramePerformanceStats>>,
 
     engine_status: SharedPtr<EngineStatusMutex>,
     engine_ready_notify: SharedPtr<EngineReadyNotify>,
@@ -644,27 +672,58 @@ impl DyxelHost {
         let (render_complete_tx, render_complete_rx) = mpsc::channel(); // VSync signal: Render -> Logic
         #[cfg(not(target_arch = "wasm32"))]
         let is_rendering = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        #[cfg(not(target_arch = "wasm32"))]
-        let render_jank_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        // Scheduler-driven worker channels (Task #4)
-        #[cfg(not(target_arch = "wasm32"))]
-        let (logic_cmd_tx, logic_cmd_rx) = mpsc::channel::<LogicCommand>();
-        #[cfg(not(target_arch = "wasm32"))]
-        let (scheduler_event_tx, _scheduler_event_rx) = crossbeam_channel::unbounded::<SchedulerEvent>();
-
-        // Single-slot mailbox for RenderPackage snapshots (Task #4)
-        #[cfg(not(target_arch = "wasm32"))]
-        let render_mailbox = Arc::new(RenderMailbox::new());
 
         // Create shared state (used directly in WASM, managed by threads in native)
         let shared_state = SharedPtr::new(SharedMutex::new(crate::state::SharedState::new()));
+
+        // FrameScheduler infrastructure: mailbox + scheduler event channel + render command channel
+        #[cfg(not(target_arch = "wasm32"))]
+        let mailbox = Arc::new(RenderMailbox::new());
+        #[cfg(not(target_arch = "wasm32"))]
+        let (scheduler_tx, scheduler_rx) = crossbeam_channel::unbounded::<SchedulerEvent>();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (render_cmd_tx, render_cmd_rx) = crossbeam_channel::unbounded::<crate::frame_scheduler::RenderCommand>();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let vblank_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Shared input queue: Input source pushes events here; scheduler dispatches
+        // logic work via ProcessPendingInput.
+        #[cfg(not(target_arch = "wasm32"))]
+        let input_queue = Arc::new(StdMutex::new(std::collections::VecDeque::<InputEvent>::new()));
+
+        // Display refresh rate: defaults to 60.0 until platform layer reports
+        // the real rate via notify_surface_changed.
+        #[cfg(not(target_arch = "wasm32"))]
+        let display_hz = Arc::new(StdMutex::new(60.0));
+
+        // Shared frame performance stats: scheduler writes ui_fps/target_fps/jank,
+        // render thread writes raster_fps.
+        #[cfg(not(target_arch = "wasm32"))]
+        let frame_perf_state = Arc::new(StdMutex::new(dyxel_perf::FramePerformanceStats::default()));
+
+        // Clone logic_tx before it is moved into Self so the scheduler can
+        // dispatch ProcessPendingInput to the logic worker.
+        #[cfg(not(target_arch = "wasm32"))]
+        let logic_tx_for_scheduler = logic_tx.clone();
 
         let host = SharedPtr::new(Self {
             #[cfg(not(target_arch = "wasm32"))]
             logic_tx: StdMutex::new(Some(logic_tx)),
             #[cfg(not(target_arch = "wasm32"))]
             render_tx: StdMutex::new(Some(render_tx.clone())),
+            #[cfg(not(target_arch = "wasm32"))]
+            render_cmd_tx: StdMutex::new(Some(render_cmd_tx.clone())),
+            #[cfg(not(target_arch = "wasm32"))]
+            scheduler_tx: StdMutex::new(Some(scheduler_tx.clone())),
+            #[cfg(not(target_arch = "wasm32"))]
+            input_queue: input_queue.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            display_hz: display_hz.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            vblank_shutdown: vblank_shutdown.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            frame_perf_state: frame_perf_state.clone(),
             engine_status: engine_status.clone(),
             engine_ready_notify: engine_ready_notify.clone(),
             active_surface_id: active_surface_id.clone(),
@@ -679,12 +738,9 @@ impl DyxelHost {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let render_tx_for_logic = render_tx.clone();
-            let render_complete_rx = render_complete_rx; // VSync signal receiver
-            let is_rendering_for_logic = is_rendering.clone();
-            let logic_cmd_rx = logic_cmd_rx;
-            let scheduler_event_tx = scheduler_event_tx;
-            let render_mailbox_for_logic = render_mailbox.clone();
+            let mailbox_for_logic = mailbox.clone();
+            let scheduler_tx_for_logic = scheduler_tx.clone();
+            let input_queue_for_logic = input_queue.clone();
 
             // 1. Logic Thread (Thinker)
             thread::Builder::new()
@@ -694,17 +750,15 @@ impl DyxelHost {
                     let mut logic_opt: Option<LogicState> = None;
                     let mut lifecycle = Lifecycle::Stopped;
 
-                    // Helper: execute one full tick cycle (WASM tick → process_commands → sync_layout → prepare → mailbox commit)
-                    // Returns true if a package was committed.
-                    let mut execute_tick = |l: &mut LogicState| -> bool {
+                    // Scheduler-centric tick+commit: only runs in response to messages,
+                    // never self-drives. The scheduler receives LogicCommitted and arms
+                    // the next VBlank render token.
+                    let tick_and_commit = |l: &mut LogicState| {
                         #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
                         {
                             use crate::runtime::{process_commands, sync_layout_to_wasm};
 
                             let logic_tick_start = std::time::Instant::now();
-
-                            // Execute WASM tick (produces commands)
-                            log::debug!("LogicThread: acquiring tick_fn lock...");
 
                             // Process gesture router timers
                             GESTURE_ROUTER.with(|router_cell| {
@@ -716,178 +770,157 @@ impl DyxelHost {
                                 }
                             });
 
+                            // Write cadence info into SharedBuffer.device_info so the
+                            // guest can read real effective_hz for frame-rate-independent
+                            // animation (design doc §14).
+                            let bptr = *l.shared_buffer_ptr.lock().unwrap();
+                            if let Some(bptr) = bptr {
+                                if let Ok(cadence_guard) = l.cadence_info.lock() {
+                                    if let Some(info) = cadence_guard.as_ref() {
+                                        let mem = unsafe { &mut *l._rt.memory_mut() };
+                                        let buffer_ptr = unsafe { mem.as_mut_ptr().add(bptr as usize) as *mut dyxel_shared::SharedBuffer };
+                                        unsafe {
+                                            (*buffer_ptr).device_info.refresh_rate_hz = info.display_hz as f32;
+                                            (*buffer_ptr).device_info.effective_refresh_rate_hz = info.effective_hz as f32;
+                                            (*buffer_ptr).device_info.frame_time_target_ms = info.target_frame_duration.as_secs_f32() * 1000.0;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let guest_tick_start = std::time::Instant::now();
                             let tick_opt = l.tick_fn.lock().unwrap();
-                            log::debug!("LogicThread: tick_fn lock acquired");
                             if let Some(tick) = tick_opt.as_ref() {
-                                log::debug!("LogicThread: calling tick...");
                                 if let Err(e) = tick.call() {
                                     log::error!("LogicThread: WASM tick failed: {}", e);
                                 }
-                                log::debug!("LogicThread: tick returned");
                             } else {
                                 log::warn!("LogicThread: tick_fn is None, skipping tick");
                             }
                             drop(tick_opt);
+                            let guest_tick_ms = guest_tick_start.elapsed().as_secs_f64() * 1000.0;
 
                             // Process WASM commands
+                            let process_commands_start = std::time::Instant::now();
                             let bptr = *l.shared_buffer_ptr.lock().unwrap();
                             if let Some(bptr) = bptr {
                                 let mem = unsafe { &mut *l._rt.memory_mut() };
                                 let _ = process_commands(mem, bptr, &l.shared_state);
+                            }
+                            let process_commands_ms =
+                                process_commands_start.elapsed().as_secs_f64() * 1000.0;
 
-                                // Sync layout results back to WASM
+                            let sync_layout_start = std::time::Instant::now();
+                            if let Some(bptr) = bptr {
+                                let mem = unsafe { &mut *l._rt.memory_mut() };
                                 let mut state_guard = l.shared_state.lock().unwrap();
                                 let _ = sync_layout_to_wasm(mem, bptr, &mut *state_guard);
                             }
+                            let sync_layout_ms =
+                                sync_layout_start.elapsed().as_secs_f64() * 1000.0;
 
-                            // --- Scheduler-driven prepare + mailbox commit ---
-                            let committed = if let Some(ref render_state_arc) = l.render_state {
-                                let mut render_state = render_state_arc.lock().unwrap();
-                                // Get active surface size for prepare (fallback to 0,0 if no surface yet)
-                                let (vw, vh) = (0, 0); // TODO: surface size should be communicated to logic thread
-                                let package = runtime_prepare(l, &mut *render_state, vw, vh);
-                                let epoch = package.layout_epoch;
-                                let did_work = package.did_layout || !package.nodes.is_empty();
-                                render_mailbox_for_logic.commit(epoch, Arc::new(package));
+                            // Prepare RenderPackage and commit to mailbox
+                            let runtime_prepare_start = std::time::Instant::now();
+                            let viewport = *l.last_viewport_size.lock().unwrap();
+                            let package = runtime_prepare(l, viewport.0, viewport.1);
+                            let runtime_prepare_ms =
+                                runtime_prepare_start.elapsed().as_secs_f64() * 1000.0;
+                            let epoch = package.layout_epoch;
+                            let node_count = package.nodes.len();
+                            let did_layout = package.did_layout;
 
-                                // Notify scheduler that logic has committed a new epoch
-                                let _ = scheduler_event_tx.send(SchedulerEvent::LogicCommitted { epoch });
-
-                                // Legacy: still send RequestDraw so render thread wakes up
-                                // (render thread will eventually read from mailbox instead)
-                                if did_work {
-                                    let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
+                            // Clear dirty tracker AFTER runtime_prepare so the package
+                            // snapshot captures the current frame's dirty state.
+                            {
+                                let mut state_guard = l.shared_state.lock().unwrap();
+                                if crate::runtime::is_render_needed(&*state_guard) {
+                                    crate::runtime::clear_dirty_tracker(&mut *state_guard);
                                 }
-                                did_work
-                            } else {
-                                // Fallback: legacy path without RenderState
-                                if let Some(bptr) = bptr {
-                                    let mem = unsafe { &mut *l._rt.memory_mut() };
-                                    let mut state_guard = l.shared_state.lock().unwrap();
-                                    if crate::runtime::is_render_needed(&*state_guard) {
-                                        let dirty_count = state_guard.dirty_tracker.iter_dirty_nodes().count();
-                                        if dirty_count > 0 {
-                                            if !is_rendering_for_logic.load(std::sync::atomic::Ordering::Acquire) {
-                                                let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
-                                            } else {
-                                                let jank = render_jank_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                                                if jank % 60 == 1 {
-                                                    log::warn!("LogicThread: RenderJank={}, skipping RequestDraw because render is still in progress", jank);
-                                                }
-                                            }
-                                        } else {
-                                            let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
-                                        }
-                                        crate::runtime::clear_dirty_tracker(&mut *state_guard);
-                                    }
-                                }
-                                false
-                            };
-
-                            // DIAG: record LogicTime covering the full WASM tick lifecycle
-                            let logic_time_ms = logic_tick_start.elapsed().as_secs_f64() * 1000.0;
-                            if logic_time_ms > 8.0 {
-                                log::info!("DIAG LogicTime={:.2}ms RenderJank={}", logic_time_ms, render_jank_count.load(std::sync::atomic::Ordering::Relaxed));
                             }
 
-                            committed
+                            mailbox_for_logic.commit(epoch, std::sync::Arc::new(package));
+
+                            // Notify scheduler that new content is ready
+                            let _ = scheduler_tx_for_logic.send(SchedulerEvent::LogicCommitted { epoch });
+                            log::debug!("LogicThread: Committed epoch={} nodes={} viewport={:?} did_layout={}", epoch, node_count, viewport, did_layout);
+
+                            let logic_time_ms = logic_tick_start.elapsed().as_secs_f64() * 1000.0;
+                            if logic_time_ms > 8.0 {
+                                log::info!(
+                                    "DIAG LogicTime={:.2}ms GuestTick={:.2}ms ProcessCommands={:.2}ms SyncLayout={:.2}ms RuntimePrepare={:.2}ms",
+                                    logic_time_ms,
+                                    guest_tick_ms,
+                                    process_commands_ms,
+                                    sync_layout_ms,
+                                    runtime_prepare_ms
+                                );
+                            }
                         }
                         #[cfg(not(all(feature = "wasm3-support", not(target_arch = "wasm32"))))]
                         {
-                            false
+                            let _ = l;
                         }
                     };
 
                     loop {
-                        log::debug!("LogicThread: loop start, lifecycle={:?}", lifecycle);
-                        // Receive message (block when stopped/paused to save CPU)
-                        log::debug!("LogicThread: checking for messages...");
-                        let msg_res: Result<LogicMessage, std::sync::mpsc::RecvError> = if lifecycle == Lifecycle::Running {
-                            // Running: non-blocking check, then check for scheduler command, then auto-tick
-                            match logic_rx.try_recv() {
-                                Ok(msg) => {
-                                    log::debug!("LogicThread: received LogicMessage");
-                                    Ok(msg)
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                    // No LogicMessage — check for scheduler command
-                                    match logic_cmd_rx.try_recv() {
-                                        Ok(LogicCommand::ProcessInput) => {
-                                            log::debug!("LogicThread: ProcessInput from scheduler");
-                                            if let Some(ref mut l) = logic_opt {
-                                                let _ = execute_tick(l);
-                                            }
-                                            continue;
-                                        }
-                                        Ok(LogicCommand::Shutdown) => {
-                                            log::info!("LogicThread: Shutdown from scheduler");
-                                            return;
-                                        }
-                                        Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                            // No scheduler command either — auto-tick when Running
-                                            log::debug!("LogicThread: no command, executing auto-tick...");
-                                            if let Some(ref mut l) = logic_opt {
-                                                let _ = execute_tick(l);
-                                            }
-                                            continue;
-                                        }
-                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                            log::error!("LogicThread: logic_cmd_rx disconnected");
-                                            return;
-                                        }
-                                    }
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                    log::error!("LogicThread: logic_rx disconnected");
-                                    return;
-                                }
-                            }
-                        } else {
-                            // Stopped/Paused: block waiting for message on either channel
-                            // Prioritize LogicMessage (external control) over LogicCommand
-                            match logic_rx.recv() {
-                                Ok(msg) => Ok(msg),
-                                Err(_) => {
-                                    // LogicMessage channel closed, try LogicCommand as fallback
-                                    match logic_cmd_rx.recv() {
-                                        Ok(LogicCommand::Shutdown) => {
-                                            log::info!("LogicThread: Shutdown via logic_cmd_rx");
-                                            return;
-                                        }
-                                        _ => {
-                                            log::error!("LogicThread: All channels disconnected");
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                        };
+                        log::trace!("LogicThread: loop start, lifecycle={:?}", lifecycle);
+                        // Clear any pending VSync signals to prevent frame lag accumulation
+                        // Logic Thread should sync with latest VSync, not old ones
+                        while render_complete_rx.try_recv().is_ok() {}
 
-                        // Process received LogicMessage
-                        log::trace!("LogicThread: msg_res={:?}, lifecycle={:?}", msg_res.is_ok(), lifecycle);
+                        // Receive message (block when stopped/paused to save CPU)
+                        // Scheduler-centric: logic thread blocks waiting for messages.
+                        // It no longer self-drives ticks; the scheduler decides cadence
+                        // via InputArrived -> LogicCommitted -> VBlank -> RenderToken.
+                        let msg_res = logic_rx.recv();
+
+                        // Process received message
                         if let Ok(msg) = msg_res {
                             match &msg {
                                 LogicMessage::SetReady(_) => log::debug!("LogicThread: msg type=SetReady"),
-                                LogicMessage::Input(_) => log::trace!("LogicThread: msg type=Input"),
+                                LogicMessage::ProcessPendingInput => log::trace!("LogicThread: msg type=ProcessPendingInput"),
+                                LogicMessage::CadenceUpdated(info) => log::debug!("LogicThread: msg type=CadenceUpdated hz={:.1} divisor={}", info.display_hz, info.divisor),
                                 LogicMessage::LoadWasm(_) => log::debug!("LogicThread: msg type=LoadWasm"),
+                                LogicMessage::Resize { .. } => log::debug!("LogicThread: msg type=Resize"),
                                 LogicMessage::Pause => log::debug!("LogicThread: msg type=Pause"),
                                 LogicMessage::Resume => log::debug!("LogicThread: msg type=Resume"),
                                 LogicMessage::Shutdown => log::info!("LogicThread: msg type=Shutdown"),
                             }
                             match msg {
-                                LogicMessage::SetReady(mut l) => {
+                                LogicMessage::SetReady(l) => {
                                     log::info!("LogicThread: Received SetReady, initializing...");
-                                    // Wire RenderState if available (set by prepare_engine)
-                                    if let Some(ref rs) = l.render_state {
-                                        log::info!("LogicThread: RenderState wired (Arc ptr={:p})", Arc::as_ptr(rs));
-                                    }
                                     logic_opt = Some(l);
                                     lifecycle = Lifecycle::Running;
+                                    if let Some(ref mut l) = logic_opt {
+                                        tick_and_commit(l);
+                                    }
                                     log::info!("LogicThread: Running now!");
                                 }
-                                LogicMessage::Input(event) => {
-                                    log::info!("LogicThread: Received Input event={:?}, logic_opt={}", event, logic_opt.is_some());
-                                    if let Some(ref mut l) = logic_opt { process_input_internal(l, event); }
+                                LogicMessage::ProcessPendingInput => {
+                                    if let Some(ref mut l) = logic_opt {
+                                        let mut drained = false;
+                                        while let Some(event) = input_queue_for_logic.lock().unwrap().pop_front() {
+                                            drained = true;
+                                            process_input_internal(l, event);
+                                        }
+                                        if drained {
+                                            tick_and_commit(l);
+                                        } else {
+                                            log::trace!("LogicThread: ProcessPendingInput but queue empty");
+                                        }
+                                    }
+                                }
+                                LogicMessage::CadenceUpdated(info) => {
+                                    if let Some(ref mut l) = logic_opt {
+                                        *l.cadence_info.lock().unwrap() = Some(info);
+                                    }
+                                }
+                                LogicMessage::Resize { width, height } => {
+                                    log::info!("LogicThread: Received Resize {}x{}", width, height);
+                                    if let Some(ref mut l) = logic_opt {
+                                        *l.last_viewport_size.lock().unwrap() = (width, height);
+                                        tick_and_commit(l);
+                                    }
                                 }
                                 LogicMessage::LoadWasm(path) => {
                                     log::info!("LogicThread: Processing LoadWasm...");
@@ -897,8 +930,8 @@ impl DyxelHost {
                                             log::error!("LogicThread: LoadWasm failed: {}", e);
                                         } else {
                                             log::info!("LogicThread: LoadWasm completed successfully");
-                                            let _ = render_tx_for_logic.send(RenderMessage::RequestDraw);
                                         }
+                                        tick_and_commit(l);
                                         log::info!("LogicThread: LoadWasm block done");
                                     } else {
                                         log::warn!("LogicThread: LoadWasm - logic_opt is None");
@@ -931,135 +964,82 @@ impl DyxelHost {
             let active_surface_ptr = active_surface_id.clone();
             let notify_ptr = engine_ready_notify.clone();
             let render_complete_tx = render_complete_tx.clone(); // VSync signal sender
-            let render_tx_for_retry = render_tx.clone();
             let is_rendering_for_render = is_rendering.clone();
+            let mailbox_for_render = mailbox.clone();
+            let scheduler_tx_for_render = scheduler_tx.clone();
+            let render_cmd_rx = render_cmd_rx;
+            let vblank_shutdown_for_render = vblank_shutdown.clone();
+            let display_hz_for_render = display_hz.clone();
+            let frame_perf_state_for_render = frame_perf_state.clone();
 
             thread::Builder::new()
                 .name("DyxelRender".into())
                 .spawn(move || {
 
-                    let mut render_opt: Option<Arc<StdMutex<RenderState>>> = None;
+                    let mut render_opt: Option<RenderState> = None;
                     let mut lifecycle = Lifecycle::Stopped;
-                    let mut continuous_render = !cfg!(target_os = "android");
-                    let mut pacer: Option<crate::pacer::FramePacer> = None;
-                    let mut pending_vblank_waiter: Option<Arc<dyn crate::pacer::VBlankWaiter>> = None;
+                    // When a hardware VBlankWaiter is registered, we spawn a forwarding
+                    // thread and track its shutdown flag here.
+                    let mut hardware_vblank_shutdown: Option<Arc<std::sync::atomic::AtomicBool>> = None;
+                    let mut raster_frame_buffer = dyxel_perf::EventRateBuffer::new(60);
 
                     loop {
-                        // Process messages - either block or poll depending on mode
+                        // Phase 1: Drain all pending control messages
                         let mut latest_resize = None;
-                        let mut draw_requested = continuous_render; // Continuous mode: always draw
                         let mut control_msgs = Vec::new();
 
-                        if continuous_render {
-                            // Continuous mode: non-blocking poll for messages
-                            while let Ok(msg) = render_rx.try_recv() {
-                                match msg {
-                                    RenderMessage::Resize { width, height } => {
-                                        latest_resize = Some((width, height));
-                                    }
-                                    RenderMessage::RequestDraw => {
-                                        // In continuous mode, ignore RequestDraw (we draw every loop)
-                                    }
-                                    RenderMessage::SetContinuousRender(enabled) => {
-                                        continuous_render = enabled;
-                                        draw_requested = enabled;
-
-                                    }
-                                    RenderMessage::SetTargetFPS(fps) => {
-                                        let mut new_pacer = crate::pacer::FramePacer::new(fps);
-                                        if let Some(ref w) = pending_vblank_waiter {
-                                            new_pacer.set_vblank_waiter(w.clone());
-                                        }
-                                        pacer = Some(new_pacer);
-                                        log::info!("RenderThread: Target FPS set to {:.2}", fps);
-                                    }
-                                    RenderMessage::SetVBlankWaiter(w) => {
-                                        pending_vblank_waiter = Some(w.clone());
-                                        if let Some(ref mut p) = pacer {
-                                            p.set_vblank_waiter(w);
-                                            log::info!("RenderThread: VBlank waiter attached");
-                                        }
-                                    }
-                                    _ => {
-                                        control_msgs.push(msg);
-                                    }
-                                }
-                            }
-                        } else {
-                            // Event-driven mode: block on first message
-                            let msg = match render_rx.recv() {
-                                Ok(msg) => msg,
-                                Err(_) => {
-                                    log::error!("RenderThread: Channel disconnected, shutting down");
-                                    return;
-                                }
-                            };
-
-                            // Process the first message
+                        while let Ok(msg) = render_rx.try_recv() {
                             match msg {
                                 RenderMessage::Resize { width, height } => {
                                     latest_resize = Some((width, height));
                                 }
-                                RenderMessage::RequestDraw => {
-                                    draw_requested = true;
-                                }
-                                RenderMessage::SetContinuousRender(enabled) => {
-                                    continuous_render = enabled;
-                                    draw_requested = enabled;
-
+                                // These two messages are legacy pacing controls.
+                                // Cadence is now owned by FrameScheduler; render thread
+                                // simply consumes FrameTokens as they arrive.
+                                RenderMessage::SetContinuousRender(_) => {
+                                    log::trace!("RenderThread: SetContinuousRender is deprecated (scheduler owns cadence)");
                                 }
                                 RenderMessage::SetTargetFPS(fps) => {
-                                    let mut new_pacer = crate::pacer::FramePacer::new(fps);
-                                    if let Some(ref w) = pending_vblank_waiter {
-                                        new_pacer.set_vblank_waiter(w.clone());
-                                    }
-                                    pacer = Some(new_pacer);
-                                    log::info!("RenderThread: Target FPS set to {:.2}", fps);
+                                    log::trace!("RenderThread: SetTargetFPS({}) is deprecated (scheduler owns cadence)", fps);
                                 }
-                                RenderMessage::SetVBlankWaiter(w) => {
-                                    pending_vblank_waiter = Some(w.clone());
-                                    if let Some(ref mut p) = pacer {
-                                        p.set_vblank_waiter(w);
-                                            log::info!("RenderThread: VBlank waiter attached");
+                                RenderMessage::SetVBlankWaiter(waiter) => {
+                                    // Stop the software VBlank emulator.
+                                    vblank_shutdown_for_render.store(true, Ordering::Relaxed);
+                                    log::info!("RenderThread: Stopping software VBlank emulator, switching to hardware VBlank");
+
+                                    // Stop any existing hardware VBlank forwarding thread.
+                                    if let Some(ref shutdown) = hardware_vblank_shutdown {
+                                        shutdown.store(true, Ordering::Relaxed);
                                     }
+
+                                    // Spawn a new hardware VBlank forwarding thread.
+                                    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                    let shutdown_clone = shutdown.clone();
+                                    let scheduler_tx = scheduler_tx_for_render.clone();
+                                    let display_hz = display_hz_for_render.clone();
+                                    thread::Builder::new()
+                                        .name("DyxelVBlankHW".into())
+                                        .spawn(move || {
+                                            while !shutdown_clone.load(Ordering::Relaxed) {
+                                                waiter.wait_for_vblank();
+                                                if shutdown_clone.load(Ordering::Relaxed) {
+                                                    break;
+                                                }
+                                                let hz = *display_hz.lock().unwrap();
+                                                let _ = scheduler_tx.send(SchedulerEvent::VBlank {
+                                                    timestamp: std::time::Instant::now(),
+                                                    refresh_hz: hz,
+                                                });
+                                            }
+                                            log::info!("VBlankHW: shutting down");
+                                        })
+                                        .expect("Failed to spawn hardware VBlank thread");
+
+                                    hardware_vblank_shutdown = Some(shutdown);
+                                    log::info!("RenderThread: Hardware VBlank forwarding thread started");
                                 }
                                 _ => {
                                     control_msgs.push(msg);
-                                }
-                            }
-
-                            // Drain the rest of the queue
-                            while let Ok(next) = render_rx.try_recv() {
-                                match next {
-                                    RenderMessage::Resize { width, height } => {
-                                        latest_resize = Some((width, height));
-                                    }
-                                    RenderMessage::RequestDraw => {
-                                        draw_requested = true;
-                                    }
-                                    RenderMessage::SetContinuousRender(enabled) => {
-                                        continuous_render = enabled;
-                                        draw_requested = enabled;
-
-                                    }
-                                    RenderMessage::SetTargetFPS(fps) => {
-                                        let mut new_pacer = crate::pacer::FramePacer::new(fps);
-                                        if let Some(ref w) = pending_vblank_waiter {
-                                            new_pacer.set_vblank_waiter(w.clone());
-                                        }
-                                        pacer = Some(new_pacer);
-                                        log::info!("RenderThread: Target FPS set to {:.2}", fps);
-                                    }
-                                    RenderMessage::SetVBlankWaiter(w) => {
-                                        pending_vblank_waiter = Some(w.clone());
-                                        if let Some(ref mut p) = pacer {
-                                            p.set_vblank_waiter(w);
-                                            log::info!("RenderThread: VBlank waiter attached");
-                                        }
-                                    }
-                                    _ => {
-                                        control_msgs.push(next);
-                                    }
                                 }
                             }
                         }
@@ -1087,20 +1067,15 @@ impl DyxelHost {
                                         height,
                                         render_opt.is_none()
                                     );
-                                    if let Some(ref r_arc) = render_opt {
-                                        let mut r = r_arc.lock().unwrap();
-                                        let context_ptr = &mut r.context as *mut _;
-                                        let backend = &r.backend;
-                                        match unsafe {
-                                            backend.create_surface_state(
-                                                &mut *context_ptr,
-                                                target,
-                                                surface,
-                                                0,
-                                                width,
-                                                height,
-                                            )
-                                        } {
+                                    if let Some(ref mut r) = render_opt {
+                                        match r.backend.create_surface_state(
+                                            &mut r.context,
+                                            target,
+                                            surface,
+                                            0,
+                                            width,
+                                            height,
+                                        ) {
                                             Ok(ss) => {
                                                 log::info!(
                                                     "RenderThread: Surface created successfully"
@@ -1109,9 +1084,6 @@ impl DyxelHost {
                                                 *active_surface_ptr.lock_guard().unwrap() =
                                                     Some(SurfaceId(nid));
                                                 lifecycle = Lifecycle::Running;
-                                                if !continuous_render {
-                                                    draw_requested = true;
-                                                }
                                             }
                                             Err(e) => log::error!(
                                                 "RenderThread: Failed to create surface: {}",
@@ -1127,8 +1099,7 @@ impl DyxelHost {
                                 }
                                 RenderMessage::Suspend(ack) => {
                                     lifecycle = Lifecycle::Stopped;
-                                    if let Some(ref r_arc) = render_opt {
-                                        let r = r_arc.lock().unwrap();
+                                    if let Some(ref r) = render_opt {
                                         // Downcast context to get device and queue
                                         if let Some(v_ctx) = r.context.downcast_ref::<vello::util::RenderContext>() {
                                             let dev = &v_ctx.devices[0].device;
@@ -1141,12 +1112,13 @@ impl DyxelHost {
                                     let _ = ack.send(());
                                 }
                                 RenderMessage::Shutdown => {
-
+                                    if let Some(ref shutdown) = hardware_vblank_shutdown {
+                                        shutdown.store(true, Ordering::Relaxed);
+                                    }
                                     return;
                                 }
                                 RenderMessage::TogglePerfOverlay => {
-                                    if let Some(ref r_arc) = render_opt {
-                                        let r = r_arc.lock().unwrap();
+                                    if let Some(ref r) = render_opt {
                                         r.enable_perf_overlay();
 
                                     }
@@ -1155,7 +1127,7 @@ impl DyxelHost {
                             }
                         }
 
-                        // 2. Handle coalesced Resize/RequestDraw
+                        // 2. Handle resize (surface only, no render)
                         if let Some((width, height)) = latest_resize {
                             let active_id = *active_surface_ptr.lock_guard().unwrap();
                             log::debug!(
@@ -1164,56 +1136,139 @@ impl DyxelHost {
                                 height,
                                 active_id
                             );
-                            if let (Some(ref r_arc), Some(id)) = (&render_opt, active_id) {
-                                let mut r = r_arc.lock().unwrap();
+                            if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
                                 let mut surfs = surfaces_ptr.lock_guard().unwrap();
                                 if let Some(s) = surfs.get_mut(&id.0) {
                                     s.resize(&mut r.context, width, height);
-                                    render_frame(&mut *r, s.as_mut());
                                 }
                             }
-                        } else if draw_requested && lifecycle == Lifecycle::Running {
-                            // Pacer wait at the start of every frame
-                            let pacer_wait_ms = pacer.as_mut().map(|p| p.wait_for_next_frame().as_secs_f64() * 1000.0).unwrap_or(0.0);
-                            let now = std::time::Instant::now();
-                            let frame_interval_ms = LAST_PRESENT_TIME.with(|t| {
-                                let interval = t.get().map(|last| now.duration_since(last).as_secs_f64() * 1000.0).unwrap_or(0.0);
-                                t.set(Some(now));
-                                interval
-                            });
+                        }
 
-                            is_rendering_for_render.store(true, std::sync::atomic::Ordering::Release);
+                        // 3. Block waiting for render command from scheduler
+                        if lifecycle == Lifecycle::Running {
+                            match render_cmd_rx.recv_timeout(Duration::from_millis(16)) {
+                                Ok(crate::frame_scheduler::RenderCommand::Render(token)) => {
+                                    log::debug!("RenderThread: Received RenderCommand frame_id={} epoch={}", token.frame_id, token.epoch);
+                                    let now = std::time::Instant::now();
+                                    let frame_interval_ms = LAST_PRESENT_TIME.with(|t| {
+                                        let interval = t.get().map(|last| now.duration_since(last).as_secs_f64() * 1000.0).unwrap_or(0.0);
+                                        t.set(Some(now));
+                                        interval
+                                    });
 
-                            let active_id = *active_surface_ptr.lock_guard().unwrap();
-                            if let (Some(ref r_arc), Some(id)) = (&render_opt, active_id) {
-                                let mut r = r_arc.lock().unwrap();
-                                let mut surfs = surfaces_ptr.lock_guard().unwrap();
-                                if let Some(s) = surfs.get_mut(&id.0) {
-                                    if !continuous_render {
-                                        log::trace!("RenderThread: Rendering frame for surface {:?}", id);
+                                    is_rendering_for_render.store(true, std::sync::atomic::Ordering::Release);
+
+                                    let active_id = *active_surface_ptr.lock_guard().unwrap();
+                                    // Always notify scheduler that render started/completed,
+                                    // even if we have no surface yet. Otherwise scheduler
+                                    // stays in Rendering state forever and never issues
+                                    // another token.
+                                    let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderStarted { frame_id: token.frame_id, epoch: token.epoch });
+                                    let mut frame_time_ms = 0.0f32;
+                                    let mut did_present = false;
+                                    if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
+                                        let mut surfs = surfaces_ptr.lock_guard().unwrap();
+                                        if let Some(s) = surfs.get_mut(&id.0) {
+                                            log::trace!("RenderThread: Rendering frame for surface {:?}", id);
+                                            r.backend.set_frame_timing(0.0, frame_interval_ms);
+                                            if let Ok(perf) = frame_perf_state_for_render.lock() {
+                                                r.backend.set_frame_performance_stats(*perf);
+                                            }
+                                            let (epoch, package) = mailbox_for_render.snapshot();
+                                            log::debug!("RenderThread: Rendering epoch={} (token epoch={}) nodes={} viewport={:?}", epoch, token.epoch, package.nodes.len(), package.viewport);
+                                            let render_start = std::time::Instant::now();
+                                            render_frame_with_package(r, s.as_mut(), &package);
+                                            frame_time_ms = render_start.elapsed().as_secs_f32() * 1000.0;
+                                            did_present = true;
+                                            // Legacy: also signal logic thread (to be removed in Task 6)
+                                            let _ = render_complete_tx.send(());
+                                        } else {
+                                            log::warn!("RenderThread: Active surface {:?} not found in map", id);
+                                        }
+                                    } else {
+                                        log::trace!("RenderThread: Draw ignored (no active surface or no render_opt)");
                                     }
-                                    r.backend.set_frame_timing(pacer_wait_ms, frame_interval_ms);
-                                    render_frame(&mut *r, s.as_mut());
-                                    if !continuous_render && render_needs_retry(&*r) {
-                                        let _ = render_tx_for_retry.send(RenderMessage::RequestDraw);
+                                    let stats = crate::FrameStats {
+                                        frame_time_ms,
+                                        ..Default::default()
+                                    };
+                                    // Report RenderCompleted with the token's epoch so the
+                                    // scheduler's single-frame ownership accounting stays
+                                    // consistent. The actual rendered content may be newer
+                                    // (latest-wins mailbox), but the in-flight token is what
+                                    // the scheduler tracks.
+                                    let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderCompleted { frame_id: token.frame_id, epoch: token.epoch, stats });
+
+                                    // Only count raster FPS when we actually presented a frame.
+                                    if did_present {
+                                        raster_frame_buffer.push(std::time::Instant::now());
+                                        if let Ok(mut perf) = frame_perf_state_for_render.lock() {
+                                            perf.raster_fps = raster_frame_buffer.fps();
+                                        }
                                     }
-                                    // Notify pacer that frame was presented
-                                    if let Some(ref mut p) = pacer {
-                                        p.on_frame_submitted();
-                                    }
-                                    let _ = render_complete_tx.send(());
-                                } else {
-                                    log::warn!("RenderThread: Active surface {:?} not found in map", id);
+
+                                    is_rendering_for_render.store(false, std::sync::atomic::Ordering::Release);
                                 }
-                            } else {
-                                log::trace!("RenderThread: Draw ignored (no active surface or no render_opt)");
+                                Ok(crate::frame_scheduler::RenderCommand::Shutdown) => {
+                                    log::info!("RenderThread: Received Shutdown command");
+                                    break;
+                                }
+                                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                                    // No render command pending; loop back to check control messages
+                                }
+                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                    log::error!("RenderThread: Render command channel disconnected");
+                                    break;
+                                }
                             }
-
-                            is_rendering_for_render.store(false, std::sync::atomic::Ordering::Release);
                         }
                     }
                 })
                 .expect("Failed to spawn RenderThread");
+
+            // 3. FrameScheduler (single frame owner)
+            let frame_perf_state_for_scheduler = frame_perf_state.clone();
+            thread::Builder::new()
+                .name("DyxelScheduler".into())
+                .spawn(move || {
+                    let scheduler = crate::frame_scheduler::FrameScheduler::new(
+                        render_cmd_tx,
+                        scheduler_rx,
+                        Some(logic_tx_for_scheduler),
+                        60.0,
+                        Some(frame_perf_state_for_scheduler),
+                    );
+                    scheduler.run();
+                })
+                .expect("Failed to spawn SchedulerBridge");
+
+            // 4. Software VBlank emulator for platforms without hardware VBlank
+            // (macOS, iOS, desktop). This provides the cadence boundary so the
+            // scheduler can run refresh-locked on all platforms.
+            #[cfg(not(target_os = "android"))]
+            {
+                let scheduler_tx_for_vblank = scheduler_tx.clone();
+                let shutdown_flag = vblank_shutdown.clone();
+                let display_hz_for_vblank = display_hz.clone();
+                thread::Builder::new()
+                    .name("DyxelVBlankEmu".into())
+                    .spawn(move || {
+                        while !shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            let hz = *display_hz_for_vblank.lock().unwrap();
+                            let interval = Duration::from_secs_f64(1.0 / hz);
+                            thread::sleep(interval);
+                            if shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            let _ = scheduler_tx_for_vblank.send(SchedulerEvent::VBlank {
+                                timestamp: std::time::Instant::now(),
+                                refresh_hz: hz,
+                            });
+                        }
+                        log::info!("VBlankEmu: shutting down");
+                    })
+                    .expect("Failed to spawn VBlank emulator");
+            }
         }
         host
     }
@@ -1228,7 +1283,7 @@ impl DyxelHost {
         }
 
         match setup_engine(ddir).await {
-            Ok((mut logic, render)) => {
+            Ok((logic, render)) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     // Store instance for main-thread surface creation
@@ -1238,16 +1293,11 @@ impl DyxelHost {
                         *self.instance.lock().unwrap() = Some(Box::new(v_ctx.instance.clone()));
                     }
 
-                    // Share RenderState with Logic Thread so it can call runtime_prepare (Task #4)
-                    let render_state_arc = Arc::new(StdMutex::new(render));
-                    logic.render_state = Some(render_state_arc.clone());
-
                     if let Some(tx) = &*self.logic_tx.lock().unwrap() {
                         let _ = tx.send(LogicMessage::SetReady(logic));
                     }
-                    // Send the Arc to render thread so both threads share the same RenderState
                     if let Some(tx) = &*self.render_tx.lock().unwrap() {
-                        let _ = tx.send(RenderMessage::SetReady(render_state_arc));
+                        let _ = tx.send(RenderMessage::SetReady(render));
                     }
                 }
 
@@ -1284,79 +1334,117 @@ impl DyxelHost {
     pub fn on_pointer_down(&self, pointer_id: u32, x: f32, y: f32, pressure: f32) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let host_ptr = format!("{:p}", self);
-            let logic_tx_guard = self.logic_tx.lock().unwrap();
-            if let Some(tx) = &*logic_tx_guard {
-                log::debug!(
-                    "DyxelInput: on_pointer_down pid={} x={:.1} y={:.1}",
-                    pointer_id,
-                    x,
-                    y
-                );
-                match tx.send(LogicMessage::Input(InputEvent::PointerDown {
-                    pointer_id,
-                    x,
-                    y,
-                    pressure,
-                })) {
-                    Ok(_) => {}
-                    Err(e) => log::error!("DyxelInput: Failed to send message: {}", e),
+            let batch_id = next_input_batch_id();
+            // Queue input event and notify scheduler. Scheduler is the sole
+            // orchestrator — it will dispatch ProcessPendingInput to logic.
+            self.input_queue.lock().unwrap().push_back(InputEvent::PointerDown {
+                pointer_id,
+                x,
+                y,
+                pressure,
+            });
+            if let Ok(lock) = self.scheduler_tx.lock() {
+                if let Some(ref tx) = *lock {
+                    let _ = tx.send(SchedulerEvent::InputArrived(batch_id));
                 }
-            } else {
-                log::warn!("DyxelInput: logic_tx is None, host={}", host_ptr);
             }
+            log::debug!(
+                "DyxelInput: on_pointer_down pid={} x={:.1} y={:.1}",
+                pointer_id,
+                x,
+                y
+            );
         }
     }
 
     /// 指针移动（支持多指）
     pub fn on_pointer_move(&self, pointer_id: u32, x: f32, y: f32) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+        {
+            let batch_id = next_input_batch_id();
+            self.input_queue.lock().unwrap().push_back(InputEvent::PointerMove {
+                pointer_id,
+                x,
+                y,
+            });
+            if let Ok(lock) = self.scheduler_tx.lock() {
+                if let Some(ref tx) = *lock {
+                    let _ = tx.send(SchedulerEvent::InputArrived(batch_id));
+                }
+            }
             log::trace!(
                 "DyxelInput: on_pointer_move pid={} x={:.1} y={:.1}",
                 pointer_id,
                 x,
                 y
             );
-            let _ = tx.send(LogicMessage::Input(InputEvent::PointerMove {
-                pointer_id,
-                x,
-                y,
-            }));
         }
     }
 
     /// 指针抬起（支持多指）
     pub fn on_pointer_up(&self, pointer_id: u32, x: f32, y: f32) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+        {
+            let batch_id = next_input_batch_id();
+            self.input_queue.lock().unwrap().push_back(InputEvent::PointerUp {
+                pointer_id,
+                x,
+                y,
+            });
+            if let Ok(lock) = self.scheduler_tx.lock() {
+                if let Some(ref tx) = *lock {
+                    let _ = tx.send(SchedulerEvent::InputArrived(batch_id));
+                }
+            }
             log::debug!(
                 "DyxelInput: on_pointer_up pid={} x={:.1} y={:.1}",
                 pointer_id,
                 x,
                 y
             );
-            let _ = tx.send(LogicMessage::Input(InputEvent::PointerUp {
-                pointer_id,
-                x,
-                y,
-            }));
         }
     }
 
     /// 指针取消（支持多指）
     pub fn on_pointer_cancel(&self) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+        {
+            let batch_id = next_input_batch_id();
+            self.input_queue.lock().unwrap().push_back(InputEvent::PointerCancel);
+            if let Ok(lock) = self.scheduler_tx.lock() {
+                if let Some(ref tx) = *lock {
+                    let _ = tx.send(SchedulerEvent::InputArrived(batch_id));
+                }
+            }
             log::info!("DyxelInput: on_pointer_cancel");
-            let _ = tx.send(LogicMessage::Input(InputEvent::PointerCancel));
         }
     }
 
     pub fn resize_native(&self, width: u32, height: u32) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(tx) = &*self.render_tx.lock().unwrap() {
-            let _ = tx.send(RenderMessage::Resize { width, height });
+        {
+            if let Some(tx) = &*self.render_tx.lock().unwrap() {
+                let _ = tx.send(RenderMessage::Resize { width, height });
+            }
+            if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+                let _ = tx.send(LogicMessage::Resize { width, height });
+            }
+        }
+    }
+
+    /// Notify the FrameScheduler of a surface geometry or refresh-rate change.
+    /// Called from the platform layer (e.g. Android surfaceChanged with Display.refreshRate).
+    pub fn notify_surface_changed(&self, width: u32, height: u32, refresh_hz: f64) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *self.display_hz.lock().unwrap() = refresh_hz;
+            if let Some(tx) = &*self.scheduler_tx.lock().unwrap() {
+                let _ = tx.send(SchedulerEvent::SurfaceChanged {
+                    width,
+                    height,
+                    refresh_hz,
+                });
+            }
         }
     }
 
@@ -1370,11 +1458,24 @@ impl DyxelHost {
             self.prepare_engine(ddir.clone()).await;
         }
 
+        // Send initial viewport size to logic thread before load_wasm
+        // so logic thread knows the viewport before first tick
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::Resize { width: _w, height: _h });
+        }
+
         #[cfg(target_os = "android")]
         {
             self.set_continuous_render(false);
             self.set_target_fps(60.0);
-            self.set_vblank_waiter(crate::android_vblank::AndroidVBlankWaiter::new());
+            let waiter = crate::android_vblank::AndroidVBlankWaiter::new();
+            if let Ok(lock) = self.scheduler_tx.lock() {
+                if let Some(ref tx) = *lock {
+                    crate::android_vblank::set_scheduler_tx(tx.clone());
+                }
+            }
+            self.set_vblank_waiter(waiter);
 
             let sh = SharedPtr::new(SafeWindowHandle::new_android(_surface_ptr));
             // Create wgpu::SurfaceTarget and wrap it in SurfaceTargetHandle
@@ -1408,11 +1509,19 @@ impl DyxelHost {
     pub fn shutdown(&self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // Signal the software VBlank emulator to stop first.
+            self.vblank_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(tx) = &*self.scheduler_tx.lock().unwrap() {
+                let _ = tx.send(SchedulerEvent::Shutdown);
+            }
             if let Some(tx) = &*self.logic_tx.lock().unwrap() {
                 let _ = tx.send(LogicMessage::Shutdown);
             }
             if let Some(tx) = &*self.render_tx.lock().unwrap() {
                 let _ = tx.send(RenderMessage::Shutdown);
+            }
+            if let Some(tx) = &*self.render_cmd_tx.lock().unwrap() {
+                let _ = tx.send(crate::frame_scheduler::RenderCommand::Shutdown);
             }
         }
     }
@@ -1448,13 +1557,7 @@ impl DyxelHost {
 #[cfg(test)]
 mod tests {
     use super::wait_for_render_or_vsync;
-    use crate::frame_scheduler::{LogicCommand, SchedulerEvent};
-    use crate::render_mailbox::RenderMailbox;
-    use crate::renderer::runtime_prepare;
-    use crate::engine::LogicState;
-    use dyxel_render_api::RenderPackage;
     use std::sync::mpsc;
-    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1468,74 +1571,6 @@ mod tests {
             start.elapsed() >= Duration::from_millis(25),
             "logic thread returned too early without waiting for frame completion"
         );
-    }
-
-    /// Verify the exact bridge sync order enforced by the scheduler-driven worker:
-    /// process_commands → sync_layout_to_wasm → runtime_prepare → mailbox commit → LogicCommitted.
-    #[test]
-    fn bridge_sync_order_process_commands_sync_layout_prepare_commit_committed() {
-        // This test documents the required ordering contract.  In the real logic thread
-        // the steps are performed inside execute_tick(); here we assert the order by
-        // simulating the sequence and verifying the observable side-effects.
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let step = AtomicUsize::new(0);
-        let mailbox = Arc::new(RenderMailbox::new());
-
-        // 1. process_commands (simulated)
-        let step_after_process = step.fetch_add(1, Ordering::SeqCst) + 1;
-        assert_eq!(step_after_process, 1, "process_commands must be first");
-
-        // 2. sync_layout_to_wasm (simulated)
-        let step_after_sync = step.fetch_add(1, Ordering::SeqCst) + 1;
-        assert_eq!(step_after_sync, 2, "sync_layout_to_wasm must be second");
-
-        // 3. runtime_prepare (simulated — in reality this needs a real RenderState)
-        let step_after_prepare = step.fetch_add(1, Ordering::SeqCst) + 1;
-        assert_eq!(step_after_prepare, 3, "runtime_prepare must be third");
-
-        // 4. mailbox commit
-        let pkg = Arc::new(RenderPackage::new((100, 100), None, Vec::new()));
-        mailbox.commit(42, pkg.clone());
-        let step_after_commit = step.fetch_add(1, Ordering::SeqCst) + 1;
-        assert_eq!(step_after_commit, 4, "mailbox commit must be fourth");
-
-        // 5. LogicCommitted event
-        let (evt_tx, evt_rx) = mpsc::channel::<SchedulerEvent>();
-        let _ = evt_tx.send(SchedulerEvent::LogicCommitted { epoch: 42 });
-        let step_after_event = step.fetch_add(1, Ordering::SeqCst) + 1;
-        assert_eq!(step_after_event, 5, "LogicCommitted must be fifth");
-
-        // Verify mailbox reflects the committed epoch
-        let (epoch, snapshot) = mailbox.snapshot();
-        assert_eq!(epoch, 42);
-        assert_eq!(snapshot.viewport, (100, 100));
-
-        // Verify scheduler received the event
-        match evt_rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(SchedulerEvent::LogicCommitted { epoch }) => assert_eq!(epoch, 42),
-            other => panic!("Expected LogicCommitted event, got {:?}", other),
-        }
-    }
-
-    /// Verify that after a logic commit the mailbox has a non-zero epoch.
-    #[test]
-    fn mailbox_has_nonzero_epoch_after_logic_commit() {
-        let mailbox = Arc::new(RenderMailbox::new());
-
-        // Simulate logic worker committing a package
-        let pkg = Arc::new(RenderPackage::new((800, 600), Some(1), Vec::new()));
-        mailbox.commit(7, pkg);
-
-        let (epoch, snapshot) = mailbox.snapshot();
-        assert!(
-            epoch > 0,
-            "mailbox epoch should be non-zero after logic commit, got {}",
-            epoch
-        );
-        assert_eq!(epoch, 7);
-        assert_eq!(snapshot.viewport, (800, 600));
-        assert_eq!(snapshot.root_id, Some(1));
     }
 }
 
@@ -1558,8 +1593,22 @@ impl DyxelHost {
         }
     }
 
-    /// Set continuous render mode (for performance testing)
-    /// When enabled, render thread will render as fast as possible without waiting for RequestDraw
+    /// Get unified frame performance statistics.
+    ///
+    /// Returns a snapshot of UI FPS, Raster FPS, Target FPS, jank count,
+    /// dropped count, and their respective rates. Written by the scheduler
+    /// and render threads concurrently.
+    pub fn get_frame_performance_stats(&self) -> dyxel_perf::FramePerformanceStats {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Ok(perf) = self.frame_perf_state.lock() {
+                return *perf;
+            }
+        }
+        dyxel_perf::FramePerformanceStats::default()
+    }
+
+    /// Set continuous render mode (deprecated: scheduler now owns cadence)
     pub fn set_continuous_render(&self, enabled: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.render_tx.lock().unwrap() {
@@ -1666,10 +1715,12 @@ impl DyxelHost {
                 Ok(_) => (),
                 Err(e) => log::error!("setup: Failed to send CreateSurface: {:?}", e),
             }
-            match tx.send(RenderMessage::RequestDraw) {
-                Ok(_) => (),
-                Err(e) => log::error!("setup: Failed to send RequestDraw: {:?}", e),
-            }
+            // Scheduler bridge will issue FrameToken after surface is ready
+        }
+
+        // Inform logic thread of initial viewport size
+        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+            let _ = tx.send(LogicMessage::Resize { width, height });
         }
 
         // Resume LogicThread if it was paused (e.g., after Back button/activity restart)
