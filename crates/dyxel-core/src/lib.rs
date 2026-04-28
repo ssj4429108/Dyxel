@@ -1,11 +1,12 @@
 // Copyright 2024 Dyxel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub mod android_vblank;
 pub mod bridge;
 pub mod cadence;
 pub mod engine;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod frame_scheduler;
 pub mod frame_timeline;
 pub mod handler_registry;
@@ -14,6 +15,7 @@ pub mod input_proxy;
 pub mod pacer;
 pub mod platform;
 pub mod render_mailbox;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod renderer;
 pub mod runtime;
 pub mod spatial_index;
@@ -29,10 +31,9 @@ pub use state::{SharedState, ViewNode};
 
 // Re-exports for other crates (like host-web)
 pub use input::hit_test_recursive;
-pub use runtime::{
-    clear_dirty_tracker, is_render_needed, mark_all_nodes_dirty,
-    process_command_stream, process_commands, sync_layout_to_wasm,
-};
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime::{clear_dirty_tracker, is_render_needed, mark_all_nodes_dirty};
+pub use runtime::{process_command_stream, process_commands, sync_layout_to_wasm};
 pub use state::{Role, ViewType};
 
 #[cfg(not(target_arch = "wasm32"))]

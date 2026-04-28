@@ -922,7 +922,7 @@ dependencies = [
  "dyxel-gesture",
  "dyxel-perf",
  "dyxel-render-api",
- "dyxel-render-vello",
+ "dyxel-render-bootstrap",
  "dyxel-shared",
  "gloo-timers",
  "jni",
@@ -931,18 +931,15 @@ dependencies = [
  "naga",
  "ndk-sys 0.6.0+11769913",
  "parley",
- "peniko",
  "pollster",
  "raw-window-handle",
  "skrifa 0.22.3",
  "taffy",
  "tokio",
  "uniffi",
- "vello",
  "wasm-bindgen-futures",
  "wasm3",
  "web-sys",
- "wgpu",
 ]
 
 [[package]]
@@ -984,11 +981,11 @@ dependencies = [
  "anyhow",
  "dyxel-core",
  "dyxel-render-api",
+ "dyxel-render-bootstrap",
  "env_logger 0.10.2",
  "kurbo",
  "log",
  "pollster",
- "vello",
  "winit",
 ]
 
@@ -1013,6 +1010,17 @@ dependencies = [
  "anyhow",
  "dyxel-perf",
  "peniko",
+ "raw-window-handle",
+ "serde_json",
+]
+
+[[package]]
+name = "dyxel-render-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "dyxel-render-api",
+ "dyxel-render-impeller",
+ "dyxel-render-vello",
 ]
 
 [[package]]
@@ -1055,11 +1063,14 @@ dependencies = [
  "parley",
  "peniko",
  "pollster",
+ "raw-window-handle",
  "rustc-hash 2.1.2",
  "swash",
  "taffy",
  "tokio",
  "vello",
+ "wasm-bindgen",
+ "web-sys",
  "wgpu",
 ]
 
@@ -1112,13 +1123,13 @@ dependencies = [
  "console_error_panic_hook",
  "dyxel-core",
  "dyxel-render-api",
+ "dyxel-render-bootstrap",
  "dyxel-shared",
  "futures-util",
  "js-sys",
  "kurbo",
  "log",
  "raw-window-handle",
- "vello",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-logger",

@@ -12,6 +12,7 @@ members = [
     "crates/dyxel-app-macro",
     "crates/wasm3",
     "crates/dyxel-render-api",
+    "crates/dyxel-render-bootstrap",
     "crates/dyxel-render-impeller",
     "crates/dyxel-render-vello",
     "crates/dyxel-editor",

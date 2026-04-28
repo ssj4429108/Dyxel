@@ -152,15 +152,43 @@ impl FrameTimeline {
     /// Classify the frame result based on timing. Should be called after
     /// render_completed_at is set. Returns the classified result if found.
     pub fn classify_frame_result(&mut self, frame_id: u64) -> Option<FrameResultClass> {
+        let duration_ms = self
+            .recent
+            .iter()
+            .find(|r| r.frame_id == frame_id && !r.is_skipped)
+            .and_then(|rec| {
+                Some(
+                    rec.render_completed_at?
+                        .duration_since(rec.render_started_at?)
+                        .as_secs_f64()
+                        * 1000.0,
+                )
+            });
+        self.classify_frame_result_with_duration(frame_id, duration_ms)
+    }
+
+    /// Classify using an externally measured frame work duration. This allows
+    /// platform wait time such as wgpu Fifo surface acquire to be excluded from
+    /// Jank accounting while keeping the raw lifecycle timestamps intact.
+    pub fn classify_frame_result_with_duration(
+        &mut self,
+        frame_id: u64,
+        duration_ms: Option<f64>,
+    ) -> Option<FrameResultClass> {
         if let Some(rec) = self.recent.iter_mut().find(|r| r.frame_id == frame_id) {
             if rec.is_skipped {
                 return None;
             }
-            let result = if let (Some(started), Some(completed)) =
-                (rec.render_started_at, rec.render_completed_at)
-            {
-                let render_duration_ms = completed.duration_since(started).as_secs_f64() * 1000.0;
-                if render_duration_ms > rec.target_frame_duration_ms {
+            let result = if let Some(render_duration_ms) = duration_ms {
+                // macOS CVDisplayLink/Fifo has sub-vblank scheduling jitter around
+                // the 16.67ms boundary. Treat tiny tail overshoots as on-time so
+                // Jank reports reflect user-visible missed cadence, not timer noise.
+                #[cfg(target_os = "macos")]
+                let jank_threshold_ms = rec.target_frame_duration_ms + 1.5;
+                #[cfg(not(target_os = "macos"))]
+                let jank_threshold_ms = rec.target_frame_duration_ms;
+
+                if render_duration_ms > jank_threshold_ms {
                     self.missed_cadence_count += 1;
                     FrameResultClass::MissedCadence
                 } else {
@@ -201,6 +229,54 @@ impl FrameTimeline {
         }
     }
 
+    /// Diagnostics over the newest records only. This keeps live performance
+    /// indicators from being permanently polluted by startup or warmup noise.
+    pub fn recent_window_stats(&self, max_records: usize) -> FrameWindowStats {
+        self.recent_window_stats_after_presented_skip(max_records, 0)
+    }
+
+    /// Diagnostics over the newest records after ignoring an initial number of
+    /// presented frames. Skipped VBlanks before the first included presented
+    /// frame are ignored as warmup noise too. This is intentionally only a
+    /// reporting filter; the raw timeline and governor inputs remain unchanged.
+    pub fn recent_window_stats_after_presented_skip(
+        &self,
+        max_records: usize,
+        skip_presented: u64,
+    ) -> FrameWindowStats {
+        let mut stats = FrameWindowStats::default();
+        if max_records == 0 {
+            return stats;
+        }
+
+        let mut presented_seen = 0u64;
+        let mut filtered: Vec<&FrameRecord> = Vec::new();
+        for rec in self.recent.iter() {
+            if !rec.is_skipped && rec.frame_result.is_some() {
+                presented_seen += 1;
+            }
+            if presented_seen > skip_presented {
+                filtered.push(rec);
+            }
+        }
+
+        for rec in filtered.into_iter().rev().take(max_records) {
+            match rec.frame_result {
+                Some(FrameResultClass::OnTime) => stats.counts.on_time += 1,
+                Some(FrameResultClass::MissedCadence) => stats.counts.missed_cadence += 1,
+                Some(FrameResultClass::SkippedIdle) => stats.counts.skipped_idle += 1,
+                Some(FrameResultClass::SkippedDivisor) => stats.counts.skipped_divisor += 1,
+                Some(FrameResultClass::SkippedInFlight) => stats.counts.skipped_in_flight += 1,
+                None => {}
+            }
+            if !rec.is_skipped {
+                stats.dropped_epochs += rec.dropped_epochs_since_last_present;
+            }
+        }
+
+        stats
+    }
+
     /// Trim old records to keep memory bounded.
     pub fn trim(&mut self, max_len: usize) {
         while self.recent.len() > max_len {
@@ -212,7 +288,10 @@ impl FrameTimeline {
     /// Returns a JSON string containing an array of trace events.
     /// Timestamps are microseconds since the first event in the timeline.
     pub fn export_chrome_trace(&self) -> String {
-        let baseline = self.recent.front().map(|r| r.vblank_at.min(r.token_issued_at));
+        let baseline = self
+            .recent
+            .front()
+            .map(|r| r.vblank_at.min(r.token_issued_at));
         let base_to_us = |t: Instant| -> u64 {
             match baseline {
                 Some(b) => t.duration_since(b).as_micros() as u64,
@@ -297,6 +376,12 @@ pub struct FrameResultCounts {
     pub skipped_in_flight: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FrameWindowStats {
+    pub counts: FrameResultCounts,
+    pub dropped_epochs: u64,
+}
+
 impl FrameResultCounts {
     pub fn total_presented(&self) -> u64 {
         self.on_time + self.missed_cadence
@@ -368,6 +453,34 @@ mod tests {
     }
 
     #[test]
+    fn timeline_recent_window_stats_ignore_startup_noise() {
+        let mut timeline = FrameTimeline::new();
+        let now = std::time::Instant::now();
+
+        timeline.record_token(1, 1, now, now, 16.67, 60.0, 1, 60.0, 2);
+        timeline.mark_render_started(1, now);
+        timeline.mark_render_completed(1, now + std::time::Duration::from_millis(25));
+        timeline.classify_frame_result(1);
+        timeline.record_skipped_vblank(now, FrameResultClass::SkippedInFlight, 60.0, 1, 60.0);
+
+        for frame_id in 2..=4 {
+            timeline.record_token(frame_id, frame_id, now, now, 16.67, 60.0, 1, 60.0, 0);
+            timeline.mark_render_started(frame_id, now);
+            timeline.mark_render_completed(frame_id, now + std::time::Duration::from_millis(5));
+            timeline.classify_frame_result(frame_id);
+        }
+
+        let stats = timeline.recent_window_stats(3);
+
+        assert_eq!(timeline.result_counts().missed_cadence, 1);
+        assert_eq!(timeline.dropped_epoch_count(), 2);
+        assert_eq!(stats.counts.on_time, 3);
+        assert_eq!(stats.counts.missed_cadence, 0);
+        assert_eq!(stats.counts.skipped_in_flight, 0);
+        assert_eq!(stats.dropped_epochs, 0);
+    }
+
+    #[test]
     fn timeline_records_skipped_vblank() {
         let mut timeline = FrameTimeline::new();
         let now = std::time::Instant::now();
@@ -377,7 +490,10 @@ mod tests {
         let recent = timeline.recent();
         assert_eq!(recent.len(), 1);
         assert!(recent[0].is_skipped);
-        assert_eq!(recent[0].frame_result, Some(FrameResultClass::SkippedDivisor));
+        assert_eq!(
+            recent[0].frame_result,
+            Some(FrameResultClass::SkippedDivisor)
+        );
 
         let counts = timeline.result_counts();
         assert_eq!(counts.skipped_divisor, 1);

@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::state::SharedState;
-use dyxel_render_api::{BackendConfig, DeviceHandle, QueueHandle, RenderBackend, RenderContext};
+use dyxel_render_api::{GraphicsRuntime, GraphicsRuntimeFactory, RenderBackendV2};
 use dyxel_render_api::{SharedMutex, SharedPtr};
-use dyxel_render_vello::VelloBackend;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 // std::sync::Mutex is used for wasm3 function handles (separate from SharedMutex)
 #[cfg(all(feature = "wasm3-support", not(target_arch = "wasm32")))]
@@ -42,11 +43,21 @@ pub struct LogicState {
     /// Eliminates repeated system font scans (each `FontContext::default()`
     /// triggers a full `~/Library/Fonts` scan on macOS).
     pub font_context: std::sync::Mutex<parley::FontContext>,
+    /// Cached scene snapshot from the previous frame. Reused for incremental
+    /// updates when only render properties changed (no layout recompute).
+    pub scene_nodes_cache: std::sync::Mutex<Vec<dyxel_render_api::SceneNode>>,
+    /// Maps node_id to its index in scene_nodes_cache for O(1) dirty lookup.
+    pub scene_node_id_to_index: std::sync::Mutex<std::collections::HashMap<u32, usize>>,
+    /// Reusable buffer for text-node size updates during layout prepass.
+    /// Avoids per-frame Vec allocation in the hot path.
+    pub nodes_to_update_buffer: std::sync::Mutex<Vec<(u32, f32, f32)>>,
 }
 
 pub struct RenderState {
-    pub context: RenderContext,
-    pub backend: Box<dyn RenderBackend>,
+    /// New double-layer runtime (shared between main thread and render thread).
+    pub runtime: Option<Arc<StdMutex<Box<dyn GraphicsRuntime>>>>,
+    /// New double-layer backend (created by factory in Phase 3A).
+    pub backend_v2: Option<Box<dyn RenderBackendV2>>,
     pub shared_state: SharedPtr<SharedMutex<SharedState>>,
 }
 
@@ -59,40 +70,29 @@ unsafe impl Sync for RenderState {}
 
 impl RenderState {
     pub fn on_lifecycle_event(&self, event: dyxel_render_api::LifecycleEvent) {
-        self.backend.on_lifecycle_event(event);
+        if let Some(ref backend) = self.backend_v2 {
+            let _ = backend.on_lifecycle_event(event);
+        }
     }
 
     /// Enable performance overlay display
     pub fn enable_perf_overlay(&self) {
-        // Cast to VelloBackend and enable overlay directly
-        if let Some(vello_backend) = self.backend.as_any().downcast_ref::<VelloBackend>() {
-            vello_backend.enable_perf_overlay();
+        if let Some(ref backend) = self.backend_v2 {
+            backend.enable_perf_overlay();
         }
     }
 }
 
-pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderState)> {
-    // Create Vello-specific render context
-    let mut v_context = vello::util::RenderContext::new();
+pub async fn setup_engine(
+    _ddir: String,
+    factory: Box<dyn GraphicsRuntimeFactory>,
+) -> anyhow::Result<(LogicState, RenderState)> {
+    let mut runtime = factory.create_runtime()?;
+    let mut backend_v2 = factory.create_backend()?;
 
-    let dev_id = pollster::block_on(async { v_context.device(None).await })
-        .ok_or_else(|| anyhow::anyhow!("No device found"))?;
-
-    let device = &v_context.devices[dev_id].device;
-    let queue = &v_context.devices[dev_id].queue;
-
-    let backend = VelloBackend::new();
-    // Wrap device and queue in handles for the abstract API
-    let device_handle = DeviceHandle::new(device);
-    let queue_handle = QueueHandle::new(queue);
-    backend.init(
-        device_handle,
-        queue_handle,
-        BackendConfig { data_dir: ddir },
-    )?;
-
-    // Wrap the Vello context in the abstract RenderContext
-    let context = RenderContext::new(v_context);
+    // Initialize runtime (creates wgpu device) and backend against it.
+    runtime.initialize()?;
+    backend_v2.initialize(&mut *runtime)?;
 
     let shared_state = SharedPtr::new(SharedMutex::new(SharedState::new()));
 
@@ -136,11 +136,14 @@ pub async fn setup_engine(ddir: String) -> anyhow::Result<(LogicState, RenderSta
         )),
         cadence_info: std::sync::Mutex::new(None),
         font_context: std::sync::Mutex::new(font_context),
+        scene_nodes_cache: std::sync::Mutex::new(Vec::new()),
+        scene_node_id_to_index: std::sync::Mutex::new(std::collections::HashMap::new()),
+        nodes_to_update_buffer: std::sync::Mutex::new(Vec::new()),
     };
 
     let render = RenderState {
-        context,
-        backend: Box::new(backend),
+        runtime: Some(Arc::new(StdMutex::new(runtime))),
+        backend_v2: Some(backend_v2),
         shared_state,
     };
 

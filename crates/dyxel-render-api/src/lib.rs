@@ -248,7 +248,8 @@ pub struct ShadowDesc {
     pub offset_x: f32,
     pub offset_y: f32,
     pub blur: f32,
-    pub color: peniko::Color,
+    /// RGBA, 8-bit per channel (sRGB, non-premultiplied).
+    pub color: [u8; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -260,9 +261,11 @@ pub struct TextGlyph {
 
 #[derive(Clone, Debug)]
 pub struct TextGlyphRun {
-    pub font_data: peniko::FontData,
+    /// Neutral font resource — backend resolves to native type via internal cache.
+    pub font_data: std::sync::Arc<dyn std::any::Any + Send + Sync>,
     pub font_size: f32,
-    pub color: peniko::Color,
+    /// RGBA, 8-bit per channel (sRGB, non-premultiplied).
+    pub color: [u8; 4],
     pub glyphs: Vec<TextGlyph>,
 }
 
@@ -272,7 +275,8 @@ pub struct TextDecoration {
     pub y: f32,
     pub width: f32,
     pub height: f32,
-    pub color: peniko::Color,
+    /// RGBA, 8-bit per channel (sRGB, non-premultiplied).
+    pub color: [u8; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -288,7 +292,8 @@ pub struct TextDrawPayload {
     pub font_size: f32,
     pub font_family: String,
     pub font_weight: u16,
-    pub text_color: peniko::Color,
+    /// RGBA, 8-bit per channel (sRGB, non-premultiplied).
+    pub text_color: [u8; 4],
     pub measured_width: f32,
     pub measured_height: f32,
     pub prepared: PreparedText,
@@ -296,7 +301,8 @@ pub struct TextDrawPayload {
 
 #[derive(Clone, Debug)]
 pub enum NodeContent {
-    Rect { color: peniko::Color },
+    /// RGBA, 8-bit per channel (sRGB, non-premultiplied).
+    Rect { color: [u8; 4] },
     Text(TextDrawPayload),
 }
 
@@ -309,7 +315,8 @@ pub struct BlurEffect {
     pub blur_radius: f32,
     pub blur_style: u8,
     pub opacity: f32,
-    pub overlay_color: peniko::Color,
+    /// RGBA, 8-bit per channel (sRGB, non-premultiplied).
+    pub overlay_color: [u8; 4],
     pub border_radius: f32,
     pub source_rect: (f32, f32, f32, f32),
     pub deferred_children: Vec<u32>,
@@ -466,6 +473,9 @@ pub trait RenderBackend {
     ) -> RenderResult {
         Err(anyhow::anyhow!("render_package not implemented by backend"))
     }
+
+    /// Set frame timing data from the pacer (optional; default no-op)
+    fn set_frame_timing(&self, _pacer_wait_ms: f64, _frame_interval_ms: f64) {}
 
     /// Set frame performance stats from the scheduler (optional; default no-op)
     fn set_frame_performance_stats(&self, _stats: dyxel_perf::FramePerformanceStats) {}
@@ -625,4 +635,229 @@ pub trait AsRenderBackend {
 pub trait VelloBackendExt: RenderBackend {
     /// Get access to internal Vello renderer (for advanced use cases)
     fn vello_renderer(&self) -> Option<&dyn Any>;
+}
+
+// =============================================================================
+// Double-Layer Backend Architecture (GraphicsRuntime + RenderBackend)
+// =============================================================================
+// This is the new backend abstraction introduced as part of the
+// "Render Backend Extreme Decoupling" redesign. The old single-layer
+// RenderBackend trait above is kept as a transition layer.
+//
+// New flow:
+//   Platform -> NativeSurfaceHandle -> GraphicsRuntime -> BackendFrameContext
+//                                                         -> RenderBackend
+// =============================================================================
+
+/// Capability flags for a backend — pure data, no downcast needed.
+#[derive(Clone, Debug)]
+pub struct BackendCapabilities {
+    pub perf_overlay: bool,
+    pub gpu_timing: bool,
+    pub renderer_warmup: bool,
+    pub main_thread_surface_creation: bool,
+    pub main_thread_rendering: bool,
+    pub explicit_present: bool,
+}
+
+/// Runtime family for compatibility check between runtime and backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeKind {
+    Wgpu,
+    Impeller,
+    Skia,
+}
+
+/// Platform-native surface handle — NOT backend-specific.
+///
+/// Platform layers construct this and pass it to GraphicsRuntime.
+/// The runtime is responsible for converting it to a concrete surface object.
+pub enum NativeSurfaceHandle {
+    /// Standard raw-window-handle path for desktop platforms
+    RawWindow {
+        window: raw_window_handle::RawWindowHandle,
+        display: raw_window_handle::RawDisplayHandle,
+    },
+    /// Web canvas path
+    WebCanvas {
+        canvas_id: String,
+    },
+    /// Opaque native surface pointer for platforms that cannot use
+    /// raw-window-handle naturally (e.g. Android ANativeWindow*)
+    NativeSurface {
+        kind: NativeSurfaceKind,
+        ptr: u64,
+    },
+}
+
+// Native surface handles are opaque transport values passed between platform
+// threads and the render runtime. They do not provide safe dereference on their
+// own; concrete runtimes remain responsible for honoring platform thread rules.
+unsafe impl Send for NativeSurfaceHandle {}
+unsafe impl Sync for NativeSurfaceHandle {}
+
+/// Surface kind for NativeSurfaceHandle::NativeSurface
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSurfaceKind {
+    Android,
+    Ios,
+    Other,
+}
+
+/// Opaque surface identifier returned by GraphicsRuntime::create_surface()
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RuntimeSurfaceId(pub u32);
+
+/// Per-frame rendering context — created by GraphicsRuntime, consumed by RenderBackend.
+pub trait BackendFrameContext {
+    fn as_any(&mut self) -> &mut dyn Any;
+    fn runtime_kind(&self) -> RuntimeKind;
+}
+
+/// Graphics runtime — manages platform graphics runtime lifecycle.
+///
+/// Responsibilities:
+/// - Create/resize/suspend/resume surfaces
+/// - Acquire/release per-frame contexts (begin_frame / end_frame)
+/// - GPU synchronization
+/// - Present / swapbuffers
+///
+/// Does NOT execute scene drawing. Drawing is RenderBackend's job.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait GraphicsRuntime: Send + Sync {
+    fn initialize(&mut self) -> anyhow::Result<()>;
+
+    fn create_surface(
+        &mut self,
+        handle: NativeSurfaceHandle,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<RuntimeSurfaceId>;
+
+    fn resize_surface(
+        &mut self,
+        surface: RuntimeSurfaceId,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<()>;
+
+    fn suspend(&mut self) -> anyhow::Result<()>;
+    fn resume(&mut self) -> anyhow::Result<()>;
+    fn sync_gpu(&mut self) -> anyhow::Result<()>;
+
+    fn begin_frame(
+        &mut self,
+        surface: RuntimeSurfaceId,
+    ) -> anyhow::Result<Box<dyn BackendFrameContext>>;
+
+    fn end_frame(
+        &mut self,
+        frame: Box<dyn BackendFrameContext>,
+    ) -> anyhow::Result<()>;
+
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait GraphicsRuntime {
+    fn initialize(&mut self) -> anyhow::Result<()>;
+
+    fn create_surface(
+        &mut self,
+        handle: NativeSurfaceHandle,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<RuntimeSurfaceId>;
+
+    fn resize_surface(
+        &mut self,
+        surface: RuntimeSurfaceId,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<()>;
+
+    fn suspend(&mut self) -> anyhow::Result<()>;
+    fn resume(&mut self) -> anyhow::Result<()>;
+    fn sync_gpu(&mut self) -> anyhow::Result<()>;
+
+    fn begin_frame(
+        &mut self,
+        surface: RuntimeSurfaceId,
+    ) -> anyhow::Result<Box<dyn BackendFrameContext>>;
+
+    fn end_frame(
+        &mut self,
+        frame: Box<dyn BackendFrameContext>,
+    ) -> anyhow::Result<()>;
+
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+/// Render backend — consumes RenderPackage and executes drawing.
+///
+/// Responsibilities:
+/// - Scene draw / text / blur / shadow / layer
+/// - Raster cache bake / recycle execution
+/// - Backend-specific overlay / timing
+///
+/// Does NOT manage surfaces, devices, or present. Those are GraphicsRuntime's job.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait RenderBackendV2: Send + Sync {
+    fn initialize(&mut self, runtime: &mut dyn GraphicsRuntime) -> anyhow::Result<()>;
+
+    fn render(
+        &mut self,
+        frame: &mut dyn BackendFrameContext,
+        package: &RenderPackage,
+    ) -> anyhow::Result<RenderFrameStats>;
+
+    fn set_frame_timing(&self, _pacer_wait_ms: f64, _frame_interval_ms: f64) {}
+
+    fn set_frame_performance_stats(&self, _stats: dyxel_perf::FramePerformanceStats) {}
+
+    fn on_lifecycle_event(&self, event: LifecycleEvent) -> anyhow::Result<()> {
+        let _ = event;
+        Ok(())
+    }
+
+    fn enable_perf_overlay(&self) {}
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait RenderBackendV2 {
+    fn initialize(&mut self, runtime: &mut dyn GraphicsRuntime) -> anyhow::Result<()>;
+
+    fn render(
+        &mut self,
+        frame: &mut dyn BackendFrameContext,
+        package: &RenderPackage,
+    ) -> anyhow::Result<RenderFrameStats>;
+
+    fn set_frame_timing(&self, _pacer_wait_ms: f64, _frame_interval_ms: f64) {}
+
+    fn set_frame_performance_stats(&self, _stats: dyxel_perf::FramePerformanceStats) {}
+
+    fn on_lifecycle_event(&self, event: LifecycleEvent) -> anyhow::Result<()> {
+        let _ = event;
+        Ok(())
+    }
+
+    fn enable_perf_overlay(&self) {}
+}
+
+/// Factory for creating runtime + backend pairs at compile time.
+pub trait GraphicsRuntimeFactory: Send + Sync {
+    fn backend_name(&self) -> &'static str;
+    fn capabilities(&self) -> BackendCapabilities;
+    fn create_runtime(&self) -> anyhow::Result<Box<dyn GraphicsRuntime>>;
+    fn create_backend(&self) -> anyhow::Result<Box<dyn RenderBackendV2>>;
+}
+
+/// Neutral frame timing stats returned by backend to scheduler/perf.
+pub struct RenderFrameStats {
+    pub cpu_time_ms: Option<f64>,
+    pub gpu_time_ms: Option<f64>,
+    pub backend_internal_stats: Option<serde_json::Value>,
 }

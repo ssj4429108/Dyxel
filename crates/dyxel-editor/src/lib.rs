@@ -20,8 +20,14 @@ pub struct Editor {
     cursor_visible: bool,
     /// Track the current layout width to avoid unnecessary re-layouts.
     current_width: Option<f32>,
-    /// Text color
-    text_color: Color,
+    /// Text color (neutral [u8; 4] RGBA)
+    text_color: [u8; 4],
+    /// Cached font size for change detection
+    font_size: f32,
+    /// Cached font weight for change detection
+    font_weight: u16,
+    /// Cached font family for change detection
+    font_family: String,
 }
 
 impl Editor {
@@ -48,7 +54,10 @@ impl Editor {
             editor,
             cursor_visible: false,
             current_width: None,
-            text_color: Color::BLACK,
+            text_color: [0, 0, 0, 255],
+            font_size,
+            font_weight: 400,
+            font_family: String::new(),
         }
     }
 
@@ -68,22 +77,64 @@ impl Editor {
         self.editor.text().to_string()
     }
 
+    /// Get current font size.
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
     /// Set font size (rebuilds editor)
     pub fn set_font_size(&mut self, size: f32) {
+        self.font_size = size;
         self.editor
             .edit_styles()
             .insert(StyleProperty::FontSize(size));
     }
 
-    /// Set text color
-    pub fn set_text_color(&mut self, color: Color) {
+    /// Get current text color as neutral [u8; 4] RGBA.
+    pub fn text_color(&self) -> [u8; 4] {
+        self.text_color
+    }
+
+    /// Set text color from neutral [u8; 4] RGBA.
+    pub fn set_text_color(&mut self, color: [u8; 4]) {
         self.text_color = color;
+        let peniko_color = Color::from_rgba8(color[0], color[1], color[2], color[3]);
         self.editor
             .edit_styles()
-            .insert(StyleProperty::Brush(Brush::Solid(color)));
-        // Force layout refresh to apply new color
-        let text = self.editor.text().to_string();
-        self.editor.set_text(&text);
+            .insert(StyleProperty::Brush(Brush::Solid(peniko_color)));
+    }
+
+    /// Get current font weight.
+    pub fn font_weight(&self) -> u16 {
+        self.font_weight
+    }
+
+    /// Set font weight.
+    pub fn set_font_weight(&mut self, weight: u16) {
+        self.font_weight = weight;
+        self.editor
+            .edit_styles()
+            .insert(StyleProperty::FontWeight(parley::style::FontWeight::new(weight as f32)));
+    }
+
+    /// Get current font family.
+    pub fn font_family(&self) -> &str {
+        &self.font_family
+    }
+
+    /// Set font family.
+    pub fn set_font_family(&mut self, family: &str) {
+        self.font_family = family.to_string();
+        let family_stack = if family.is_empty() {
+            FontStack::Single(GenericFamily::SystemUi.into())
+        } else {
+            FontStack::Single(parley::style::FontFamily::Named(
+                std::borrow::Cow::Owned(family.to_string()),
+            ))
+        };
+        self.editor
+            .edit_styles()
+            .insert(StyleProperty::FontStack(family_stack));
     }
 
     /// Set layout width (for line wrapping).
@@ -417,9 +468,15 @@ impl Editor {
                 });
 
                 // Draw glyphs with Vello - use stored text_color
+                let peniko_color = Color::from_rgba8(
+                    self.text_color[0],
+                    self.text_color[1],
+                    self.text_color[2],
+                    self.text_color[3],
+                );
                 scene
                     .draw_glyphs(font)
-                    .brush(Brush::Solid(self.text_color))
+                    .brush(Brush::Solid(peniko_color))
                     .hint(true)
                     .transform(transform)
                     .font_size(font_size)

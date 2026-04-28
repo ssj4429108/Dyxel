@@ -19,6 +19,7 @@ bytemuck = "1.12"
 parley.workspace = true
 swash = { version = "0.2", features = ["scale"] }
 rustc-hash = "2"
+raw-window-handle = "0.6"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["sync"] }
@@ -26,6 +27,8 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["sync"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement"] }
 
 [build-dependencies]
 naga = { version = "27.0.3", features = ["wgsl-in", "spv-out"] }

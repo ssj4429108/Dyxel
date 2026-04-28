@@ -51,6 +51,7 @@ impl Drop for PooledTexture {
 
 // Internal message for returning textures to pool
 struct TextureReturn {
+    #[allow(dead_code)]
     size: (u32, u32),
     format: wgpu::TextureFormat,
     texture: wgpu::Texture,
@@ -268,6 +269,7 @@ pub struct TextureId(pub u32);
 /// This is a thin wrapper around `TexturePool` that maps stable `TextureId`
 /// handles to acquired `PooledTexture` entries.
 pub struct GpuTexturePool {
+    #[allow(dead_code)]
     device: Arc<wgpu::Device>,
     inner: TexturePool,
     next_id: u32,

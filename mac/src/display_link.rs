@@ -14,6 +14,7 @@ type CVReturn = i32;
 #[allow(non_camel_case_types)]
 type CVOptionFlags = u64;
 
+#[allow(non_upper_case_globals)]
 const kCVReturnSuccess: CVReturn = 0;
 
 #[repr(C)]
@@ -146,18 +147,37 @@ impl MacVBlankWaiter {
 
 impl VBlankWaiter for MacVBlankWaiter {
     fn wait_for_vblank(&self) {
-        let mut last = self.last_counter.lock().unwrap();
+        let last = self.last_counter.lock().unwrap();
         // Wait for a VBlank that fires *after* this call starts.
         // This prevents us from "catching up" to stale VBlanks that fired
         // while the render thread was busy with the previous frame.
         let start_counter = self.state.counter.load(Ordering::SeqCst);
         let target = start_counter + 1;
-        last = self
+        let timeout = std::time::Duration::from_millis(100);
+        let result = self
             .state
             .condvar
-            .wait_while(last, |l| self.state.counter.load(Ordering::SeqCst) < target)
-            .unwrap();
-        *last = target;
+            .wait_timeout_while(last, timeout, |_l| {
+                self.state.counter.load(Ordering::SeqCst) < target
+            });
+        match result {
+            Ok((mut guard, timeout_result)) => {
+                let reached = self.state.counter.load(Ordering::SeqCst) >= target;
+                if timeout_result.timed_out() || !reached {
+                    log::warn!(
+                        "MacVBlankWaiter: condvar timed out after {:?} (counter={} target={}). CVDisplayLink may be stalled.",
+                        timeout,
+                        self.state.counter.load(Ordering::SeqCst),
+                        target
+                    );
+                }
+                *guard = self.state.counter.load(Ordering::SeqCst);
+            }
+            Err(poisoned) => {
+                log::error!("MacVBlankWaiter: last_counter mutex poisoned");
+                let _ = poisoned.into_inner();
+            }
+        }
     }
 }
 

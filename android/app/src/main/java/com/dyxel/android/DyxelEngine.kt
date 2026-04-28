@@ -10,6 +10,7 @@ class DyxelEngine {
     private var enginePrepared = false
 
     fun setup(context: android.content.Context) {
+        host.setDefaultGraphicsFactory()
 
         val dataDir = context.filesDir.absolutePath
         

@@ -19,10 +19,8 @@ fn get_tx_processor() -> &'static Mutex<TransactionProcessor> {
 }
 
 /// Global handler registry for gesture handlers
-#[cfg(not(target_arch = "wasm32"))]
 static HANDLER_REGISTRY: OnceLock<Mutex<HandlerRegistry>> = OnceLock::new();
 
-#[cfg(not(target_arch = "wasm32"))]
 pub fn get_handler_registry() -> &'static Mutex<HandlerRegistry> {
     HANDLER_REGISTRY.get_or_init(|| Mutex::new(HandlerRegistry::new()))
 }
@@ -34,14 +32,12 @@ pub fn is_render_needed(state: &SharedState) -> bool {
 }
 
 /// Clear dirty tracker after render
-#[cfg(not(target_arch = "wasm32"))]
 pub fn clear_dirty_tracker(state: &mut SharedState) {
     state.dirty_tracker.clear();
 }
 
 /// Mark all nodes as dirty after layout computation
 /// Called by Render thread after compute_layout to ensure Logic thread syncs layout to WASM
-#[cfg(not(target_arch = "wasm32"))]
 pub fn mark_all_nodes_dirty(state: &mut SharedState, node_ids: &[u32]) {
     for &id in node_ids {
         state.dirty_tracker.mark_dirty(id, DirtyField::Layout);
@@ -866,7 +862,9 @@ fn process_command_stream_with_tx(
                         for cmd in &commands {
                             apply_staged_command(state, cmd, &mut ctx);
                             if cmd.dirty_fields != DirtyField::None {
-                                state.dirty_tracker.mark_dirty(cmd.node_id, cmd.dirty_fields);
+                                state
+                                    .dirty_tracker
+                                    .mark_dirty(cmd.node_id, cmd.dirty_fields);
                             }
                         }
                     } else {

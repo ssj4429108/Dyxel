@@ -41,10 +41,11 @@ cp target/wasm32-unknown-unknown/release/sample.wasm "$ASSETS_DIR/guest.wasm"
 echo "Guest WASM copied to assets."
 
 echo "--- 2. Building Native Host (Android $TARGET_ARCH) ---"
-# Use cargo-ndk for cross-compilation, with 16KB page size alignment support
-# Build target changed to dyxel-core, explicitly enable vello and wasm3-support features
+# Use cargo-ndk for cross-compilation, with 16KB page size alignment support.
+# `vello` backend selection moved out of `dyxel-core`; Android now configures
+# the default graphics factory at runtime.
 RUSTFLAGS="-C link-arg=-z -C link-arg=max-page-size=16384" \
-cargo ndk -t "$TARGET_ARCH" -P "$API_LEVEL" -o "$JNI_LIBS_DIR" build -p dyxel-core --release --features vello,wasm3-support
+cargo ndk -t "$TARGET_ARCH" -P "$API_LEVEL" -o "$JNI_LIBS_DIR" build -p dyxel-core --release --features wasm3-support
 
 echo "--- 3. Generating UniFFI Kotlin Bindings ---"
 # Get the compiled .so path (generated from dyxel-core)

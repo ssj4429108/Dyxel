@@ -2,29 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use std::collections::HashMap;
-use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use tokio::sync::Notify;
 
-use crate::engine::{LogicState, RenderState, setup_engine};
-use crate::frame_scheduler::{SchedulerEvent};
+use crate::engine::{setup_engine, LogicState, RenderState};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::frame_scheduler::SchedulerEvent;
 use crate::platform::{SafeWindowHandle, SurfaceId};
 use crate::render_mailbox::RenderMailbox;
-use crate::renderer::{render_frame_with_package, runtime_prepare};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::renderer::runtime_prepare;
 use crate::state::SharedState;
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
-use dyxel_render_api::{DeviceHandle, QueueHandle, SharedMutex, SharedPtr};
-#[cfg(not(target_arch = "wasm32"))]
-use dyxel_render_vello::VelloBackend;
+use dyxel_render_api::{GraphicsRuntime, RuntimeSurfaceId, SharedMutex, SharedPtr};
 
 #[cfg(not(target_arch = "wasm32"))]
 const LOGIC_FRAME_WAIT_TIMEOUT: Duration = Duration::from_millis(33);
@@ -37,22 +36,25 @@ fn wait_for_render_or_vsync(render_complete_rx: &mpsc::Receiver<()>) {
 
 #[cfg(not(target_arch = "wasm32"))]
 static INPUT_BATCH_COUNTER: AtomicU64 = AtomicU64::new(1);
+#[cfg(not(target_arch = "wasm32"))]
+static LOGIC_SLOW_DIAG_COUNTER: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_arch = "wasm32"))]
+const LOGIC_DIAG_SAMPLE_EVERY_N: u64 = 60;
+#[cfg(not(target_arch = "wasm32"))]
+const LOGIC_DIAG_SAMPLE_THRESHOLD_MS: f64 = 8.0;
+#[cfg(not(target_arch = "wasm32"))]
+const LOGIC_DIAG_ALWAYS_THRESHOLD_MS: f64 = 16.0;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn next_input_batch_id() -> u64 {
     INPUT_BATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)]
-fn render_needs_retry(render_state: &RenderState) -> bool {
-    render_state
-        .backend
-        .as_any()
-        .downcast_ref::<VelloBackend>()
-        .map(|backend| backend.is_renderer_loading() && !backend.is_renderer_ready())
-        .unwrap_or(false)
-}
+/// Global graphics factory storage. Uniffi cannot handle `Box<dyn Trait>` in
+/// struct fields, so we store it in a module-level static instead.
+/// Platforms MUST call `DyxelHost::set_graphics_factory` before `prepare_engine`.
+static GRAPHICS_FACTORY: StdMutex<Option<Box<dyn dyxel_render_api::GraphicsRuntimeFactory>>> =
+    StdMutex::new(None);
 
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
@@ -112,7 +114,10 @@ pub enum LogicMessage {
     /// Cadence info update from scheduler (display_hz, divisor, effective_hz).
     CadenceUpdated(crate::cadence::CadenceInfo),
     LoadWasm(String),
-    Resize { width: u32, height: u32 },
+    Resize {
+        width: u32,
+        height: u32,
+    },
     Pause,
     Resume,
     Shutdown,
@@ -121,11 +126,10 @@ pub enum LogicMessage {
 #[cfg(not(target_arch = "wasm32"))]
 pub enum RenderMessage {
     SetReady(RenderState),
+    /// Phase 3B: surface is created on the main thread via GraphicsRuntime::create_surface.
+    /// RenderThread only stores the RuntimeSurfaceId and uses it for begin_frame.
     CreateSurface {
-        target: Option<dyxel_render_api::SurfaceTargetHandle>,
-        surface: Option<dyxel_render_api::SurfaceHandle>,
-        width: u32,
-        height: u32,
+        surface_id: RuntimeSurfaceId,
         nid: u64,
     },
     SetSurfaceActive(SurfaceId),
@@ -621,7 +625,8 @@ pub struct DyxelHost {
     #[cfg(not(target_arch = "wasm32"))]
     render_tx: StdMutex<Option<mpsc::Sender<RenderMessage>>>,
     #[cfg(not(target_arch = "wasm32"))]
-    render_cmd_tx: StdMutex<Option<crossbeam_channel::Sender<crate::frame_scheduler::RenderCommand>>>,
+    render_cmd_tx:
+        StdMutex<Option<crossbeam_channel::Sender<crate::frame_scheduler::RenderCommand>>>,
     #[cfg(not(target_arch = "wasm32"))]
     scheduler_tx: StdMutex<Option<crossbeam_channel::Sender<SchedulerEvent>>>,
     /// Thread-safe input event queue. Input source pushes here; logic worker
@@ -646,10 +651,17 @@ pub struct DyxelHost {
     pub surfaces: SharedPtr<SharedMutex<HashMap<u64, Box<dyn dyxel_render_api::SurfaceState>>>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub first_frame_rendered: std::sync::atomic::AtomicBool,
-    // Opaque instance storage (wgpu::Instance for Vello backend)
-    // Stored as Box<dyn Any> to avoid exposing wgpu types
+    /// New double-layer runtime, shared with RenderState on the render thread.
+    /// Used by main thread for surface creation (macOS Metal requires main thread).
     #[cfg(not(target_arch = "wasm32"))]
-    instance: StdMutex<Option<Box<dyn std::any::Any + Send + Sync>>>,
+    runtime: StdMutex<Option<Arc<StdMutex<Box<dyn GraphicsRuntime>>>>>,
+    /// Maps native surface nid → RuntimeSurfaceId for the new double-layer path.
+    #[cfg(not(target_arch = "wasm32"))]
+    surface_id_map: SharedPtr<SharedMutex<HashMap<u64, RuntimeSurfaceId>>>,
+    /// Platform-native window handle (Android ANativeWindow, etc.).
+    /// Must be kept alive for the lifetime of the GPU surface.
+    #[cfg(not(target_arch = "wasm32"))]
+    window_handle: StdMutex<Option<SharedPtr<SafeWindowHandle>>>,
     // Shared state - used directly in WASM builds, managed by threads in native builds
     shared_state: SharedPtr<SharedMutex<SharedState>>,
 }
@@ -682,7 +694,8 @@ impl DyxelHost {
         #[cfg(not(target_arch = "wasm32"))]
         let (scheduler_tx, scheduler_rx) = crossbeam_channel::unbounded::<SchedulerEvent>();
         #[cfg(not(target_arch = "wasm32"))]
-        let (render_cmd_tx, render_cmd_rx) = crossbeam_channel::unbounded::<crate::frame_scheduler::RenderCommand>();
+        let (render_cmd_tx, render_cmd_rx) =
+            crossbeam_channel::unbounded::<crate::frame_scheduler::RenderCommand>();
 
         #[cfg(not(target_arch = "wasm32"))]
         let vblank_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -690,7 +703,9 @@ impl DyxelHost {
         // Shared input queue: Input source pushes events here; scheduler dispatches
         // logic work via ProcessPendingInput.
         #[cfg(not(target_arch = "wasm32"))]
-        let input_queue = Arc::new(StdMutex::new(std::collections::VecDeque::<InputEvent>::new()));
+        let input_queue = Arc::new(StdMutex::new(
+            std::collections::VecDeque::<InputEvent>::new(),
+        ));
 
         // Display refresh rate: defaults to 60.0 until platform layer reports
         // the real rate via notify_surface_changed.
@@ -700,12 +715,16 @@ impl DyxelHost {
         // Shared frame performance stats: scheduler writes ui_fps/target_fps/jank,
         // render thread writes raster_fps.
         #[cfg(not(target_arch = "wasm32"))]
-        let frame_perf_state = Arc::new(StdMutex::new(dyxel_perf::FramePerformanceStats::default()));
+        let frame_perf_state =
+            Arc::new(StdMutex::new(dyxel_perf::FramePerformanceStats::default()));
 
         // Clone logic_tx before it is moved into Self so the scheduler can
         // dispatch ProcessPendingInput to the logic worker.
         #[cfg(not(target_arch = "wasm32"))]
         let logic_tx_for_scheduler = logic_tx.clone();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let surface_id_map = SharedPtr::new(SharedMutex::new(HashMap::new()));
 
         let host = SharedPtr::new(Self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -732,7 +751,11 @@ impl DyxelHost {
             #[cfg(not(target_arch = "wasm32"))]
             first_frame_rendered: std::sync::atomic::AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
-            instance: StdMutex::new(None),
+            runtime: StdMutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            surface_id_map: surface_id_map.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            window_handle: StdMutex::new(None),
             shared_state: shared_state.clone(),
         });
 
@@ -845,7 +868,14 @@ impl DyxelHost {
                             log::debug!("LogicThread: Committed epoch={} nodes={} viewport={:?} did_layout={}", epoch, node_count, viewport, did_layout);
 
                             let logic_time_ms = logic_tick_start.elapsed().as_secs_f64() * 1000.0;
-                            if logic_time_ms > 8.0 {
+                            let should_log_logic_diag =
+                                logic_time_ms >= LOGIC_DIAG_ALWAYS_THRESHOLD_MS
+                                    || (logic_time_ms >= LOGIC_DIAG_SAMPLE_THRESHOLD_MS
+                                        && LOGIC_SLOW_DIAG_COUNTER
+                                            .fetch_add(1, Ordering::Relaxed)
+                                            % LOGIC_DIAG_SAMPLE_EVERY_N
+                                            == 0);
+                            if should_log_logic_diag {
                                 log::info!(
                                     "DIAG LogicTime={:.2}ms GuestTick={:.2}ms ProcessCommands={:.2}ms SyncLayout={:.2}ms RuntimePrepare={:.2}ms",
                                     logic_time_ms,
@@ -903,11 +933,9 @@ impl DyxelHost {
                                             drained = true;
                                             process_input_internal(l, event);
                                         }
-                                        if drained {
-                                            tick_and_commit(l);
-                                        } else {
-                                            log::trace!("LogicThread: ProcessPendingInput but queue empty");
-                                        }
+                                        // Always tick: reactive tasks (spawned futures, timers,
+                                        // signals) may have work even when the input queue is empty.
+                                        tick_and_commit(l);
                                     }
                                 }
                                 LogicMessage::CadenceUpdated(info) => {
@@ -960,8 +988,9 @@ impl DyxelHost {
                 .expect("Failed to spawn LogicThread");
 
             // 2. Render Thread (Rasterizer)
-            let surfaces_ptr = surfaces.clone();
+            let _surfaces_ptr = surfaces.clone();
             let active_surface_ptr = active_surface_id.clone();
+            let surface_id_map_ptr = surface_id_map.clone();
             let notify_ptr = engine_ready_notify.clone();
             let render_complete_tx = render_complete_tx.clone(); // VSync signal sender
             let is_rendering_for_render = is_rendering.clone();
@@ -982,6 +1011,7 @@ impl DyxelHost {
                     // thread and track its shutdown flag here.
                     let mut hardware_vblank_shutdown: Option<Arc<std::sync::atomic::AtomicBool>> = None;
                     let mut raster_frame_buffer = dyxel_perf::EventRateBuffer::new(60);
+                    let mut continuous_render = false;
 
                     loop {
                         // Phase 1: Drain all pending control messages
@@ -996,8 +1026,9 @@ impl DyxelHost {
                                 // These two messages are legacy pacing controls.
                                 // Cadence is now owned by FrameScheduler; render thread
                                 // simply consumes FrameTokens as they arrive.
-                                RenderMessage::SetContinuousRender(_) => {
-                                    log::trace!("RenderThread: SetContinuousRender is deprecated (scheduler owns cadence)");
+                                RenderMessage::SetContinuousRender(enabled) => {
+                                    continuous_render = enabled;
+                                    log::info!("RenderThread: continuous_render={}", enabled);
                                 }
                                 RenderMessage::SetTargetFPS(fps) => {
                                     log::trace!("RenderThread: SetTargetFPS({}) is deprecated (scheduler owns cadence)", fps);
@@ -1020,14 +1051,29 @@ impl DyxelHost {
                                     thread::Builder::new()
                                         .name("DyxelVBlankHW".into())
                                         .spawn(move || {
+                                            let mut vblank_count: u64 = 0;
+                                            let mut last_vblank_at: Option<std::time::Instant> = None;
                                             while !shutdown_clone.load(Ordering::Relaxed) {
                                                 waiter.wait_for_vblank();
                                                 if shutdown_clone.load(Ordering::Relaxed) {
                                                     break;
                                                 }
+                                                let now = std::time::Instant::now();
+                                                vblank_count += 1;
+                                                if let Some(last) = last_vblank_at {
+                                                    let interval_ms = now.duration_since(last).as_secs_f64() * 1000.0;
+                                                    if vblank_count % 60 == 0 {
+                                                        log::info!(
+                                                            "[DIAG] VBlankHW tick={} interval={:.2}ms",
+                                                            vblank_count,
+                                                            interval_ms,
+                                                        );
+                                                    }
+                                                }
+                                                last_vblank_at = Some(now);
                                                 let hz = *display_hz.lock().unwrap();
                                                 let _ = scheduler_tx.send(SchedulerEvent::VBlank {
-                                                    timestamp: std::time::Instant::now(),
+                                                    timestamp: now,
                                                     refresh_hz: hz,
                                                 });
                                             }
@@ -1053,44 +1099,22 @@ impl DyxelHost {
                                     lifecycle = Lifecycle::Running;
                                     notify_ptr.notify();
                                 }
-                                RenderMessage::CreateSurface {
-                                    target,
-                                    surface,
-                                    width,
-                                    height,
-                                    nid,
-                                } => {
+                                RenderMessage::CreateSurface { surface_id, nid } => {
                                     log::info!(
-                                        "RenderThread: Creating surface id: {}, size: {}x{}, render_opt is_none: {}",
+                                        "RenderThread: Registering surface id: {}, runtime_surface_id: {:?}, render_opt is_none: {}",
                                         nid,
-                                        width,
-                                        height,
+                                        surface_id,
                                         render_opt.is_none()
                                     );
-                                    if let Some(ref mut r) = render_opt {
-                                        match r.backend.create_surface_state(
-                                            &mut r.context,
-                                            target,
-                                            surface,
-                                            0,
-                                            width,
-                                            height,
-                                        ) {
-                                            Ok(ss) => {
-                                                log::info!(
-                                                    "RenderThread: Surface created successfully"
-                                                );
-                                                surfaces_ptr.lock_guard().unwrap().insert(nid, ss);
-                                                *active_surface_ptr.lock_guard().unwrap() =
-                                                    Some(SurfaceId(nid));
-                                                lifecycle = Lifecycle::Running;
-                                            }
-                                            Err(e) => log::error!(
-                                                "RenderThread: Failed to create surface: {}",
-                                                e
-                                            ),
-                                        }
-                                    }
+                                    surface_id_map_ptr.lock_guard().unwrap().insert(nid, surface_id);
+                                    *active_surface_ptr.lock_guard().unwrap() =
+                                        Some(SurfaceId(nid));
+                                    lifecycle = Lifecycle::Running;
+                                    // If the first logic commit happened before the native
+                                    // surface was registered, the scheduler may be Idle/Armed
+                                    // with no further input. Nudge logic once so the first
+                                    // drawable frame is always produced after surface creation.
+                                    let _ = scheduler_tx_for_render.send(SchedulerEvent::InputArrived(0));
                                 }
                                 RenderMessage::SetSurfaceActive(sid) => {
 
@@ -1100,13 +1124,9 @@ impl DyxelHost {
                                 RenderMessage::Suspend(ack) => {
                                     lifecycle = Lifecycle::Stopped;
                                     if let Some(ref r) = render_opt {
-                                        // Downcast context to get device and queue
-                                        if let Some(v_ctx) = r.context.downcast_ref::<vello::util::RenderContext>() {
-                                            let dev = &v_ctx.devices[0].device;
-                                            let queue = &v_ctx.devices[0].queue;
-                                            let dev_handle = DeviceHandle::new(dev);
-                                            let queue_handle = QueueHandle::new(queue);
-                                            r.backend.sync_gpu(dev_handle, queue_handle);
+                                        if let Some(ref runtime_arc) = r.runtime {
+                                            let mut runtime = runtime_arc.lock().unwrap();
+                                            let _ = runtime.sync_gpu();
                                         }
                                     }
                                     let _ = ack.send(());
@@ -1137,9 +1157,12 @@ impl DyxelHost {
                                 active_id
                             );
                             if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
-                                let mut surfs = surfaces_ptr.lock_guard().unwrap();
-                                if let Some(s) = surfs.get_mut(&id.0) {
-                                    s.resize(&mut r.context, width, height);
+                                let sid_map = surface_id_map_ptr.lock_guard().unwrap();
+                                if let Some(surface_id) = sid_map.get(&id.0) {
+                                    if let Some(ref runtime_arc) = r.runtime {
+                                        let mut runtime = runtime_arc.lock().unwrap();
+                                        let _ = runtime.resize_surface(*surface_id, width, height);
+                                    }
                                 }
                             }
                         }
@@ -1149,10 +1172,14 @@ impl DyxelHost {
                             match render_cmd_rx.recv_timeout(Duration::from_millis(16)) {
                                 Ok(crate::frame_scheduler::RenderCommand::Render(token)) => {
                                     log::debug!("RenderThread: Received RenderCommand frame_id={} epoch={}", token.frame_id, token.epoch);
-                                    let now = std::time::Instant::now();
+                                    let token_receive_time = std::time::Instant::now();
+                                    let token_latency_ms = token_receive_time.duration_since(token.vblank_at).as_secs_f64() * 1000.0;
+                                    if token.frame_id % 20 == 0 {
+                                        log::info!("[DIAG] RenderThread token_latency={:.2}ms frame_id={}", token_latency_ms, token.frame_id);
+                                    }
                                     let frame_interval_ms = LAST_PRESENT_TIME.with(|t| {
-                                        let interval = t.get().map(|last| now.duration_since(last).as_secs_f64() * 1000.0).unwrap_or(0.0);
-                                        t.set(Some(now));
+                                        let interval = t.get().map(|last| token_receive_time.duration_since(last).as_secs_f64() * 1000.0).unwrap_or(0.0);
+                                        t.set(Some(token_receive_time));
                                         interval
                                     });
 
@@ -1164,29 +1191,64 @@ impl DyxelHost {
                                     // stays in Rendering state forever and never issues
                                     // another token.
                                     let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderStarted { frame_id: token.frame_id, epoch: token.epoch });
+
+                                    // In continuous render mode, feed synthetic input
+                                    // immediately so logic can overlap with render.
+                                    if continuous_render {
+                                        let _ = scheduler_tx_for_render.send(SchedulerEvent::InputArrived(0));
+                                    }
+
                                     let mut frame_time_ms = 0.0f32;
                                     let mut did_present = false;
+                                    let render_start = std::time::Instant::now();
                                     if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
-                                        let mut surfs = surfaces_ptr.lock_guard().unwrap();
-                                        if let Some(s) = surfs.get_mut(&id.0) {
-                                            log::trace!("RenderThread: Rendering frame for surface {:?}", id);
-                                            r.backend.set_frame_timing(0.0, frame_interval_ms);
-                                            if let Ok(perf) = frame_perf_state_for_render.lock() {
-                                                r.backend.set_frame_performance_stats(*perf);
-                                            }
+                                        let sid_map = surface_id_map_ptr.lock_guard().unwrap();
+                                        if let Some(surface_id) = sid_map.get(&id.0) {
+                                            log::trace!("RenderThread: Rendering frame for surface {:?} runtime_surface_id={:?}", id, surface_id);
                                             let (epoch, package) = mailbox_for_render.snapshot();
                                             log::debug!("RenderThread: Rendering epoch={} (token epoch={}) nodes={} viewport={:?}", epoch, token.epoch, package.nodes.len(), package.viewport);
-                                            let render_start = std::time::Instant::now();
-                                            render_frame_with_package(r, s.as_mut(), &package);
-                                            frame_time_ms = render_start.elapsed().as_secs_f32() * 1000.0;
+                                            let perf_stats = frame_perf_state_for_render
+                                                .lock()
+                                                .ok()
+                                                .map(|perf| *perf);
+                                            let render_timings = crate::renderer::render_frame_with_package(
+                                                r,
+                                                *surface_id,
+                                                &package,
+                                                Some((0.0, frame_interval_ms)),
+                                                perf_stats,
+                                            );
+                                            frame_time_ms = render_timings
+                                                .map(|t| {
+                                                    // Surface acquire/present wait is display/driver pacing, not
+                                                    // backend rendering workload. Counting it in the cadence
+                                                    // governor makes Android Mailbox present spikes look like blur
+                                                    // render jank and can incorrectly drop the target to 30Hz.
+                                                    #[cfg(any(target_os = "macos", target_os = "android"))]
+                                                    {
+                                                        t.backend_ms as f32
+                                                    }
+                                                    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+                                                    {
+                                                        (t.backend_ms + t.end_ms) as f32
+                                                    }
+                                                })
+                                                .unwrap_or_else(|| render_start.elapsed().as_secs_f32() * 1000.0);
                                             did_present = true;
                                             // Legacy: also signal logic thread (to be removed in Task 6)
                                             let _ = render_complete_tx.send(());
                                         } else {
-                                            log::warn!("RenderThread: Active surface {:?} not found in map", id);
+                                            log::warn!("RenderThread: Active surface {:?} not found in surface_id_map", id);
                                         }
                                     } else {
                                         log::trace!("RenderThread: Draw ignored (no active surface or no render_opt)");
+                                    }
+                                    let render_completed_time = std::time::Instant::now();
+                                    let setup_ms = render_start.duration_since(token_receive_time).as_secs_f64() * 1000.0;
+                                    let cleanup_ms = render_completed_time.duration_since(render_start).as_secs_f64() * 1000.0 - frame_time_ms as f64;
+                                    let total_pipeline_ms = render_completed_time.duration_since(token_receive_time).as_secs_f64() * 1000.0;
+                                    if token.frame_id % 20 == 0 {
+                                        log::info!("[DIAG] RenderThread pipeline frame_id={} setup={:.2}ms render={:.2}ms cleanup={:.2}ms total={:.2}ms", token.frame_id, setup_ms, frame_time_ms, cleanup_ms, total_pipeline_ms);
                                     }
                                     let stats = crate::FrameStats {
                                         frame_time_ms,
@@ -1253,6 +1315,8 @@ impl DyxelHost {
                 thread::Builder::new()
                     .name("DyxelVBlankEmu".into())
                     .spawn(move || {
+                        let mut tick_count: u64 = 0;
+                        let mut last_tick_at: Option<std::time::Instant> = None;
                         while !shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
                             let hz = *display_hz_for_vblank.lock().unwrap();
                             let interval = Duration::from_secs_f64(1.0 / hz);
@@ -1260,8 +1324,23 @@ impl DyxelHost {
                             if shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
                                 break;
                             }
+                            let now = std::time::Instant::now();
+                            tick_count += 1;
+                            if let Some(last) = last_tick_at {
+                                let tick_interval_ms =
+                                    now.duration_since(last).as_secs_f64() * 1000.0;
+                                if tick_count % 60 == 0 {
+                                    log::info!(
+                                        "[DIAG] VBlankEmu tick={} target_hz={:.2} interval={:.2}ms",
+                                        tick_count,
+                                        hz,
+                                        tick_interval_ms,
+                                    );
+                                }
+                            }
+                            last_tick_at = Some(now);
                             let _ = scheduler_tx_for_vblank.send(SchedulerEvent::VBlank {
-                                timestamp: std::time::Instant::now(),
+                                timestamp: now,
                                 refresh_hz: hz,
                             });
                         }
@@ -1282,15 +1361,35 @@ impl DyxelHost {
             *status = EngineStatus::Loading;
         }
 
-        match setup_engine(ddir).await {
-            Ok((logic, render)) => {
+        let factory = {
+            let mut guard = GRAPHICS_FACTORY.lock().unwrap();
+            match guard.take() {
+                Some(f) => f,
+                None => {
+                    log::error!(
+                        "DyxelHost: No graphics factory set. \
+                         Platforms MUST call host.set_graphics_factory() before prepare_engine(). \
+                         See design doc §5.2 / §6.1."
+                    );
+                    let mut status = self.engine_status.lock_sync();
+                    *status = EngineStatus::Error("No graphics factory configured".to_string());
+                    self.engine_ready_notify.notify();
+                    return;
+                }
+            }
+        };
+
+        match setup_engine(ddir, factory).await {
+            Ok((logic, mut render)) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    // Store instance for main-thread surface creation
-                    // Downcast RenderContext to get Vello's instance
-                    if let Some(v_ctx) = render.context.downcast_ref::<vello::util::RenderContext>()
-                    {
-                        *self.instance.lock().unwrap() = Some(Box::new(v_ctx.instance.clone()));
+                    // Extract the shared runtime so DyxelHost (main thread) can create
+                    // surfaces. RenderState on the render thread also needs it for
+                    // begin_frame / end_frame, so we put it back after cloning.
+                    if let Some(runtime_arc) = render.runtime.take() {
+                        let runtime_for_host = runtime_arc.clone();
+                        *self.runtime.lock().unwrap() = Some(runtime_for_host);
+                        render.runtime = Some(runtime_arc);
                     }
 
                     if let Some(tx) = &*self.logic_tx.lock().unwrap() {
@@ -1337,12 +1436,15 @@ impl DyxelHost {
             let batch_id = next_input_batch_id();
             // Queue input event and notify scheduler. Scheduler is the sole
             // orchestrator — it will dispatch ProcessPendingInput to logic.
-            self.input_queue.lock().unwrap().push_back(InputEvent::PointerDown {
-                pointer_id,
-                x,
-                y,
-                pressure,
-            });
+            self.input_queue
+                .lock()
+                .unwrap()
+                .push_back(InputEvent::PointerDown {
+                    pointer_id,
+                    x,
+                    y,
+                    pressure,
+                });
             if let Ok(lock) = self.scheduler_tx.lock() {
                 if let Some(ref tx) = *lock {
                     let _ = tx.send(SchedulerEvent::InputArrived(batch_id));
@@ -1362,11 +1464,10 @@ impl DyxelHost {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let batch_id = next_input_batch_id();
-            self.input_queue.lock().unwrap().push_back(InputEvent::PointerMove {
-                pointer_id,
-                x,
-                y,
-            });
+            self.input_queue
+                .lock()
+                .unwrap()
+                .push_back(InputEvent::PointerMove { pointer_id, x, y });
             if let Ok(lock) = self.scheduler_tx.lock() {
                 if let Some(ref tx) = *lock {
                     let _ = tx.send(SchedulerEvent::InputArrived(batch_id));
@@ -1386,11 +1487,10 @@ impl DyxelHost {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let batch_id = next_input_batch_id();
-            self.input_queue.lock().unwrap().push_back(InputEvent::PointerUp {
-                pointer_id,
-                x,
-                y,
-            });
+            self.input_queue
+                .lock()
+                .unwrap()
+                .push_back(InputEvent::PointerUp { pointer_id, x, y });
             if let Ok(lock) = self.scheduler_tx.lock() {
                 if let Some(ref tx) = *lock {
                     let _ = tx.send(SchedulerEvent::InputArrived(batch_id));
@@ -1410,7 +1510,10 @@ impl DyxelHost {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let batch_id = next_input_batch_id();
-            self.input_queue.lock().unwrap().push_back(InputEvent::PointerCancel);
+            self.input_queue
+                .lock()
+                .unwrap()
+                .push_back(InputEvent::PointerCancel);
             if let Ok(lock) = self.scheduler_tx.lock() {
                 if let Some(ref tx) = *lock {
                     let _ = tx.send(SchedulerEvent::InputArrived(batch_id));
@@ -1462,12 +1565,18 @@ impl DyxelHost {
         // so logic thread knows the viewport before first tick
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            let _ = tx.send(LogicMessage::Resize { width: _w, height: _h });
+            let _ = tx.send(LogicMessage::Resize {
+                width: _w,
+                height: _h,
+            });
         }
 
         #[cfg(target_os = "android")]
         {
-            self.set_continuous_render(false);
+            // Enable continuous render to drive self-animating content.
+            // Without this, the render thread only runs on user input and
+            // self-driven animations freeze after the first frame.
+            self.set_continuous_render(true);
             self.set_target_fps(60.0);
             let waiter = crate::android_vblank::AndroidVBlankWaiter::new();
             if let Ok(lock) = self.scheduler_tx.lock() {
@@ -1477,11 +1586,14 @@ impl DyxelHost {
             }
             self.set_vblank_waiter(waiter);
 
+            // Pass the ANativeWindow* directly via NativeSurface::Android.
+            // The runtime converts it to a wgpu surface internally.
+            let native_handle = dyxel_render_api::NativeSurfaceHandle::NativeSurface {
+                kind: dyxel_render_api::NativeSurfaceKind::Android,
+                ptr: _surface_ptr,
+            };
             let sh = SharedPtr::new(SafeWindowHandle::new_android(_surface_ptr));
-            // Create wgpu::SurfaceTarget and wrap it in SurfaceTargetHandle
-            let wgpu_target: vello::wgpu::SurfaceTarget<'static> = sh.clone().into();
-            let target_handle = dyxel_render_api::SurfaceTargetHandle::new(wgpu_target);
-            self.setup(target_handle, _w, _h, Some(sh)).await;
+            self.setup(native_handle, _w, _h, Some(sh)).await;
         }
     }
 
@@ -1510,7 +1622,8 @@ impl DyxelHost {
         #[cfg(not(target_arch = "wasm32"))]
         {
             // Signal the software VBlank emulator to stop first.
-            self.vblank_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.vblank_shutdown
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(tx) = &*self.scheduler_tx.lock().unwrap() {
                 let _ = tx.send(SchedulerEvent::Shutdown);
             }
@@ -1552,6 +1665,14 @@ impl DyxelHost {
             }
         }
     }
+
+    /// Configure the platform-default graphics factory.
+    ///
+    /// Android uses this because UniFFI cannot expose `Box<dyn Trait>`
+    /// parameters to Kotlin. Other platforms can also call it safely.
+    pub fn set_default_graphics_factory(&self) {
+        *GRAPHICS_FACTORY.lock().unwrap() = Some(dyxel_render_bootstrap::create_graphics_factory());
+    }
 }
 
 #[cfg(test)]
@@ -1591,6 +1712,13 @@ impl DyxelHost {
             let _ = &self.shared_state; // Silence unused warning
             None
         }
+    }
+
+    /// Set the graphics runtime factory before calling `prepare_engine`.
+    /// Platforms MUST call this; core no longer contains any built-in backend
+    /// fallback per design doc §5.2.
+    pub fn set_graphics_factory(&self, factory: Box<dyn dyxel_render_api::GraphicsRuntimeFactory>) {
+        *GRAPHICS_FACTORY.lock().unwrap() = Some(factory);
     }
 
     /// Get unified frame performance statistics.
@@ -1638,19 +1766,29 @@ impl DyxelHost {
             }
         }
     }
+}
 
-    /// Setup a surface for rendering
+impl DyxelHost {
+    /// Setup a surface for rendering (Phase 3B+).
     ///
-    /// The target should be a wgpu::SurfaceTarget<'static> wrapped in SurfaceTargetHandle
-    /// (for Vello backend), or None for other backends
+    /// The native_handle is a platform-neutral surface descriptor.
+    /// Surface creation happens on the main thread (required by some GPU APIs like
+    /// Metal), and the resulting RuntimeSurfaceId is forwarded to the render thread.
     pub async fn setup(
         &self,
-        target: dyxel_render_api::SurfaceTargetHandle,
+        native_handle: dyxel_render_api::NativeSurfaceHandle,
         width: u32,
         height: u32,
         _handle: Option<SharedPtr<SafeWindowHandle>>,
     ) {
-        // Fix: Ensure lock is dropped before await to keep Future Send
+        // Keep the platform window handle alive for the lifetime of the GPU surface.
+        // On Android, dropping SafeWindowHandle releases ANativeWindow, which
+        // invalidates the wgpu surface and causes black screen.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(handle) = _handle {
+            *self.window_handle.lock().unwrap() = Some(handle);
+        }
+
         let already_running = {
             let status = self.engine_status.lock_sync();
             matches!(*status, EngineStatus::Running)
@@ -1658,74 +1796,53 @@ impl DyxelHost {
 
         if !already_running {
             self.engine_ready_notify.wait().await;
-        } else {
         }
 
         let nid = self.next_surface_id.fetch_add(1, Ordering::SeqCst);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(tx) = &*self.render_tx.lock().unwrap() {
-            // On macOS/Desktop, create surface on main thread to avoid Metal panic
-            let (target, surface) = if cfg!(any(
-                target_os = "macos",
-                target_os = "windows",
-                target_os = "linux"
-            )) {
-                let inst_lock = self.instance.lock().unwrap();
-                if let Some(instance_any) = inst_lock.as_ref() {
-                    // Downcast to wgpu::Instance for Vello backend
-                    if let Some(instance) = instance_any.downcast_ref::<vello::wgpu::Instance>() {
-                        // Try to downcast target to wgpu::SurfaceTarget
-                        let mut target_opt: Option<dyxel_render_api::SurfaceTargetHandle> =
-                            Some(target);
-                        if let Some(wgpu_target) = target_opt
-                            .take()
-                            .unwrap()
-                            .into_inner::<vello::wgpu::SurfaceTarget<'static>>(
-                        ) {
-                            match instance.create_surface(wgpu_target) {
-                                Ok(s) => (None, Some(dyxel_render_api::SurfaceHandle::new(s))),
-                                Err(e) => {
-                                    log::error!(
-                                        "setup: Failed to create surface on main thread: {}",
-                                        e
-                                    );
-                                    (None, None)
-                                }
-                            }
-                        } else {
-                            (target_opt, None)
-                        }
-                    } else {
-                        (Some(target), None)
+            // Main-thread surface creation (Metal / some wgpu backends require this)
+            let runtime_lock = self.runtime.lock().unwrap();
+            let surface_id = if let Some(ref runtime_arc) = *runtime_lock {
+                let mut runtime = runtime_arc.lock().unwrap();
+                match runtime.create_surface(native_handle, width, height) {
+                    Ok(sid) => Some(sid),
+                    Err(e) => {
+                        log::error!("setup: Failed to create surface on main thread: {}", e);
+                        None
                     }
-                } else {
-                    (Some(target), None)
                 }
             } else {
-                (Some(target), None)
+                log::warn!("setup: GraphicsRuntime not available, deferring surface creation");
+                None
             };
+            drop(runtime_lock);
 
-            match tx.send(RenderMessage::CreateSurface {
-                target,
-                surface,
-                width,
-                height,
-                nid,
-            }) {
-                Ok(_) => (),
-                Err(e) => log::error!("setup: Failed to send CreateSurface: {:?}", e),
+            if let Some(sid) = surface_id {
+                // Store locally so main thread knows about it too
+                self.surface_id_map.lock_guard().unwrap().insert(nid, sid);
+                match tx.send(RenderMessage::CreateSurface {
+                    surface_id: sid,
+                    nid,
+                }) {
+                    Ok(_) => (),
+                    Err(e) => log::error!("setup: Failed to send CreateSurface: {:?}", e),
+                }
             }
             // Scheduler bridge will issue FrameToken after surface is ready
         }
 
-        // Inform logic thread of initial viewport size
-        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            let _ = tx.send(LogicMessage::Resize { width, height });
-        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Inform logic thread of initial viewport size
+            if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+                let _ = tx.send(LogicMessage::Resize { width, height });
+            }
 
-        // Resume LogicThread if it was paused (e.g., after Back button/activity restart)
-        if let Some(tx) = &*self.logic_tx.lock().unwrap() {
-            let _ = tx.send(LogicMessage::Resume);
+            // Resume LogicThread if it was paused (e.g., after Back button/activity restart)
+            if let Some(tx) = &*self.logic_tx.lock().unwrap() {
+                let _ = tx.send(LogicMessage::Resume);
+            }
         }
     }
 }

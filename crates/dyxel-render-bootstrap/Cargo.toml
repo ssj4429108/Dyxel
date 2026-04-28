@@ -1,0 +1,15 @@
+[package]
+name = "dyxel-render-bootstrap"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["vello"]
+vello = ["dep:dyxel-render-vello"]
+impeller = ["dep:dyxel-render-impeller"]
+skia = []
+
+[dependencies]
+dyxel-render-api = { path = "../dyxel-render-api" }
+dyxel-render-vello = { path = "../dyxel-render-vello", optional = true }
+dyxel-render-impeller = { path = "../dyxel-render-impeller", optional = true }

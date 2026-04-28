@@ -15,6 +15,10 @@ struct OverlayUniforms {
     view_width: f32,
     view_height: f32,
     color_mode: f32,
+    source_x: f32,
+    source_y: f32,
+    source_width: f32,
+    source_height: f32,
 }
 
 @group(0) @binding(0) var t_blur: texture_2d<f32>;
@@ -53,8 +57,21 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample the blur texture
-    let blur_color = textureSample(t_blur, s_blur, in.uv);
+    // For backdrop blur quads, binding 0 is the full-screen blurred backdrop.
+    // source_width/source_height > 0 marks this mode. Cached subtrees and
+    // children use local texture sampling and leave source size at zero.
+    var sample_uv = in.uv;
+    if (overlay.source_width > 0.0 && overlay.source_height > 0.0) {
+        let padding = (overlay.view_width - overlay.source_width) * 0.5;
+        let dims_u = textureDimensions(t_blur);
+        let dims = vec2<f32>(f32(dims_u.x), f32(dims_u.y));
+        let screen_px = vec2<f32>(
+            overlay.source_x - padding + in.local_pos.x,
+            overlay.source_y - padding + in.local_pos.y
+        );
+        sample_uv = clamp(screen_px / dims, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    }
+    let blur_color = textureSample(t_blur, s_blur, sample_uv);
 
     // Apply rounded corner alpha
     let size = vec2<f32>(overlay.view_width, overlay.view_height);

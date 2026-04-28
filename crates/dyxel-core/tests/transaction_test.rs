@@ -145,8 +145,14 @@ fn test_dirty_tracker() {
     assert!(!tracker.is_node_dirty(2));
 
     // Check dirty fields using helper
-    assert!(has_field(tracker.node_dirty_fields.get(&0).copied().unwrap_or(0), DirtyField::Style));
-    assert!(has_field(tracker.node_dirty_fields.get(&1).copied().unwrap_or(0), DirtyField::Size));
+    assert!(has_field(
+        tracker.node_dirty_fields.get(&0).copied().unwrap_or(0),
+        DirtyField::Style
+    ));
+    assert!(has_field(
+        tracker.node_dirty_fields.get(&1).copied().unwrap_or(0),
+        DirtyField::Size
+    ));
 
     // Test iterator
     let dirty_nodes: Vec<u32> = tracker.iter_dirty_nodes().collect();
@@ -168,8 +174,14 @@ fn test_dirty_field_combinations() {
 
     // Mark Style first
     tracker.mark_dirty(0, DirtyField::Style);
-    assert!(has_field(tracker.node_dirty_fields.get(&0).copied().unwrap_or(0), DirtyField::Style));
-    assert!(!has_field(tracker.node_dirty_fields.get(&0).copied().unwrap_or(0), DirtyField::Size));
+    assert!(has_field(
+        tracker.node_dirty_fields.get(&0).copied().unwrap_or(0),
+        DirtyField::Style
+    ));
+    assert!(!has_field(
+        tracker.node_dirty_fields.get(&0).copied().unwrap_or(0),
+        DirtyField::Size
+    ));
 
     // Mark Size - should combine with existing Style
     tracker.mark_dirty(0, DirtyField::Size);

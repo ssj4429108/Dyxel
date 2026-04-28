@@ -6,7 +6,7 @@
 
 use dyxel_core::input::hit_test_recursive;
 use dyxel_core::DyxelHost;
-use dyxel_render_api::{SharedMutex, SharedPtr};
+use dyxel_render_api::{LockExt, SharedMutex, SharedPtr};
 use dyxel_shared::{Role, SharedState, ViewType};
 use kurbo::Vec2;
 use std::collections::HashMap;
@@ -90,16 +90,21 @@ impl WebHost {
             .unwrap()
             .append_child(&semantics_root)?;
 
-        // 1. Asynchronously load engine
+        // 1. Set graphics factory (binary crate chooses the backend)
+        host.set_graphics_factory(dyxel_render_bootstrap::create_graphics_factory());
+
+        // 2. Asynchronously load engine
         host.prepare_engine(".".to_string()).await;
         log::info!("Dyxel WebHost: Engine prepared.");
 
-        // 2. Initialize rendering, pass Canvas as SurfaceTarget
-        // Wrap HtmlCanvasElement in WebCanvasHandle to implement raw_window_handle traits
-        let canvas_handle = WebCanvasHandle::new(canvas.clone());
-        let wgpu_target: vello::wgpu::SurfaceTarget<'static> = canvas_handle.into();
-        let target_handle = dyxel_render_api::SurfaceTargetHandle::new(wgpu_target);
-        host.setup(target_handle, canvas.width(), canvas.height(), None)
+        // 3. Initialize rendering, pass Canvas as NativeSurfaceHandle::WebCanvas
+        // Assign a DOM id so the runtime can resolve the canvas element.
+        let canvas_id = "dyxel-web-canvas";
+        canvas.set_id(canvas_id);
+        let native_handle = dyxel_render_api::NativeSurfaceHandle::WebCanvas {
+            canvas_id: canvas_id.to_string(),
+        };
+        host.setup(native_handle, canvas.width(), canvas.height(), None)
             .await;
         log::info!("Dyxel WebHost: Surface setup complete.");
 
@@ -148,8 +153,8 @@ impl WebHost {
             // Sync new layout back to guest memory
             #[cfg(target_arch = "wasm32")]
             {
-                let layout_guard = ss.borrow();
-                let _ = dyxel_core::sync_layout_to_wasm(&mut mem, buffer_ptr, &*layout_guard);
+                let mut layout_guard = ss.lock().unwrap();
+                let _ = dyxel_core::sync_layout_to_wasm(&mut mem, buffer_ptr, &mut *layout_guard);
             }
         }
 

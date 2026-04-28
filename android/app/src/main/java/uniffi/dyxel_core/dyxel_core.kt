@@ -382,7 +382,7 @@ private fun findLibraryName(componentName: String): String {
     if (libOverride != null) {
         return libOverride
     }
-    return "uniffi_dyxel_core"
+    return "dyxel_core"
 }
 
 private inline fun <reified Lib : Library> loadIndirect(
@@ -753,6 +753,12 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -765,56 +771,62 @@ internal interface UniffiLib : Library {
                 uniffiCheckApiChecksums(lib)
                 }
         }
-
+        
         // The Cleaner for the whole library
         internal val CLEANER: UniffiCleaner by lazy {
             UniffiCleaner.create()
         }
     }
 
-    fun uniffi_dyxel_core_fn_clone_dyxelhost(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_clone_dyxelhost(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun uniffi_dyxel_core_fn_free_dyxelhost(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_free_dyxelhost(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_constructor_dyxelhost_new(uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_constructor_dyxelhost_new(uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
-    fun uniffi_dyxel_core_fn_method_dyxelhost_init_native(`ptr`: Pointer,`nativeWindowPtr`: Long,`dataDir`: RustBuffer.ByValue,`width`: Int,`height`: Int,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_init_native(`ptr`: Pointer,`surfacePtr`: Long,`ddir`: RustBuffer.ByValue,`w`: Int,`h`: Int,
     ): Long
-    fun uniffi_dyxel_core_fn_method_dyxelhost_is_engine_ready(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_is_engine_ready(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun uniffi_dyxel_core_fn_method_dyxelhost_is_initialized(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_is_initialized(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun uniffi_dyxel_core_fn_method_dyxelhost_is_ready(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_is_ready(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_dyxel_core_fn_method_dyxelhost_load_wasm(`ptr`: Pointer,`wasmPath`: RustBuffer.ByValue,
     ): Long
-    fun uniffi_dyxel_core_fn_method_dyxelhost_notify_surface_changed(`ptr`: Pointer,`width`: Int,`height`: Int,`refreshHz`: Double,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_notify_surface_changed(`ptr`: Pointer,`width`: Int,`height`: Int,`refreshHz`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_cancel(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_cancel(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_down(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,`pressure`: Float,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_down(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,`pressure`: Float,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_move(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_move(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_up(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_up(`ptr`: Pointer,`pointerId`: Int,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_method_dyxelhost_on_touch(`ptr`: Pointer,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_on_touch(`ptr`: Pointer,`x`: Float,`y`: Float,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_method_dyxelhost_prepare_engine(`ptr`: Pointer,`dataDir`: RustBuffer.ByValue,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_prepare_engine(`ptr`: Pointer,`ddir`: RustBuffer.ByValue,
     ): Long
-    fun uniffi_dyxel_core_fn_method_dyxelhost_resize_native(`ptr`: Pointer,`width`: Int,`height`: Int,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_resize_native(`ptr`: Pointer,`width`: Int,`height`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_method_dyxelhost_stop_native(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_set_default_graphics_factory(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_dyxel_core_fn_method_dyxelhost_tick(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_shutdown(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun ffi_dyxel_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun uniffi_dyxel_core_fn_method_dyxelhost_stop_native(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_dyxel_core_fn_method_dyxelhost_tick(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_dyxel_core_fn_method_dyxelhost_toggle_perf_overlay(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun ffi_dyxel_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun ffi_dyxel_core_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun ffi_dyxel_core_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun ffi_dyxel_core_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun ffi_dyxel_core_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -822,7 +834,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_u8(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun ffi_dyxel_core_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -830,7 +842,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_i8(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun ffi_dyxel_core_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -838,7 +850,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_u16(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Short
     fun ffi_dyxel_core_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -846,7 +858,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_i16(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Short
     fun ffi_dyxel_core_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -854,7 +866,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_u32(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     fun ffi_dyxel_core_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -862,7 +874,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_i32(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     fun ffi_dyxel_core_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -870,7 +882,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_u64(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     fun ffi_dyxel_core_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -878,7 +890,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_i64(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     fun ffi_dyxel_core_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -886,7 +898,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_f32(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Float
     fun ffi_dyxel_core_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -894,7 +906,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_f64(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
     fun ffi_dyxel_core_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -902,7 +914,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_pointer(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
     fun ffi_dyxel_core_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -910,7 +922,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_rust_buffer(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun ffi_dyxel_core_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -918,7 +930,7 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_dyxel_core_rust_future_free_void(`handle`: Long,
     ): Unit
-    fun ffi_dyxel_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    fun ffi_dyxel_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_dyxel_core_checksum_method_dyxelhost_init_native(
     ): Short
@@ -946,15 +958,21 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_dyxel_core_checksum_method_dyxelhost_resize_native(
     ): Short
+    fun uniffi_dyxel_core_checksum_method_dyxelhost_set_default_graphics_factory(
+    ): Short
+    fun uniffi_dyxel_core_checksum_method_dyxelhost_shutdown(
+    ): Short
     fun uniffi_dyxel_core_checksum_method_dyxelhost_stop_native(
     ): Short
     fun uniffi_dyxel_core_checksum_method_dyxelhost_tick(
+    ): Short
+    fun uniffi_dyxel_core_checksum_method_dyxelhost_toggle_perf_overlay(
     ): Short
     fun uniffi_dyxel_core_checksum_constructor_dyxelhost_new(
     ): Short
     fun ffi_dyxel_core_uniffi_contract_version(
     ): Int
-
+    
 }
 
 private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
@@ -969,52 +987,61 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_init_native() != 18465.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_init_native() != 16174.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_is_engine_ready() != 14632.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_is_engine_ready() != 26501.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_is_initialized() != 17368.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_is_initialized() != 14967.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_is_ready() != 22055.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_is_ready() != 18714.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_load_wasm() != 15312.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_load_wasm() != 45810.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_notify_surface_changed() != 42286.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_notify_surface_changed() != 54308.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_cancel() != 1347.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_cancel() != 34353.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_down() != 5663.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_down() != 20189.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_move() != 18306.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_move() != 54093.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_up() != 51146.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_pointer_up() != 43119.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_touch() != 26849.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_on_touch() != 61680.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_prepare_engine() != 24405.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_prepare_engine() != 60274.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_resize_native() != 55572.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_resize_native() != 58182.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_stop_native() != 33151.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_set_default_graphics_factory() != 4597.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_tick() != 14442.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_shutdown() != 44311.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_dyxel_core_checksum_constructor_dyxelhost_new() != 53882.toShort()) {
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_stop_native() != 43543.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_tick() != 23076.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dyxel_core_checksum_method_dyxelhost_toggle_perf_overlay() != 8757.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_dyxel_core_checksum_constructor_dyxelhost_new() != 21082.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1097,7 +1124,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
         }
     }
 
-/**
+/** 
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
@@ -1439,37 +1466,68 @@ private class JavaLangRefCleanable(
     override fun clean() = cleanable.clean()
 }
 public interface DyxelHostInterface {
-
-    suspend fun `initNative`(`nativeWindowPtr`: kotlin.ULong, `dataDir`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt)
-
+    
+    suspend fun `initNative`(`surfacePtr`: kotlin.ULong, `ddir`: kotlin.String, `w`: kotlin.UInt, `h`: kotlin.UInt)
+    
     fun `isEngineReady`(): kotlin.Boolean
-
+    
     fun `isInitialized`(): kotlin.Boolean
-
+    
     fun `isReady`(): kotlin.Boolean
-
+    
     suspend fun `loadWasm`(`wasmPath`: kotlin.String)
-
+    
+    /**
+     * Notify the FrameScheduler of a surface geometry or refresh-rate change.
+     * Called from the platform layer (e.g. Android surfaceChanged with Display.refreshRate).
+     */
     fun `notifySurfaceChanged`(`width`: kotlin.UInt, `height`: kotlin.UInt, `refreshHz`: kotlin.Double)
-
+    
+    /**
+     * 指针取消（支持多指）
+     */
     fun `onPointerCancel`()
-
+    
+    /**
+     * 指针按下（支持多指）
+     */
     fun `onPointerDown`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float, `pressure`: kotlin.Float)
-
+    
+    /**
+     * 指针移动（支持多指）
+     */
     fun `onPointerMove`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
-
+    
+    /**
+     * 指针抬起（支持多指）
+     */
     fun `onPointerUp`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
-
+    
     fun `onTouch`(`x`: kotlin.Float, `y`: kotlin.Float)
-
-    suspend fun `prepareEngine`(`dataDir`: kotlin.String)
-
+    
+    suspend fun `prepareEngine`(`ddir`: kotlin.String)
+    
     fun `resizeNative`(`width`: kotlin.UInt, `height`: kotlin.UInt)
-
+    
+    /**
+     * Configure the platform-default graphics factory.
+     *
+     * Android uses this because UniFFI cannot expose `Box<dyn Trait>`
+     * parameters to Kotlin. Other platforms can also call it safely.
+     */
+    fun `setDefaultGraphicsFactory`()
+    
+    fun `shutdown`()
+    
     fun `stopNative`()
-
+    
     fun `tick`()
-
+    
+    /**
+     * Toggle performance overlay display (FPS, Memory, CPU)
+     */
+    fun `togglePerfOverlay`()
+    
     companion object
 }
 
@@ -1561,14 +1619,14 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
         }
     }
 
-
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `initNative`(`nativeWindowPtr`: kotlin.ULong, `dataDir`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt) {
+    override suspend fun `initNative`(`surfacePtr`: kotlin.ULong, `ddir`: kotlin.String, `w`: kotlin.UInt, `h`: kotlin.UInt) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_init_native(
                 thisPtr,
-                FfiConverterULong.lower(`nativeWindowPtr`),FfiConverterString.lower(`dataDir`),FfiConverterUInt.lower(`width`),FfiConverterUInt.lower(`height`),
+                FfiConverterULong.lower(`surfacePtr`),FfiConverterString.lower(`ddir`),FfiConverterUInt.lower(`w`),FfiConverterUInt.lower(`h`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_dyxel_core_rust_future_poll_void(future, callback, continuation) },
@@ -1576,7 +1634,7 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
         { future -> UniffiLib.INSTANCE.ffi_dyxel_core_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -1592,7 +1650,7 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
     }
     )
     }
-
+    
 
     override fun `isInitialized`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
@@ -1604,7 +1662,7 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
     }
     )
     }
-
+    
 
     override fun `isReady`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
@@ -1616,9 +1674,9 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
     }
     )
     }
+    
 
-
-
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `loadWasm`(`wasmPath`: kotlin.String) {
         return uniffiRustCallAsync(
@@ -1633,86 +1691,102 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
         { future -> UniffiLib.INSTANCE.ffi_dyxel_core_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
     }
 
-    override fun `notifySurfaceChanged`(`width`: kotlin.UInt, `height`: kotlin.UInt, `refreshHz`: kotlin.Double)
-        =
+    
+    /**
+     * Notify the FrameScheduler of a surface geometry or refresh-rate change.
+     * Called from the platform layer (e.g. Android surfaceChanged with Display.refreshRate).
+     */override fun `notifySurfaceChanged`(`width`: kotlin.UInt, `height`: kotlin.UInt, `refreshHz`: kotlin.Double)
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_notify_surface_changed(
         it, FfiConverterUInt.lower(`width`),FfiConverterUInt.lower(`height`),FfiConverterDouble.lower(`refreshHz`),_status)
 }
     }
+    
+    
 
-
-
-    override fun `onPointerCancel`()
-        =
+    
+    /**
+     * 指针取消（支持多指）
+     */override fun `onPointerCancel`()
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_cancel(
         it, _status)
 }
     }
+    
+    
 
-
-
-    override fun `onPointerDown`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float, `pressure`: kotlin.Float)
-        =
+    
+    /**
+     * 指针按下（支持多指）
+     */override fun `onPointerDown`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float, `pressure`: kotlin.Float)
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_down(
         it, FfiConverterUInt.lower(`pointerId`),FfiConverterFloat.lower(`x`),FfiConverterFloat.lower(`y`),FfiConverterFloat.lower(`pressure`),_status)
 }
     }
+    
+    
 
-
-
-    override fun `onPointerMove`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
-        =
+    
+    /**
+     * 指针移动（支持多指）
+     */override fun `onPointerMove`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_move(
         it, FfiConverterUInt.lower(`pointerId`),FfiConverterFloat.lower(`x`),FfiConverterFloat.lower(`y`),_status)
 }
     }
+    
+    
 
-
-
-    override fun `onPointerUp`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
-        =
+    
+    /**
+     * 指针抬起（支持多指）
+     */override fun `onPointerUp`(`pointerId`: kotlin.UInt, `x`: kotlin.Float, `y`: kotlin.Float)
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_pointer_up(
         it, FfiConverterUInt.lower(`pointerId`),FfiConverterFloat.lower(`x`),FfiConverterFloat.lower(`y`),_status)
 }
     }
-
-
+    
+    
 
     override fun `onTouch`(`x`: kotlin.Float, `y`: kotlin.Float)
-        =
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_on_touch(
         it, FfiConverterFloat.lower(`x`),FfiConverterFloat.lower(`y`),_status)
 }
     }
+    
+    
 
-
-
-
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `prepareEngine`(`dataDir`: kotlin.String) {
+    override suspend fun `prepareEngine`(`ddir`: kotlin.String) {
         return uniffiRustCallAsync(
         callWithPointer { thisPtr ->
             UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_prepare_engine(
                 thisPtr,
-                FfiConverterString.lower(`dataDir`),
+                FfiConverterString.lower(`ddir`),
             )
         },
         { future, callback, continuation -> UniffiLib.INSTANCE.ffi_dyxel_core_rust_future_poll_void(future, callback, continuation) },
@@ -1720,51 +1794,93 @@ open class DyxelHost: Disposable, AutoCloseable, DyxelHostInterface {
         { future -> UniffiLib.INSTANCE.ffi_dyxel_core_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
     }
 
     override fun `resizeNative`(`width`: kotlin.UInt, `height`: kotlin.UInt)
-        =
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_resize_native(
         it, FfiConverterUInt.lower(`width`),FfiConverterUInt.lower(`height`),_status)
 }
     }
+    
+    
 
+    
+    /**
+     * Configure the platform-default graphics factory.
+     *
+     * Android uses this because UniFFI cannot expose `Box<dyn Trait>`
+     * parameters to Kotlin. Other platforms can also call it safely.
+     */override fun `setDefaultGraphicsFactory`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_set_default_graphics_factory(
+        it, _status)
+}
+    }
+    
+    
 
+    override fun `shutdown`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_shutdown(
+        it, _status)
+}
+    }
+    
+    
 
     override fun `stopNative`()
-        =
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_stop_native(
         it, _status)
 }
     }
-
-
+    
+    
 
     override fun `tick`()
-        =
+        = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_tick(
         it, _status)
 }
     }
+    
+    
 
+    
+    /**
+     * Toggle performance overlay display (FPS, Memory, CPU)
+     */override fun `togglePerfOverlay`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_dyxel_core_fn_method_dyxelhost_toggle_perf_overlay(
+        it, _status)
+}
+    }
+    
+    
 
+    
 
-
-
-
-
+    
+    
     companion object
-
+    
 }
 
 /**

@@ -8,6 +8,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+const PERF_STATS_WINDOW_RECORDS: usize = 120;
+/// Warmup presented frames excluded from live Jank/Drop reporting on macOS.
+/// Cold-start shader creation and first surface acquire can create real misses,
+/// but keeping them in a rolling 120-record UI counter makes Frame 60–120 look
+/// unhealthy even after steady-state is within budget.
+const PERF_STATS_WARMUP_PRESENTED_SKIP: u64 = if cfg!(target_os = "macos") { 60 } else { 0 };
+/// On macOS continuous rendering, mailbox epoch coalescing is a content update
+/// drop, not necessarily a displayed-frame drop. Report display drops from
+/// skipped-in-flight only.
+const PERF_DROP_COUNTS_MAILBOX_EPOCHS: bool = !cfg!(target_os = "macos");
+const PERF_DROP_FROM_RASTER_FPS_DEFICIT: bool = cfg!(target_os = "macos");
+
+/// Catch-up threshold for missed VBlank tokens. Disabled on Android due to
+/// Choreographer late-phase launch causing spurious catch-up tokens.
+#[cfg(target_os = "android")]
+const CATCH_UP_THRESHOLD_MS: u64 = 0;
+#[cfg(not(target_os = "android"))]
+const CATCH_UP_THRESHOLD_MS: u64 = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerState {
     Idle,
@@ -30,11 +49,27 @@ pub type InputBatchId = u64;
 #[derive(Debug)]
 pub enum SchedulerEvent {
     InputArrived(InputBatchId),
-    LogicCommitted { epoch: u64 },
-    VBlank { timestamp: Instant, refresh_hz: f64 },
-    RenderStarted { frame_id: u64, epoch: u64 },
-    RenderCompleted { frame_id: u64, epoch: u64, stats: crate::FrameStats },
-    SurfaceChanged { width: u32, height: u32, refresh_hz: f64 },
+    LogicCommitted {
+        epoch: u64,
+    },
+    VBlank {
+        timestamp: Instant,
+        refresh_hz: f64,
+    },
+    RenderStarted {
+        frame_id: u64,
+        epoch: u64,
+    },
+    RenderCompleted {
+        frame_id: u64,
+        epoch: u64,
+        stats: crate::FrameStats,
+    },
+    SurfaceChanged {
+        width: u32,
+        height: u32,
+        refresh_hz: f64,
+    },
     Shutdown,
 }
 
@@ -85,6 +120,13 @@ pub struct FrameScheduler {
     ui_frame_buffer: EventRateBuffer,
     /// Shared performance stats written by the scheduler.
     frame_perf_state: Option<Arc<Mutex<FramePerformanceStats>>>,
+    /// Last time a render token was issued. Used for cadence diagnostics.
+    last_token_issued_at: Option<Instant>,
+    /// Last VBlank that arrived while we were Rendering (or otherwise).
+    /// Used for catch-up: if RenderCompleted arrives shortly after a VBlank,
+    /// we can retroactively issue a token for that VBlank instead of waiting
+    /// another full interval.
+    last_vblank: Option<(Instant, CadenceDecision)>,
 }
 
 impl FrameScheduler {
@@ -112,6 +154,8 @@ impl FrameScheduler {
             last_sent_cadence: None,
             ui_frame_buffer: EventRateBuffer::new(60),
             frame_perf_state,
+            last_token_issued_at: None,
+            last_vblank: None,
         }
     }
 
@@ -182,9 +226,18 @@ impl FrameScheduler {
                             let _ = tx.send(crate::bridge::LogicMessage::ProcessPendingInput);
                         }
                     }
-                    SchedulerState::WaitingForLogic | SchedulerState::Rendering => {
-                        // Logic worker is already working or render is in flight;
-                        // input stays queued and will be processed when ready.
+                    SchedulerState::WaitingForLogic => {
+                        // Logic worker is already working; input stays queued and
+                        // will be picked up on the next tick.
+                    }
+                    SchedulerState::Rendering => {
+                        // Render is in flight but input should still be processed
+                        // immediately so logic can overlap with render. The next
+                        // epoch will be committed while rendering and picked up
+                        // after RenderCompleted via latest-wins mailbox.
+                        if let Some(ref tx) = self.logic_tx {
+                            let _ = tx.send(crate::bridge::LogicMessage::ProcessPendingInput);
+                        }
                     }
                 }
                 false
@@ -226,10 +279,13 @@ impl FrameScheduler {
                     self.cadence = CadenceGovernor::new(refresh_hz);
                 }
                 let decision = self.cadence.on_vblank(timestamp);
+                // Always record the last VBlank so RenderCompleted can catch up
+                // if it arrives shortly after.
+                self.last_vblank = Some((timestamp, decision));
                 if decision.should_present_this_tick {
                     match self.state {
                         SchedulerState::Armed => {
-                            self.try_issue_token_with_decision(decision);
+                            self.try_issue_token_with_decision(decision, timestamp);
                         }
                         SchedulerState::Rendering => {
                             // A frame is already in flight; this VBlank cannot
@@ -283,26 +339,50 @@ impl FrameScheduler {
             } => {
                 let now = Instant::now();
                 self.timeline.mark_render_completed(frame_id, now);
+                let measured_work_ms = (stats.frame_time_ms > 0.0).then_some(stats.frame_time_ms as f64);
                 let missed_cadence = self
                     .timeline
-                    .classify_frame_result(frame_id)
+                    .classify_frame_result_with_duration(frame_id, measured_work_ms)
                     .map(|r| matches!(r, crate::frame_timeline::FrameResultClass::MissedCadence))
                     .unwrap_or(false);
-                self.cadence.record_frame(crate::cadence::GovernorFrameRecord {
-                    frame_time_ms: stats.frame_time_ms as f64,
-                    gpu_time_ms: None, // TODO: populate when GPU timing is available
-                    missed_cadence,
-                });
+                self.cadence
+                    .record_frame(crate::cadence::GovernorFrameRecord {
+                        frame_time_ms: stats.frame_time_ms as f64,
+                        gpu_time_ms: None, // TODO: populate when GPU timing is available
+                        missed_cadence,
+                    });
                 self.last_presented_epoch = epoch;
                 self.in_flight = None;
                 self.update_performance_state();
 
                 // If a newer epoch was committed while rendering, arm again.
                 // The next VBlank will issue the token (refresh-locked).
-                if self.latest_committed_epoch > epoch {
-                    self.state = SchedulerState::Armed;
+                let new_state = if self.latest_committed_epoch > epoch {
+                    SchedulerState::Armed
                 } else {
-                    self.state = SchedulerState::CoolingDown;
+                    SchedulerState::CoolingDown
+                };
+                self.state = new_state;
+
+                // Catch-up: if we just transitioned to Armed and a VBlank fired
+                // very recently (we missed it because RenderCompleted hadn't
+                // arrived yet), issue a token immediately for that VBlank
+                // instead of waiting another full interval.
+                if new_state == SchedulerState::Armed {
+                    if let Some((vblank_timestamp, decision)) = self.last_vblank {
+                        let elapsed = now.duration_since(vblank_timestamp);
+                        if decision.should_present_this_tick
+                            && elapsed < Duration::from_millis(CATCH_UP_THRESHOLD_MS)
+                            && self.in_flight.is_none()
+                        {
+                            log::info!(
+                                "[DIAG] FrameScheduler: catch-up token for missed VBlank (elapsed={:.2}ms) frame_id={}",
+                                elapsed.as_secs_f64() * 1000.0,
+                                self.next_frame_id.load(Ordering::Relaxed)
+                            );
+                            self.try_issue_token_with_decision(decision, vblank_timestamp);
+                        }
+                    }
                 }
                 false
             }
@@ -329,17 +409,37 @@ impl FrameScheduler {
         }
     }
 
-    fn try_issue_token_with_decision(&mut self, decision: CadenceDecision) {
+    fn try_issue_token_with_decision(
+        &mut self,
+        decision: CadenceDecision,
+        vblank_timestamp: Instant,
+    ) {
         if self.in_flight.is_some() {
             return;
         }
         let frame_id = self.next_frame_id.fetch_add(1, Ordering::Relaxed);
         let epoch = self.latest_committed_epoch;
         let now = Instant::now();
+        let token_issue_latency_ms = now.duration_since(vblank_timestamp).as_secs_f64() * 1000.0;
+        if let Some(last) = self.last_token_issued_at {
+            let token_interval_ms = now.duration_since(last).as_secs_f64() * 1000.0;
+            if frame_id % 20 == 0 {
+                log::info!(
+                    "[DIAG] Scheduler token frame_id={} divisor={} effective_hz={:.2} interval={:.2}ms vblank_latency={:.2}ms state={:?}",
+                    frame_id,
+                    decision.divisor,
+                    decision.effective_hz,
+                    token_interval_ms,
+                    token_issue_latency_ms,
+                    self.state,
+                );
+            }
+        }
+        self.last_token_issued_at = Some(now);
         let token = FrameToken {
             frame_id,
             epoch,
-            vblank_at: now,
+            vblank_at: vblank_timestamp,
             target_frame_duration: decision.target_frame_duration,
         };
 
@@ -384,30 +484,56 @@ impl FrameScheduler {
     }
 
     /// Write current scheduler performance snapshot to shared state.
-    fn update_performance_state(&self,
-    ) {
+    fn update_performance_state(&self) {
         if let Some(ref state) = self.frame_perf_state {
             let cadence = self.cadence.info();
-            let counts = self.timeline.result_counts();
+            let window_stats = self.timeline.recent_window_stats_after_presented_skip(
+                PERF_STATS_WINDOW_RECORDS,
+                PERF_STATS_WARMUP_PRESENTED_SKIP,
+            );
+            let counts = window_stats.counts;
             let total_presented = counts.total_presented();
             // dropped epochs + skipped-in-flight together constitute the full
             // "dropped frames" count (aligned with Flutter semantics).
-            let dropped = self.timeline.dropped_epoch_count() + counts.skipped_in_flight;
+            let dropped = if PERF_DROP_COUNTS_MAILBOX_EPOCHS {
+                window_stats.dropped_epochs + counts.skipped_in_flight
+            } else {
+                counts.skipped_in_flight
+            };
             let jank_rate = if total_presented > 0 {
                 counts.missed_cadence as f32 / total_presented as f32
             } else {
                 0.0
             };
-            let drop_rate = if total_presented + dropped > 0 {
+            let mut drop_rate = if total_presented + dropped > 0 {
                 dropped as f32 / (total_presented + dropped) as f32
             } else {
                 0.0
             };
+            let mut dropped_count = dropped;
             if let Ok(mut perf) = state.lock() {
                 perf.ui_fps = self.ui_frame_buffer.fps();
                 perf.target_fps = cadence.effective_hz as f32;
+
+                if PERF_DROP_FROM_RASTER_FPS_DEFICIT {
+                    // On macOS/Fifo, scheduler skipped-in-flight often means
+                    // the render thread is blocked in surface acquire, while
+                    // the previous frame is still being presented on cadence.
+                    // Report user-visible display drops from the measured
+                    // raster FPS deficit instead of internal in-flight state.
+                    let target = perf.target_fps.max(1.0);
+                    let raster = perf.raster_fps;
+                    let deficit = if raster > 0.0 {
+                        ((target - raster).max(0.0) / target).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    drop_rate = deficit;
+                    dropped_count = (deficit * total_presented as f32).round() as u64;
+                }
+
                 perf.jank_count = counts.missed_cadence;
-                perf.dropped_count = dropped;
+                perf.dropped_count = dropped_count;
                 perf.jank_rate = jank_rate;
                 perf.drop_rate = drop_rate;
             }
@@ -428,9 +554,15 @@ mod tests {
         let handle = std::thread::spawn(move || scheduler.run());
 
         // Commit epochs 1, 2, 3 rapidly — scheduler arms but does NOT issue yet.
-        event_tx.send(SchedulerEvent::LogicCommitted { epoch: 1 }).unwrap();
-        event_tx.send(SchedulerEvent::LogicCommitted { epoch: 2 }).unwrap();
-        event_tx.send(SchedulerEvent::LogicCommitted { epoch: 3 }).unwrap();
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 1 })
+            .unwrap();
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 2 })
+            .unwrap();
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 3 })
+            .unwrap();
 
         // VBlank triggers the first token (refresh-locked)
         event_tx
@@ -476,7 +608,9 @@ mod tests {
         let handle = std::thread::spawn(move || scheduler.run());
 
         // Commit epoch 1
-        event_tx.send(SchedulerEvent::LogicCommitted { epoch: 1 }).unwrap();
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 1 })
+            .unwrap();
 
         // VBlank triggers token for epoch 1
         event_tx
@@ -493,7 +627,9 @@ mod tests {
         };
 
         // Commit epoch 2 while frame 1 is still in flight
-        event_tx.send(SchedulerEvent::LogicCommitted { epoch: 2 }).unwrap();
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 2 })
+            .unwrap();
 
         // Should NOT receive a second token immediately (no VBlank yet)
         assert!(
@@ -547,7 +683,9 @@ mod tests {
             .unwrap();
 
         // Commit epoch 1 — now scheduler is VBlank-driven, so it only arms.
-        event_tx.send(SchedulerEvent::LogicCommitted { epoch: 1 }).unwrap();
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 1 })
+            .unwrap();
 
         // No token yet without a VBlank.
         assert!(
@@ -580,18 +718,15 @@ mod tests {
         let (render_tx, render_rx) = crossbeam_channel::unbounded();
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let perf_state = Arc::new(Mutex::new(FramePerformanceStats::default()));
-        let scheduler = FrameScheduler::new(
-            render_tx,
-            event_rx,
-            None,
-            60.0,
-            Some(perf_state.clone()),
-        );
+        let scheduler =
+            FrameScheduler::new(render_tx, event_rx, None, 60.0, Some(perf_state.clone()));
 
         let handle = std::thread::spawn(move || scheduler.run());
 
         // Commit epoch 1
-        event_tx.send(SchedulerEvent::LogicCommitted { epoch: 1 }).unwrap();
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 1 })
+            .unwrap();
 
         // VBlank triggers token
         event_tx
@@ -637,17 +772,61 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_perf_state_uses_recent_window_not_cumulative_history() {
+        let (render_tx, _render_rx) = crossbeam_channel::unbounded();
+        let (_event_tx, event_rx) = crossbeam_channel::unbounded();
+        let perf_state = Arc::new(Mutex::new(FramePerformanceStats::default()));
+        let mut scheduler =
+            FrameScheduler::new(render_tx, event_rx, None, 60.0, Some(perf_state.clone()));
+        let now = Instant::now();
+
+        scheduler
+            .timeline
+            .record_token(1, 1, now, now, 16.67, 60.0, 1, 60.0, 2);
+        scheduler.timeline.mark_render_started(1, now);
+        scheduler
+            .timeline
+            .mark_render_completed(1, now + Duration::from_millis(25));
+        scheduler.timeline.classify_frame_result(1);
+        scheduler.timeline.record_skipped_vblank(
+            now,
+            crate::frame_timeline::FrameResultClass::SkippedInFlight,
+            60.0,
+            1,
+            60.0,
+        );
+
+        for frame_id in 2..=122 {
+            scheduler
+                .timeline
+                .record_token(frame_id, frame_id, now, now, 16.67, 60.0, 1, 60.0, 0);
+            scheduler.timeline.mark_render_started(frame_id, now);
+            scheduler
+                .timeline
+                .mark_render_completed(frame_id, now + Duration::from_millis(5));
+            scheduler.timeline.classify_frame_result(frame_id);
+        }
+
+        scheduler.update_performance_state();
+
+        let cumulative = scheduler.timeline.result_counts();
+        assert_eq!(cumulative.missed_cadence, 1);
+        assert_eq!(scheduler.timeline.dropped_epoch_count(), 2);
+
+        let perf = perf_state.lock().unwrap();
+        assert_eq!(perf.jank_count, 0);
+        assert_eq!(perf.dropped_count, 0);
+        assert_eq!(perf.jank_rate, 0.0);
+        assert_eq!(perf.drop_rate, 0.0);
+    }
+
+    #[test]
     fn scheduler_ui_fps_tracked_on_logic_commits() {
         let (render_tx, _render_rx) = crossbeam_channel::unbounded();
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let perf_state = Arc::new(Mutex::new(FramePerformanceStats::default()));
-        let scheduler = FrameScheduler::new(
-            render_tx,
-            event_rx,
-            None,
-            60.0,
-            Some(perf_state.clone()),
-        );
+        let scheduler =
+            FrameScheduler::new(render_tx, event_rx, None, 60.0, Some(perf_state.clone()));
 
         let handle = std::thread::spawn(move || scheduler.run());
 
@@ -663,7 +842,245 @@ mod tests {
 
         let perf = perf_state.lock().unwrap();
         // With 5 commits over ~50ms, fps should be ~4/0.05 = 80 (very rough)
-        assert!(perf.ui_fps > 0.0, "ui_fps should be tracked, got {}", perf.ui_fps);
+        assert!(
+            perf.ui_fps > 0.0,
+            "ui_fps should be tracked, got {}",
+            perf.ui_fps
+        );
+
+        event_tx.send(SchedulerEvent::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn scheduler_catch_up_issues_token_when_render_completed_after_vblank() {
+        // Regression test: when RenderCompleted arrives shortly after a VBlank,
+        // the scheduler should catch up and issue a token immediately instead
+        // of waiting for the next VBlank (which would create a 33ms gap).
+        let (render_tx, render_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let scheduler = FrameScheduler::new(render_tx, event_rx, None, 60.0, None);
+
+        let handle = std::thread::spawn(move || scheduler.run());
+
+        // Commit epoch 1
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 1 })
+            .unwrap();
+
+        // VBlank triggers token — scheduler enters Rendering
+        let t0 = Instant::now();
+        event_tx
+            .send(SchedulerEvent::VBlank {
+                timestamp: t0,
+                refresh_hz: 60.0,
+            })
+            .unwrap();
+
+        let cmd = render_rx.recv_timeout(Duration::from_millis(100)).unwrap();
+        let token = match cmd {
+            RenderCommand::Render(t) => t,
+            _ => panic!("expected Render"),
+        };
+
+        // Simulate: next VBlank arrives BEFORE RenderCompleted (the race condition)
+        let t1 = t0 + Duration::from_millis(16);
+        event_tx
+            .send(SchedulerEvent::VBlank {
+                timestamp: t1,
+                refresh_hz: 60.0,
+            })
+            .unwrap();
+
+        // Newer content becomes available while the first frame is still in
+        // flight, so RenderCompleted should re-arm and catch up.
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 2 })
+            .unwrap();
+
+        // RenderCompleted arrives shortly AFTER that VBlank (within the
+        // catch-up window).
+        event_tx
+            .send(SchedulerEvent::RenderCompleted {
+                frame_id: token.frame_id,
+                epoch: token.epoch,
+                stats: crate::FrameStats::default(),
+            })
+            .unwrap();
+
+        // Scheduler should catch up and issue a token immediately, not wait for next VBlank
+        let cmd2 = render_rx.recv_timeout(Duration::from_millis(100)).unwrap();
+        match cmd2 {
+            RenderCommand::Render(t) => {
+                assert_eq!(t.epoch, 2);
+                // The catch-up token should reference the VBlank at t1
+                assert!(
+                    t.vblank_at >= t1 && t.vblank_at < t1 + Duration::from_millis(1),
+                    "catch-up token should reference the missed VBlank"
+                );
+            }
+            _ => panic!("expected catch-up Render"),
+        }
+
+        event_tx.send(SchedulerEvent::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn scheduler_no_catch_up_when_render_completed_too_late() {
+        // If RenderCompleted arrives more than 8ms after the VBlank,
+        // don't catch up — wait for the next VBlank.
+        let (render_tx, render_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let scheduler = FrameScheduler::new(render_tx, event_rx, None, 60.0, None);
+
+        let handle = std::thread::spawn(move || scheduler.run());
+
+        // Commit epoch 1
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 1 })
+            .unwrap();
+
+        // VBlank triggers token — scheduler enters Rendering
+        let t0 = Instant::now();
+        event_tx
+            .send(SchedulerEvent::VBlank {
+                timestamp: t0,
+                refresh_hz: 60.0,
+            })
+            .unwrap();
+
+        let cmd = render_rx.recv_timeout(Duration::from_millis(100)).unwrap();
+        let token = match cmd {
+            RenderCommand::Render(t) => t,
+            _ => panic!("expected Render"),
+        };
+
+        // Next VBlank arrives before RenderCompleted
+        let t1 = t0 + Duration::from_millis(16);
+        event_tx
+            .send(SchedulerEvent::VBlank {
+                timestamp: t1,
+                refresh_hz: 60.0,
+            })
+            .unwrap();
+
+        // RenderCompleted arrives 10ms after VBlank (outside 8ms catch-up window)
+        event_tx
+            .send(SchedulerEvent::RenderCompleted {
+                frame_id: token.frame_id,
+                epoch: token.epoch,
+                stats: crate::FrameStats::default(),
+            })
+            .unwrap();
+
+        // No immediate catch-up token
+        assert!(
+            render_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "should not catch up when RenderCompleted is too late"
+        );
+
+        event_tx.send(SchedulerEvent::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn scheduler_dispatches_logic_while_rendering_on_input_arrived() {
+        // Regression test: InputArrived during Rendering must immediately
+        // dispatch ProcessPendingInput so logic can overlap with render.
+        let (render_tx, render_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (logic_tx, logic_rx) = std::sync::mpsc::channel();
+        let scheduler = FrameScheduler::new(render_tx, event_rx, Some(logic_tx), 60.0, None);
+
+        let handle = std::thread::spawn(move || scheduler.run());
+
+        // Commit epoch 1
+        event_tx
+            .send(SchedulerEvent::LogicCommitted { epoch: 1 })
+            .unwrap();
+
+        // VBlank triggers token — scheduler enters Rendering
+        event_tx
+            .send(SchedulerEvent::VBlank {
+                timestamp: Instant::now(),
+                refresh_hz: 60.0,
+            })
+            .unwrap();
+
+        let cmd = render_rx.recv_timeout(Duration::from_millis(100)).unwrap();
+        let token = match cmd {
+            RenderCommand::Render(t) => t,
+            _ => panic!("expected Render"),
+        };
+
+        // While still in Rendering, input arrives (e.g. user pointer event)
+        event_tx.send(SchedulerEvent::InputArrived(42)).unwrap();
+
+        // Scheduler must immediately dispatch ProcessPendingInput to logic.
+        // Drain any CadenceUpdated that may have been sent on first tick.
+        let msg = loop {
+            match logic_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(crate::bridge::LogicMessage::ProcessPendingInput) => break Ok(()),
+                Ok(crate::bridge::LogicMessage::CadenceUpdated(_)) => continue,
+                Ok(_) => panic!("Expected ProcessPendingInput or CadenceUpdated"),
+                Err(e) => break Err(e),
+            }
+        };
+        assert!(
+            msg.is_ok(),
+            "InputArrived during Rendering must dispatch ProcessPendingInput"
+        );
+
+        // Complete render so scheduler can shut down cleanly
+        event_tx
+            .send(SchedulerEvent::RenderCompleted {
+                frame_id: token.frame_id,
+                epoch: token.epoch,
+                stats: crate::FrameStats::default(),
+            })
+            .unwrap();
+
+        event_tx.send(SchedulerEvent::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn scheduler_does_not_redispatch_logic_while_waiting_for_logic() {
+        // InputArrived while already WaitingForLogic should be a no-op
+        // to avoid queuing redundant ProcessPendingInput messages.
+        let (render_tx, _render_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (logic_tx, logic_rx) = std::sync::mpsc::channel();
+        let scheduler = FrameScheduler::new(render_tx, event_rx, Some(logic_tx), 60.0, None);
+
+        let handle = std::thread::spawn(move || scheduler.run());
+
+        // First input triggers WaitingForLogic and dispatches ProcessPendingInput.
+        // Drain any initial CadenceUpdated first.
+        event_tx.send(SchedulerEvent::InputArrived(1)).unwrap();
+        let msg1 = loop {
+            match logic_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(crate::bridge::LogicMessage::ProcessPendingInput) => break true,
+                Ok(crate::bridge::LogicMessage::CadenceUpdated(_)) => continue,
+                Ok(_) => break false,
+                Err(_) => break false,
+            }
+        };
+        assert!(
+            msg1,
+            "First InputArrived should dispatch ProcessPendingInput"
+        );
+
+        // Second input while still WaitingForLogic should NOT re-dispatch.
+        // Ensure no stray CadenceUpdated is still in the channel.
+        while let Ok(crate::bridge::LogicMessage::CadenceUpdated(_)) = logic_rx.try_recv() {}
+        event_tx.send(SchedulerEvent::InputArrived(2)).unwrap();
+        let msg2 = logic_rx.recv_timeout(Duration::from_millis(50));
+        assert!(
+            msg2.is_err(),
+            "InputArrived while WaitingForLogic should not re-dispatch"
+        );
 
         event_tx.send(SchedulerEvent::Shutdown).unwrap();
         handle.join().unwrap();

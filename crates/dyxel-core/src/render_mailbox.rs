@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use dyxel_render_api::RenderPackage;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Single-slot latest-wins mailbox for RenderPackage snapshots.
 ///
@@ -20,11 +20,7 @@ impl RenderMailbox {
     pub fn new() -> Self {
         Self {
             latest_epoch: AtomicU64::new(0),
-            latest_package: RwLock::new(Arc::new(RenderPackage::new(
-                (0, 0),
-                None,
-                Vec::new(),
-            ))),
+            latest_package: RwLock::new(Arc::new(RenderPackage::new((0, 0), None, Vec::new()))),
         }
     }
 

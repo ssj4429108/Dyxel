@@ -26,16 +26,10 @@ impl DirtyField {
     }
 
     pub fn from_bits_truncate(bits: u8) -> Self {
-        match bits {
-            0 => Self::None,
-            1 => Self::Position,
-            2 => Self::Size,
-            4 => Self::Style,
-            8 => Self::Text,
-            16 => Self::Children,
-            32 => Self::Layout,
-            _ => Self::None,
-        }
+        // Safety: DirtyField is repr(u8) and only uses bits 0-5.
+        // Combined flags (e.g. Position | Size = 3) are valid and must
+        // be preserved so contains() works correctly.
+        unsafe { std::mem::transmute(bits) }
     }
 
     pub fn bits(&self) -> u8 {

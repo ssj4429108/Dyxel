@@ -139,7 +139,9 @@ pub struct FilterPipeline {
     blur_bind_group_layout: wgpu::BindGroupLayout,
 
     // Composite pipeline (for blending effects)
+    #[allow(dead_code)]
     composite_pipeline: wgpu::RenderPipeline,
+    #[allow(dead_code)]
     composite_bind_group_layout: wgpu::BindGroupLayout,
 
     // Uniform buffer
@@ -752,7 +754,7 @@ impl FilterPipeline {
         _shadow: &wgpu::Texture,
         _dx: f32,
         _dy: f32,
-        color: [f32; 4],
+        _color: [f32; 4],
     ) -> Result<(), FilterError> {
         // For now, use a simple render pass
         // Full implementation would use the composite pipeline with proper blending
@@ -1373,6 +1375,67 @@ impl FilterPipeline {
     /// Check if pipeline is ready
     pub fn is_ready(&self) -> bool {
         true
+    }
+
+    /// Run a single Kawase downsample pass (mode=0).
+    ///
+    /// This is a lightweight helper used for generating backdrop pyramids
+    /// without invoking the full `apply_frosted_glass_kawase` machinery.
+    /// It writes one render pass into `encoder` and returns immediately.
+    pub fn run_kawase_downsample(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        dst_view: &wgpu::TextureView,
+    ) {
+        let uniforms = KawaseUniforms {
+            mode: 0, // downsample
+            pass_index: 0,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.queue
+            .write_buffer(&self.kawase_uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Kawase Downsample BindGroup"),
+            layout: &self.kawase_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.kawase_uniforms.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Kawase Downsample Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        // Use kawase_output_pipeline (Rgba8Unorm target) so the output
+        // is compatible with copy_texture_to_texture for downstream blur.
+        rpass.set_pipeline(&self.kawase_output_pipeline);
+        rpass.set_bind_group(0, &bind_group, &[]);
+        rpass.draw(0..3, 0..1);
     }
 }
 

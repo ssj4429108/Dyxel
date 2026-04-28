@@ -47,12 +47,12 @@ fn render_node_recursive(
         let global_pos = parent_pos + Vec2::new(layout.location.x as f64, layout.location.y as f64);
 
         let mut paint = Paint::default();
-        let c = node.color.to_rgba8();
+        let c = node.color;
         paint.set_color(Color::new_srgba(
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            1.0,
+            c[0] as f32 / 255.0,
+            c[1] as f32 / 255.0,
+            c[2] as f32 / 255.0,
+            c[3] as f32 / 255.0,
         ));
 
         // Probe experiment logic:

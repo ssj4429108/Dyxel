@@ -32,4 +32,4 @@ fi
 # 4. Run
 echo "Running dyxel-mac with RUST_LOG=info..."
 cp target/mac_dist/guest.wasm .
-RUST_LOG=info DYXEL_DEBUG_FRAMES=1 $BINARY
+RUST_LOG=info $BINARY

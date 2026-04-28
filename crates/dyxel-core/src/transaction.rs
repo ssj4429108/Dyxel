@@ -306,6 +306,7 @@ pub fn get_dirty_field_for_opcode(opcode: &OpCode) -> DirtyField {
         | OpCode::SetHeight
         | OpCode::SetHeightCompact => DirtyField::Size,
         OpCode::SetText | OpCode::SetTextContent => DirtyField::Text,
+        OpCode::SetFontSize | OpCode::SetTextWeight | OpCode::SetTextFontFamily => DirtyField::Text,
         OpCode::AddChild => DirtyField::Children,
         OpCode::SetFlexDirection
         | OpCode::SetJustifyContent

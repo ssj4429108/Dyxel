@@ -4,15 +4,15 @@
 use crate::protocol::{DirtyField, DirtyTracker};
 use crate::types::{Role, ViewType};
 use crate::{INITIAL_CAPACITY, MAX_CAPACITY, NodeHandle};
-use peniko::Color;
 use std::collections::HashMap;
 use taffy::prelude::*;
 
 pub struct ViewNode {
     pub taffy_node: NodeId,
-    pub color: Color,
-    /// Text color for Text nodes (RGBA)
-    pub text_color: Color,
+    /// Background color (RGBA, 8-bit per channel)
+    pub color: [u8; 4],
+    /// Text color for Text nodes (RGBA, 8-bit per channel)
+    pub text_color: [u8; 4],
     pub children: Vec<u32>,
     /// Parent node ID (0 means no parent/root)
     pub parent_id: u32,
@@ -217,8 +217,8 @@ impl SharedState {
             host_id,
             ViewNode {
                 taffy_node,
-                color: Color::WHITE,
-                text_color: Color::BLACK,
+                color: [255, 255, 255, 255],
+                text_color: [0, 0, 0, 255],
                 children: vec![],
                 parent_id: 0,
                 z_index: 0,
@@ -272,7 +272,7 @@ impl SharedState {
     pub fn set_color_rgba(&mut self, wasm_id: u32, r: u8, g: u8, b: u8, a: u8) {
         let id = self.resolve_id(wasm_id);
         if let Some(node) = self.nodes.get_mut(&id) {
-            node.color = Color::from_rgba8(r, g, b, a);
+            node.color = [r, g, b, a];
         }
     }
 
@@ -304,14 +304,14 @@ impl SharedState {
     pub fn set_color(&mut self, wasm_id: u32, r: u8, g: u8, b: u8) {
         let id = self.resolve_id(wasm_id);
         if let Some(node) = self.nodes.get_mut(&id) {
-            node.color = Color::from_rgb8(r, g, b);
+            node.color = [r, g, b, 255];
         }
     }
 
     pub fn set_text_color(&mut self, wasm_id: u32, r: u8, g: u8, b: u8, a: u8) {
         let id = self.resolve_id(wasm_id);
         if let Some(node) = self.nodes.get_mut(&id) {
-            node.text_color = Color::from_rgba8(r, g, b, a);
+            node.text_color = [r, g, b, a];
         }
     }
 
@@ -670,8 +670,8 @@ impl SharedState {
             slot,
             ViewNode {
                 taffy_node,
-                color: Color::WHITE,
-                text_color: Color::BLACK,
+                color: [255, 255, 255, 255],
+                text_color: [0, 0, 0, 255],
                 children: vec![],
                 parent_id: 0,
                 z_index: 0,

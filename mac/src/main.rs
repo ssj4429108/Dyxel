@@ -8,15 +8,13 @@ use std::thread;
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
+    raw_window_handle::{HasDisplayHandle, HasWindowHandle},
     window::WindowBuilder,
 };
 
 mod display_link;
 mod touch;
 use touch::TouchTracker;
-
-/// Debug flag: force continuous render mode for stable frame-pacing validation.
-const DEBUG_FORCE_CONTINUOUS: bool = false;
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -29,6 +27,10 @@ fn main() -> anyhow::Result<()> {
     );
 
     let host = DyxelHost::new();
+
+    // Inject the compile-time-selected graphics factory.
+    // The binary crate chooses the backend; dyxel-core remains backend-agnostic.
+    host.set_graphics_factory(dyxel_render_bootstrap::create_graphics_factory());
 
     // Start preparing engine in background thread
     let h_init = host.clone();
@@ -56,10 +58,12 @@ fn main() -> anyhow::Result<()> {
                     let h = host.clone();
                     let w = window.clone();
                     let size = w.inner_size();
-                    let wgpu_target: vello::wgpu::SurfaceTarget<'static> = w.clone().into();
-                    let target_handle = dyxel_render_api::SurfaceTargetHandle::new(wgpu_target);
+                    let native_handle = dyxel_render_api::NativeSurfaceHandle::RawWindow {
+                        window: w.window_handle().unwrap().as_raw(),
+                        display: w.display_handle().unwrap().as_raw(),
+                    };
                     pollster::block_on(h.setup(
-                        target_handle,
+                        native_handle,
                         size.width,
                         size.height,
                         None
@@ -86,7 +90,10 @@ fn main() -> anyhow::Result<()> {
                     host.notify_surface_changed(size.width, size.height, refresh_hz);
 
                     // Attach hardware VBlank sync for precise frame pacing on macOS.
-                    if !DEBUG_FORCE_CONTINUOUS {
+                    // In benchmark mode (DYXEL_BENCHMARK=1), skip hardware VBlank to avoid
+                    // headless environment stalls where CVDisplayLink never fires.
+                    let benchmark_mode = std::env::var("DYXEL_BENCHMARK").is_ok();
+                    if !benchmark_mode {
                         match display_link::MacVBlankWaiter::new() {
                             Ok(waiter) => {
                                 host.set_vblank_waiter(waiter);
@@ -98,10 +105,13 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    if DEBUG_FORCE_CONTINUOUS {
-                        host.set_continuous_render(true);
-                        log::info!("macOS: DEBUG_FORCE_CONTINUOUS is ON, forcing continuous render mode");
-                    }
+                    // Enable continuous render to drive self-animating content.
+                    // Without this, the logic thread only runs on user input and
+                    // self-driven animations (MixedDriver, gesture timers, etc.) freeze.
+                    // This is NOT a debug feature — it is required for any app with
+                    // ongoing state changes independent of user interaction.
+                    host.set_continuous_render(true);
+                    log::info!("macOS: Continuous render mode enabled (benchmark={})", benchmark_mode);
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
