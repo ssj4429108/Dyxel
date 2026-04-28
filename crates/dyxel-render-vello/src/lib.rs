@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use vello::wgpu;
 use vello::{
     Renderer, RendererOptions, Scene,
-    peniko::{Color, Fill},
+    peniko::Color,
 };
 
 // Two-stage init is implemented inline with cache header markers
@@ -75,6 +75,7 @@ struct BlurDirtyStats {
     overlay: usize,
     children: usize,
     invalid: usize,
+    pending: usize,
     skipped: usize,
     visible: usize,
     param_radius: usize,
@@ -95,10 +96,18 @@ struct BlurredTextureEntry {
     texture: wgpu::Texture,
     /// Pre-created view of the blurred texture for composite reuse
     texture_view: wgpu::TextureView,
-    /// Width of the texture
+    /// Active blurred content width, including blur padding. This is the
+    /// rectangle composited on screen and packed into the atlas.
     width: u32,
-    /// Height of the texture
+    /// Active blurred content height, including blur padding. This is the
+    /// rectangle composited on screen and packed into the atlas.
     height: u32,
+    /// Physical GPU texture width. Kept bucketed and >= width to avoid
+    /// reallocating/invalidating blur textures when animated layout jitters
+    /// around nearby sizes.
+    allocated_width: u32,
+    /// Physical GPU texture height. Kept bucketed and >= height.
+    allocated_height: u32,
     /// Position to draw at (with padding offset already applied)
     transform: Affine,
     /// Opacity of the blurred content
@@ -146,6 +155,10 @@ struct BlurredTextureEntry {
     /// This lets us defer rebuilds under load without compositing
     /// uninitialized/transparent blur textures.
     blur_valid: bool,
+    /// A valid-but-stale blur that still needs a background re-copy/reblur.
+    /// This lets Android keep budget=1 without dropping the visible frosted
+    /// effect to transparent while pending entries catch up.
+    blur_rebuild_pending: bool,
     /// Last frame in which this entry's blur texture was rebuilt.
     last_blur_rebuild_frame: u64,
     /// Cached resources for legacy per-entry compositing.
@@ -219,7 +232,7 @@ struct BlurAtlasTexture {
 struct BlurInstance {
     // Screen-space quad rect including blur padding: x, y, width, height.
     rect: [f32; 4],
-    // Original unpadded source rect in screen coordinates.
+    // Atlas-space rect containing the active blurred texture.
     source_rect: [f32; 4],
     // overlay rgba.
     color: [f32; 4],
@@ -342,6 +355,25 @@ const BLUR_SOURCE_POS_BUCKET_PX: f32 = 16.0;
 const BLUR_SOURCE_SIZE_BUCKET_PX: f32 = 16.0;
 #[cfg(target_os = "android")]
 const MAX_BLUR_REBUILDS_PER_FRAME_AT_60HZ: usize = 1;
+/// Experimental but correctness-preserving path: pack every visible blur
+/// backdrop into fixed atlas slots, run one Kawase blur over the atlas, then
+/// composite from the blurred atlas. Unlike the rejected full-frame backdrop
+/// path, this keeps per-entry backdrop semantics and padding.
+const USE_ATLAS_WIDE_BACKDROP_BLUR: bool = false;
+const BLUR_ATLAS_LEGACY_GAP_PX: u32 = 2;
+// The atlas-wide path blurs the whole atlas texture. Keep a transparent moat
+// between fixed slots so Kawase samples at slot edges do not bleed neighboring
+// blur cards into each other.
+const BLUR_ATLAS_WIDE_GAP_PX: u32 = 32;
+const BLUR_ATLAS_MAX_DIM_PX: u32 = 4096;
+#[cfg(target_os = "android")]
+const BLUR_ATLAS_WIDE_MAX_SLOTS: usize = 24;
+#[cfg(not(target_os = "android"))]
+const BLUR_ATLAS_WIDE_MAX_SLOTS: usize = 48;
+#[cfg(target_os = "android")]
+const BLUR_ATLAS_WIDE_MAX_AREA_PX: u64 = 2_500_000;
+#[cfg(not(target_os = "android"))]
+const BLUR_ATLAS_WIDE_MAX_AREA_PX: u64 = 5_000_000;
 const PARAM_DIRTY_RADIUS: u32 = 1 << 0;
 const PARAM_DIRTY_STYLE: u32 = 1 << 1;
 const PARAM_DIRTY_SRC_X: u32 = 1 << 2;
@@ -353,6 +385,131 @@ const PARAM_DIRTY_SRC_H: u32 = 1 << 5;
 /// Disabled: visual result does not match the legacy per-entry backdrop blur.
 /// Keep correctness first; optimization must preserve this legacy visual model.
 const USE_FULL_FRAME_BACKDROP_BLUR: bool = false;
+
+struct BlurAtlasLayout {
+    width: u32,
+    height: u32,
+    slot: u32,
+    gap: u32,
+    placements: Vec<(usize, u32, u32)>,
+}
+
+#[inline]
+fn ceil_sqrt_u32(n: u32) -> u32 {
+    if n <= 1 {
+        return n.max(1);
+    }
+    let mut x = (n as f64).sqrt().ceil() as u32;
+    while x.saturating_mul(x) < n {
+        x += 1;
+    }
+    x
+}
+
+fn compute_blur_atlas_layout(
+    entries: &[BlurredTextureEntry],
+    viewport_w: u32,
+    viewport_h: u32,
+    gap: u32,
+) -> Option<BlurAtlasLayout> {
+    let mut candidates: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.skipped_due_to_size && blur_entry_visible(entry, viewport_w, viewport_h))
+        .map(|(idx, _)| idx)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by_key(|&idx| entries[idx].view_id);
+
+    let max_entry_extent = candidates
+        .iter()
+        .map(|&idx| {
+            let entry = &entries[idx];
+            entry.width.max(entry.height).saturating_add(gap.saturating_mul(2))
+        })
+        .max()
+        .unwrap_or(0);
+
+    let slot = if max_entry_extent <= 256 {
+        256
+    } else if max_entry_extent <= 320 {
+        320
+    } else if max_entry_extent <= 384 {
+        384
+    } else {
+        return None;
+    };
+
+    let count = candidates.len() as u32;
+    let max_cols = (BLUR_ATLAS_MAX_DIM_PX / slot).max(1);
+    let mut cols = ceil_sqrt_u32(count).min(max_cols).max(1);
+    let mut rows = (count + cols - 1) / cols;
+    if rows.saturating_mul(slot) > BLUR_ATLAS_MAX_DIM_PX {
+        cols = max_cols;
+        rows = (count + cols - 1) / cols;
+    }
+    if rows.saturating_mul(slot) > BLUR_ATLAS_MAX_DIM_PX {
+        return None;
+    }
+
+    let width = cols.saturating_mul(slot);
+    let height = rows.saturating_mul(slot);
+    let mut placements = Vec::with_capacity(candidates.len());
+    for (slot_index, idx) in candidates.into_iter().enumerate() {
+        let entry = &entries[idx];
+        if entry.width.saturating_add(gap.saturating_mul(2)) > slot
+            || entry.height.saturating_add(gap.saturating_mul(2)) > slot
+        {
+            return None;
+        }
+        let col = (slot_index as u32) % cols;
+        let row = (slot_index as u32) / cols;
+        placements.push((idx, col * slot + gap, row * slot + gap));
+    }
+
+    Some(BlurAtlasLayout {
+        width,
+        height,
+        slot,
+        gap,
+        placements,
+    })
+}
+
+#[inline]
+fn kawase_pass_class_for_radius(radius: f32) -> u32 {
+    ((radius / 25.0).ceil() as u32).max(2).min(4)
+}
+
+#[inline]
+fn blur_atlas_wide_layout_within_budget(layout: &BlurAtlasLayout) -> bool {
+    layout.placements.len() <= BLUR_ATLAS_WIDE_MAX_SLOTS
+        && (layout.width as u64) * (layout.height as u64) <= BLUR_ATLAS_WIDE_MAX_AREA_PX
+}
+
+#[inline]
+fn blur_texture_alloc_extent_px(active_extent: u32) -> u32 {
+    // Blur cards in the current workload fit the 256px atlas slot. Allocating
+    // the backing texture in coarse buckets keeps the active draw rect exact
+    // while avoiding GPU texture churn and visible invalidation when layout
+    // animation jitters by a few pixels.
+    if active_extent <= 128 {
+        128
+    } else if active_extent <= 192 {
+        192
+    } else if active_extent <= 256 {
+        256
+    } else if active_extent <= 320 {
+        320
+    } else if active_extent <= 384 {
+        384
+    } else {
+        ((active_extent + 63) / 64) * 64
+    }
+}
 
 #[inline]
 fn quantize_blur_pos_px(v: f32) -> f32 {
@@ -466,6 +623,11 @@ pub struct VelloBackend {
     backdrop_blur: SharedMutex<Option<BackdropBlurTexture>>,
     // Atlas used to batch-composite legacy-correct per-entry blurred textures.
     blur_atlas: SharedMutex<Option<BlurAtlasTexture>>,
+    // Raw backdrop atlas used by the atlas-wide blur path. Each visible blur
+    // entry is copied into its fixed slot with the same padding as the legacy
+    // per-entry texture, then `blur_atlas` receives the blurred result.
+    blur_source_atlas: SharedMutex<Option<BlurAtlasTexture>>,
+    blur_atlas_wide_active_last_frame: AtomicBool,
     // Texture pool for efficient blur texture reuse
     texture_pool: SharedMutex<Option<texture_pool::SharedTexturePool>>,
     // GPU-local cache storage: node_id -> texture_id lookup table.
@@ -570,6 +732,8 @@ impl VelloBackend {
             backdrop_pyramid: SharedMutex::new(None),
             backdrop_blur: SharedMutex::new(None),
             blur_atlas: SharedMutex::new(None),
+            blur_source_atlas: SharedMutex::new(None),
+            blur_atlas_wide_active_last_frame: AtomicBool::new(false),
             texture_pool: SharedMutex::new(None),
             cached_textures: SharedMutex::new(std::collections::HashMap::new()),
             gpu_texture_pool: SharedMutex::new(None),
@@ -1324,6 +1488,7 @@ impl VelloBackend {
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
@@ -1336,6 +1501,44 @@ impl VelloBackend {
                 height,
             });
             *self.blur_instanced_bind_group.lock().unwrap() = None;
+        }
+        needs_create
+    }
+
+    fn ensure_blur_source_atlas_texture(
+        &self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        let mut atlas = self.blur_source_atlas.lock().unwrap();
+        let needs_create = atlas
+            .as_ref()
+            .map_or(true, |tex| tex.width != width || tex.height != height);
+        if needs_create {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Blur Raw Source Atlas Texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            *atlas = Some(BlurAtlasTexture {
+                texture,
+                view,
+                width,
+                height,
+            });
         }
         needs_create
     }
@@ -2025,6 +2228,9 @@ impl VelloBackend {
         // CPU/driver tail jitter. Resource creation paths below invalidate it
         // when the atlas/pipeline/buffers actually change.
 
+        let mut atlas_wide_blur_valid_this_frame = false;
+        let mut atlas_wide_source_copies_this_frame = 0usize;
+
         if has_blur {
             // Legacy/correctness path: every blur entry copies its own backdrop
             // region from the rendered scene texture and runs Kawase blur into
@@ -2048,6 +2254,9 @@ impl VelloBackend {
                 }
                 if !entry.blur_valid {
                     dirty_stats.invalid += 1;
+                }
+                if entry.blur_rebuild_pending {
+                    dirty_stats.pending += 1;
                 }
                 if entry.dirty_kind == BlurDirtyKind::BlurParamsChanged {
                     if entry.param_dirty_bits & PARAM_DIRTY_RADIUS != 0 {
@@ -2094,7 +2303,7 @@ impl VelloBackend {
                 .fold(0.0f32, f32::max);
             if current_frame % DIAG_LOG_EVERY_N_FRAMES == 0 {
                 log::info!(
-                    "[BlurLegacy] Frame {} — {} entries, {} visible, {} dirty, max_radius={:.1}, stats clean={} bg={} params={} overlay={} children={} invalid={} skipped={} param_bits radius={} style={} x={} y={} w={} h={} bg_size={} child_list={} child_bounds={}",
+                    "[BlurLegacy] Frame {} — {} entries, {} visible, {} dirty, max_radius={:.1}, stats clean={} bg={} params={} overlay={} children={} invalid={} pending={} skipped={} param_bits radius={} style={} x={} y={} w={} h={} bg_size={} child_list={} child_bounds={}",
                     current_frame,
                     blurred_textures.len(),
                     dirty_stats.visible,
@@ -2106,6 +2315,7 @@ impl VelloBackend {
                     dirty_stats.overlay,
                     dirty_stats.children,
                     dirty_stats.invalid,
+                    dirty_stats.pending,
                     dirty_stats.skipped,
                     dirty_stats.param_radius,
                     dirty_stats.param_style,
@@ -2159,6 +2369,7 @@ impl VelloBackend {
                         }
                         for entry in blurred_textures.iter_mut() {
                             entry.blur_valid = true;
+                            entry.blur_rebuild_pending = false;
                             entry.dirty_kind = BlurDirtyKind::Clean;
                         }
                         stage_timer.mark("blur_render_submit");
@@ -2171,6 +2382,211 @@ impl VelloBackend {
                     stage_timer.mark("blur_render_submit");
                 }
             } else if let Some(pipeline) = filter_pipeline.as_ref() {
+                if USE_ATLAS_WIDE_BACKDROP_BLUR {
+                    let layout = compute_blur_atlas_layout(
+                        &blurred_textures,
+                        w,
+                        h,
+                        BLUR_ATLAS_WIDE_GAP_PX,
+                    );
+                    let radius_class_reference = layout.as_ref().and_then(|layout| {
+                        layout
+                            .placements
+                            .first()
+                            .map(|(idx, _, _)| {
+                                kawase_pass_class_for_radius(blurred_textures[*idx].blur_radius)
+                            })
+                    });
+                    let radius_class_uniform = if let (Some(layout), Some(reference)) =
+                        (layout.as_ref(), radius_class_reference)
+                    {
+                        layout.placements.iter().all(|(idx, _, _)| {
+                            kawase_pass_class_for_radius(blurred_textures[*idx].blur_radius)
+                                == reference
+                        })
+                    } else {
+                        false
+                    };
+
+                    if let Some(layout) = layout {
+                        let atlas_wide_within_budget =
+                            blur_atlas_wide_layout_within_budget(&layout);
+                        if layout.placements.len() >= 8
+                            && radius_class_uniform
+                            && atlas_wide_within_budget
+                        {
+                            self.ensure_blur_atlas_texture(device, layout.width, layout.height);
+                            self.ensure_blur_source_atlas_texture(
+                                device,
+                                layout.width,
+                                layout.height,
+                            );
+                            let source_atlas_texture = {
+                                let guard = self.blur_source_atlas.lock().unwrap();
+                                guard.as_ref().map(|atlas| atlas.texture.clone())
+                            };
+                            let blurred_atlas_texture = {
+                                let guard = self.blur_atlas.lock().unwrap();
+                                guard.as_ref().map(|atlas| atlas.texture.clone())
+                            };
+
+                            if let (Some(source_atlas_texture), Some(blurred_atlas_texture)) =
+                                (source_atlas_texture, blurred_atlas_texture)
+                            {
+                                post_enc.clear_texture(
+                                    &source_atlas_texture,
+                                    &wgpu::ImageSubresourceRange {
+                                        aspect: wgpu::TextureAspect::All,
+                                        base_mip_level: 0,
+                                        mip_level_count: None,
+                                        base_array_layer: 0,
+                                        array_layer_count: None,
+                                    },
+                                );
+
+                                let mut copied_indices = Vec::with_capacity(layout.placements.len());
+                                for &(idx, ax, ay) in &layout.placements {
+                                    let entry = &mut blurred_textures[idx];
+                                    let (src_x, src_y, src_w, src_h) = entry.source_rect;
+                                    let padding =
+                                        ((entry.width as f32 - src_w) * 0.5).max(0.0) as u32;
+
+                                    #[cfg(target_os = "android")]
+                                    let src_origin_y = (h as f32 - src_y - src_h).max(0.0) as u32;
+                                    #[cfg(not(target_os = "android"))]
+                                    let src_origin_y = src_y.max(0.0) as u32;
+
+                                    let src_origin_x = src_x.max(0.0) as u32;
+                                    let copy_width = (src_w as u32)
+                                        .min(w.saturating_sub(src_origin_x))
+                                        .min(entry.width.saturating_sub(padding));
+                                    let copy_height = (src_h as u32)
+                                        .min(h.saturating_sub(src_origin_y))
+                                        .min(entry.height.saturating_sub(padding));
+                                    if copy_width == 0 || copy_height == 0 {
+                                        entry.blur_valid = false;
+                                        entry.blur_rebuild_pending = true;
+                                        entry.atlas_valid = false;
+                                        entry.atlas_dirty = true;
+                                        continue;
+                                    }
+
+                                    post_enc.copy_texture_to_texture(
+                                        wgpu::TexelCopyTextureInfo {
+                                            texture: scene_texture,
+                                            mip_level: 0,
+                                            origin: wgpu::Origin3d {
+                                                x: src_origin_x,
+                                                y: src_origin_y,
+                                                z: 0,
+                                            },
+                                            aspect: wgpu::TextureAspect::All,
+                                        },
+                                        wgpu::TexelCopyTextureInfo {
+                                            texture: &source_atlas_texture,
+                                            mip_level: 0,
+                                            origin: wgpu::Origin3d {
+                                                x: ax + padding,
+                                                y: ay + padding,
+                                                z: 0,
+                                            },
+                                            aspect: wgpu::TextureAspect::All,
+                                        },
+                                        wgpu::Extent3d {
+                                            width: copy_width,
+                                            height: copy_height,
+                                            depth_or_array_layers: 1,
+                                        },
+                                    );
+                                    copied_indices.push((idx, ax, ay));
+                                }
+                                atlas_wide_source_copies_this_frame = copied_indices.len();
+                                stage_timer.mark("blur_copy_submit");
+
+                                if !copied_indices.is_empty() {
+                                    let result = pipeline.apply_frosted_glass_kawase(
+                                        &mut post_enc,
+                                        &source_atlas_texture,
+                                        &blurred_atlas_texture,
+                                        max_radius,
+                                        None,
+                                    );
+                                    if let Err(e) = result {
+                                        log::warn!(
+                                            "[BlurAtlasWide] atlas-wide Kawase failed: {:?}",
+                                            e
+                                        );
+                                    } else {
+                                        for (idx, ax, ay) in copied_indices {
+                                            if let Some(entry) = blurred_textures.get_mut(idx) {
+                                                entry.blur_valid = true;
+                                                entry.blur_rebuild_pending = false;
+                                                entry.atlas_valid = true;
+                                                entry.atlas_dirty = false;
+                                                entry.atlas_x = ax;
+                                                entry.atlas_y = ay;
+                                                entry.last_blur_rebuild_frame = current_frame;
+                                                if entry.dirty_kind != BlurDirtyKind::ChildrenChanged {
+                                                    entry.dirty_kind = BlurDirtyKind::Clean;
+                                                }
+                                            }
+                                        }
+                                        for entry in blurred_textures.iter_mut() {
+                                            if entry.blur_rebuild_pending {
+                                                continue;
+                                            }
+                                            if matches!(
+                                                entry.dirty_kind,
+                                                BlurDirtyKind::OverlayOnlyChanged | BlurDirtyKind::Clean
+                                            ) {
+                                                entry.dirty_kind = BlurDirtyKind::Clean;
+                                            }
+                                        }
+                                        atlas_wide_blur_valid_this_frame = true;
+                                    }
+                                }
+                                stage_timer.mark("blur_render_submit");
+
+                                if atlas_wide_blur_valid_this_frame
+                                    && current_frame % DIAG_LOG_EVERY_N_FRAMES == 0
+                                {
+                                    log::info!(
+                                        "[BlurAtlasWide] Frame {} — copied {} slots, atlas={}x{} slot={} gap={} radius={:.1}",
+                                        current_frame,
+                                        atlas_wide_source_copies_this_frame,
+                                        layout.width,
+                                        layout.height,
+                                        layout.slot,
+                                        layout.gap,
+                                        max_radius,
+                                    );
+                                }
+                            }
+                        } else if current_frame % DIAG_LOG_EVERY_N_FRAMES == 0 {
+                            log::info!(
+                                "[BlurAtlasWide] fallback: placements={} radius_class_uniform={} budget_ok={} atlas={}x{}",
+                                layout.placements.len(),
+                                radius_class_uniform,
+                                atlas_wide_within_budget,
+                                layout.width,
+                                layout.height
+                            );
+                        }
+                    }
+                }
+
+                if !atlas_wide_blur_valid_this_frame {
+                if self
+                    .blur_atlas_wide_active_last_frame
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    for entry in blurred_textures.iter_mut() {
+                        entry.blur_valid = false;
+                        entry.blur_rebuild_pending = true;
+                        entry.atlas_valid = false;
+                        entry.atlas_dirty = true;
+                    }
+                }
                 let mut rebuild_indices: Vec<usize> = blurred_textures
                     .iter()
                     .enumerate()
@@ -2178,6 +2594,7 @@ impl VelloBackend {
                         !entry.skipped_due_to_size
                             && blur_entry_visible(entry, w, h)
                             && (!entry.blur_valid
+                                || entry.blur_rebuild_pending
                                 || matches!(
                                     entry.dirty_kind,
                                     BlurDirtyKind::BackgroundChanged | BlurDirtyKind::BlurParamsChanged
@@ -2307,6 +2724,7 @@ impl VelloBackend {
                 for idx in rebuilt_indices {
                     if let Some(entry) = blurred_textures.get_mut(idx) {
                         entry.blur_valid = true;
+                        entry.blur_rebuild_pending = false;
                         entry.atlas_dirty = true;
                         entry.last_blur_rebuild_frame = current_frame;
                         if entry.dirty_kind != BlurDirtyKind::ChildrenChanged {
@@ -2315,6 +2733,9 @@ impl VelloBackend {
                     }
                 }
                 for entry in blurred_textures.iter_mut() {
+                    if entry.blur_rebuild_pending {
+                        continue;
+                    }
                     if matches!(
                         entry.dirty_kind,
                         BlurDirtyKind::OverlayOnlyChanged | BlurDirtyKind::Clean
@@ -2323,12 +2744,20 @@ impl VelloBackend {
                     }
                 }
                 stage_timer.mark("blur_render_submit");
+                } else {
+                    self.blur_atlas_wide_active_last_frame
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             } else {
                 // No filter pipeline yet — record zero-time for consistent timing
+                self.blur_atlas_wide_active_last_frame
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 stage_timer.mark("blur_copy_submit");
                 stage_timer.mark("blur_render_submit");
             }
         } else {
+            self.blur_atlas_wide_active_last_frame
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             stage_timer.mark("blur_copy_submit");
             stage_timer.mark("blur_render_submit");
         }
@@ -2461,86 +2890,47 @@ impl VelloBackend {
         let mut atlas_enabled_this_frame = false;
         if has_blur {
             let mut blurred_textures = self.blurred_textures.lock().unwrap();
-            let mut atlas_candidates: Vec<usize> = blurred_textures
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| {
-                    !entry.skipped_due_to_size
-                        && blur_entry_visible(entry, w, h)
-                })
-                .map(|(idx, _)| idx)
-                .collect();
-            atlas_candidates.sort_by_key(|&idx| blurred_textures[idx].view_id);
-
-            if atlas_candidates.len() >= 8 {
-                let gap = 2u32;
-                // Fixed-size slots avoid shelf-packer ripple: when one entry's
-                // size changes slightly, a shelf layout can move most later
-                // entries and force a full atlas recopy. The current blur
-                // cards are usually small enough for a 12x12 grid in 3072².
-                let max_entry_extent = atlas_candidates
-                    .iter()
-                    .map(|&idx| {
-                        let entry = &blurred_textures[idx];
-                        entry.width.max(entry.height) + gap * 2
-                    })
-                    .max()
-                    .unwrap_or(0);
-                let (atlas_w, atlas_h, atlas_slot) = if max_entry_extent <= 256 {
-                    (2560u32, 2560u32, 256u32)
-                } else {
-                    (4096u32, 4096u32, 384u32)
-                };
-                let atlas_cols = (atlas_w / atlas_slot).max(1);
-                let atlas_rows = (atlas_h / atlas_slot).max(1);
-                let atlas_capacity = (atlas_cols * atlas_rows) as usize;
-                let mut placements: Vec<(usize, u32, u32)> = Vec::with_capacity(atlas_candidates.len());
-                let mut fits = true;
-                if atlas_candidates.len() > atlas_capacity {
-                    fits = false;
-                }
-                for (slot, idx) in atlas_candidates.into_iter().enumerate() {
-                    let entry = &blurred_textures[idx];
-                    if entry.width + gap * 2 > atlas_slot || entry.height + gap * 2 > atlas_slot {
-                        fits = false;
-                        break;
-                    }
-                    let col = (slot as u32) % atlas_cols;
-                    let row = (slot as u32) / atlas_cols;
-                    let x = col * atlas_slot + gap;
-                    let y = row * atlas_slot + gap;
-                    placements.push((idx, x, y));
-                }
-
-                if fits && !placements.is_empty() {
-                    self.ensure_blur_instanced_resources(device, surface_format, placements.len());
-                    let atlas_recreated = self.ensure_blur_atlas_texture(device, atlas_w, atlas_h);
-                    if atlas_recreated {
+            let gap = if atlas_wide_blur_valid_this_frame {
+                BLUR_ATLAS_WIDE_GAP_PX
+            } else {
+                BLUR_ATLAS_LEGACY_GAP_PX
+            };
+            if let Some(layout) = compute_blur_atlas_layout(&blurred_textures, w, h, gap) {
+                if layout.placements.len() >= 8 {
+                    self.ensure_blur_instanced_resources(device, surface_format, layout.placements.len());
+                    let atlas_recreated = self.ensure_blur_atlas_texture(device, layout.width, layout.height);
+                    if atlas_recreated && !atlas_wide_blur_valid_this_frame {
                         for entry in blurred_textures.iter_mut() {
                             entry.atlas_valid = false;
                             entry.atlas_dirty = true;
                         }
                     }
 
-                    let mut instances: Vec<BlurInstance> = Vec::with_capacity(placements.len());
+                    let mut instances: Vec<BlurInstance> = Vec::with_capacity(layout.placements.len());
                     let mut atlas_copies = 0usize;
                     {
                         let atlas_guard = self.blur_atlas.lock().unwrap();
                         if let Some(atlas) = atlas_guard.as_ref() {
-                            for &(idx, ax, ay) in &placements {
+                            for &(idx, ax, ay) in &layout.placements {
                                 let entry = &mut blurred_textures[idx];
                                 let placement_changed =
                                     !entry.atlas_valid || entry.atlas_x != ax || entry.atlas_y != ay;
                                 if placement_changed {
                                     entry.atlas_x = ax;
                                     entry.atlas_y = ay;
-                                    entry.atlas_valid = false;
-                                    entry.atlas_dirty = true;
+                                    entry.atlas_valid = atlas_wide_blur_valid_this_frame;
+                                    entry.atlas_dirty = !atlas_wide_blur_valid_this_frame;
                                 }
                                 if !entry.blur_valid {
                                     continue;
                                 }
-                                if entry.atlas_dirty || !entry.atlas_valid {
+
+                                if atlas_wide_blur_valid_this_frame {
+                                    entry.atlas_x = ax;
+                                    entry.atlas_y = ay;
+                                    entry.atlas_valid = true;
+                                    entry.atlas_dirty = false;
+                                } else if entry.atlas_dirty || !entry.atlas_valid {
                                     post_enc.copy_texture_to_texture(
                                         wgpu::TexelCopyTextureInfo {
                                             texture: &entry.texture,
@@ -2564,6 +2954,7 @@ impl VelloBackend {
                                     entry.atlas_valid = true;
                                     atlas_copies += 1;
                                 }
+
                                 let mat = entry.transform.as_coeffs();
                                 let overlay_color = entry.overlay_color;
                                 instances.push(BlurInstance {
@@ -2650,13 +3041,28 @@ impl VelloBackend {
                             }
                         }
                     }
+                    if atlas_wide_blur_valid_this_frame && !atlas_enabled_this_frame {
+                        for entry in blurred_textures.iter_mut() {
+                            entry.blur_valid = false;
+                            entry.blur_rebuild_pending = true;
+                            entry.atlas_valid = false;
+                            entry.atlas_dirty = true;
+                        }
+                    }
                     if atlas_enabled_this_frame && FRAME_COUNTER.load(std::sync::atomic::Ordering::Relaxed) % DIAG_LOG_EVERY_N_FRAMES == 0 {
                         log::info!(
-                            "[BlurAtlas] compositing {} legacy blur entries via atlas {}x{}, copies={}",
+                            "[BlurAtlas] compositing {} {} blur entries via atlas {}x{} slot={} gap={}, copies={}",
                             atlas_instance_count,
-                            atlas_w,
-                            atlas_h
-                            ,atlas_copies
+                            if atlas_wide_blur_valid_this_frame { "atlas-wide" } else { "legacy" },
+                            layout.width,
+                            layout.height,
+                            layout.slot,
+                            layout.gap,
+                            if atlas_wide_blur_valid_this_frame {
+                                atlas_wide_source_copies_this_frame
+                            } else {
+                                atlas_copies
+                            }
                         );
                     }
                 }
@@ -2935,7 +3341,8 @@ impl VelloBackend {
 
                     for entry in blurred_textures.iter_mut() {
                         let is_visible = blur_entry_visible(entry, w, h);
-                        let blur_drawn_by_atlas = atlas_enabled_this_frame && entry.blur_valid;
+                        let blur_drawn_by_atlas =
+                            atlas_enabled_this_frame && entry.blur_valid && entry.atlas_valid;
                         if !blur_drawn_by_atlas
                             && !entry.skipped_due_to_size
                             && entry.blur_valid
@@ -3554,34 +3961,44 @@ fn render_with_blur(
     let texture_width = (content_width_px + padding * 2).max(1);
     let texture_height = (content_height_px + padding * 2).max(1);
 
-    // Create offscreen texture for the blurred result
-    let texture_desc = wgpu::TextureDescriptor {
-        label: Some("Blur Offscreen Texture"),
-        size: wgpu::Extent3d {
-            width: texture_width,
-            height: texture_height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::STORAGE_BINDING
-            | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    };
-
     // Check if we already have an entry for this view_id (caching)
     let existing_index = blurred_textures.iter().position(|e| e.view_id == id);
+    let bucket_alloc_width = blur_texture_alloc_extent_px(texture_width);
+    let bucket_alloc_height = blur_texture_alloc_extent_px(texture_height);
+    let (allocated_texture_width, allocated_texture_height) =
+        existing_index.map_or((bucket_alloc_width, bucket_alloc_height), |idx| {
+            let entry = &blurred_textures[idx];
+            (
+                entry.allocated_width.max(bucket_alloc_width),
+                entry.allocated_height.max(bucket_alloc_height),
+            )
+        });
     let needs_new_texture = existing_index.map_or(true, |idx| {
         let entry = &blurred_textures[idx];
-        entry.width != texture_width || entry.height != texture_height
+        entry.allocated_width < texture_width || entry.allocated_height < texture_height
     });
 
     let offscreen_texture = if needs_new_texture {
+        // Create offscreen texture for the blurred result. The physical texture
+        // is bucketed; entry.width/height remain the exact active draw rect.
+        let texture_desc = wgpu::TextureDescriptor {
+            label: Some("Blur Offscreen Texture"),
+            size: wgpu::Extent3d {
+                width: allocated_texture_width,
+                height: allocated_texture_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        };
         let tex = device.create_texture(&texture_desc);
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         Some((tex, view))
@@ -3662,7 +4079,13 @@ fn render_with_blur(
         // ── Per-entry dirty detection ──
         let radius_value_changed = (entry.prev_blur_radius - blur.blur_radius).abs() > 0.25;
         let style_changed = blur.blur_style != entry.blur_style;
-        let radius_changed = radius_value_changed || style_changed;
+        // The current Dual-Kawase implementation only changes the actual blur
+        // kernel when the pass class changes. Radius changes inside the same
+        // pass class are visually identical as long as the padded texture size
+        // is unchanged, so do not spend the Android budget on a no-op re-blur.
+        let blur_kernel_changed = radius_value_changed
+            && kawase_pass_class_for_radius(entry.prev_blur_radius)
+                != kawase_pass_class_for_radius(blur.blur_radius);
         let new_source_rect = (
             source_x,
             source_y_taffy,
@@ -3671,7 +4094,7 @@ fn render_with_blur(
         );
         let rect_changed = blur_rect_changed(entry.prev_source_rect, new_source_rect);
         let mut param_dirty_bits = 0u32;
-        if radius_value_changed {
+        if blur_kernel_changed {
             param_dirty_bits |= PARAM_DIRTY_RADIUS;
         }
         if style_changed {
@@ -3689,7 +4112,9 @@ fn render_with_blur(
         if (entry.prev_source_rect.3 - new_source_rect.3).abs() >= BLUR_SOURCE_RECT_EPS_PX {
             param_dirty_bits |= PARAM_DIRTY_SRC_H;
         }
-        let size_changed = entry.width != texture_width || entry.height != texture_height;
+        let active_size_changed = entry.width != texture_width || entry.height != texture_height;
+        let allocation_changed =
+            entry.allocated_width < texture_width || entry.allocated_height < texture_height;
         let opacity_changed = (entry.prev_opacity - blur.opacity).abs() > f32::EPSILON;
         let overlay_changed = entry.prev_overlay_color != blur.overlay_color;
         let children_bounds_changed = (entry.children_bounds.0 - children_bounds.0).abs()
@@ -3702,23 +4127,41 @@ fn render_with_blur(
             || (entry.children_bounds.3 - children_bounds.3).abs() >= BLUR_SOURCE_RECT_EPS_PX;
         let children_changed = entry.deferred_children != deferred_children || children_bounds_changed;
 
-        entry.dirty_kind = if size_changed {
-            // Texture recreation needed — full redo
+        let computed_dirty_kind = if allocation_changed {
+            // Texture recreation needed — full redo. This should be rare now
+            // because backing textures grow in buckets instead of matching
+            // every active size exactly.
             BlurDirtyKind::BackgroundChanged
-        } else if radius_changed || rect_changed {
+        } else if blur_kernel_changed || rect_changed || active_size_changed {
             BlurDirtyKind::BlurParamsChanged
-        } else if opacity_changed || overlay_changed {
+        } else if opacity_changed || overlay_changed || style_changed {
             BlurDirtyKind::OverlayOnlyChanged
         } else if children_changed {
             BlurDirtyKind::ChildrenChanged
         } else {
             BlurDirtyKind::Clean
         };
+        entry.dirty_kind = if entry.blur_rebuild_pending
+            && matches!(
+                computed_dirty_kind,
+                BlurDirtyKind::Clean | BlurDirtyKind::OverlayOnlyChanged
+            )
+        {
+            BlurDirtyKind::BlurParamsChanged
+        } else {
+            computed_dirty_kind
+        };
         entry.param_dirty_bits = if entry.dirty_kind == BlurDirtyKind::BlurParamsChanged {
             param_dirty_bits
         } else {
             0
         };
+        if matches!(
+            entry.dirty_kind,
+            BlurDirtyKind::BackgroundChanged | BlurDirtyKind::BlurParamsChanged
+        ) {
+            entry.blur_rebuild_pending = true;
+        }
 
         // Update prev_* snapshots for next frame's comparison
         entry.prev_blur_radius = blur.blur_radius;
@@ -3734,6 +4177,12 @@ fn render_with_blur(
         entry.deferred_children = deferred_children;
         entry.children_bounds = children_bounds;
         entry.backdrop_lod = backdrop_lod;
+        if active_size_changed {
+            entry.width = texture_width;
+            entry.height = texture_height;
+            entry.atlas_valid = false;
+            entry.atlas_dirty = true;
+        }
         // Children texture lifecycle is managed in Pass 3; reset only when bounds change significantly
         if children_size_changed {
             entry.children_texture = None;
@@ -3745,22 +4194,30 @@ fn render_with_blur(
         entry.blur_radius = blur.blur_radius;
         entry.blur_style = blur.blur_style;
         entry.skipped_due_to_size = false;
-        if size_changed {
+        if allocation_changed {
             // Need to recreate texture with new size
             log::debug!(
-                "[Blur] Recreating texture for view_id={} due to size change ({}x{} -> {}x{})",
+                "[Blur] Recreating texture for view_id={} due to allocation growth (active {}x{} -> {}x{}, alloc {}x{} -> {}x{})",
                 id,
                 entry.width,
                 entry.height,
                 texture_width,
-                texture_height
+                texture_height,
+                entry.allocated_width,
+                entry.allocated_height,
+                allocated_texture_width,
+                allocated_texture_height
             );
-            let (tex, view) = offscreen_texture.expect("size_changed implies needs_new_texture");
+            let (tex, view) =
+                offscreen_texture.expect("allocation_changed implies needs_new_texture");
             entry.texture = tex;
             entry.texture_view = view;
             entry.width = texture_width;
             entry.height = texture_height;
+            entry.allocated_width = allocated_texture_width;
+            entry.allocated_height = allocated_texture_height;
             entry.blur_valid = false;
+            entry.blur_rebuild_pending = true;
             entry.atlas_valid = false;
             entry.atlas_dirty = true;
             entry.composite_bind_group = None;
@@ -3788,6 +4245,8 @@ fn render_with_blur(
             texture_view: view,
             width: texture_width,
             height: texture_height,
+            allocated_width: allocated_texture_width,
+            allocated_height: allocated_texture_height,
             transform: final_transform,
             opacity: blur.opacity,
             overlay_color: neutral_to_peniko_color(blur.overlay_color),
@@ -3810,6 +4269,7 @@ fn render_with_blur(
             backdrop_lod,
             last_seen_frame: blur_scene_frame,
             blur_valid: false,
+            blur_rebuild_pending: true,
             last_blur_rebuild_frame: 0,
             composite_uniform_buffer: None,
             composite_overlay_buffer: None,

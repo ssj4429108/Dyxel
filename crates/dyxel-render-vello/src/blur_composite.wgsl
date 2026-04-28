@@ -60,11 +60,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // For backdrop blur quads, binding 0 is the full-screen blurred backdrop.
     // source_width/source_height > 0 marks this mode. Cached subtrees and
     // children use local texture sampling and leave source size at zero.
-    var sample_uv = in.uv;
+    let dims_u = textureDimensions(t_blur);
+    let dims = vec2<f32>(f32(dims_u.x), f32(dims_u.y));
+    // Local texture mode samples by active pixel size rather than normalized
+    // quad UV. This keeps compositing correct when blur backing textures are
+    // bucket-allocated larger than the active blur rect.
+    var sample_uv = clamp(in.local_pos / dims, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
     if (overlay.source_width > 0.0 && overlay.source_height > 0.0) {
         let padding = (overlay.view_width - overlay.source_width) * 0.5;
-        let dims_u = textureDimensions(t_blur);
-        let dims = vec2<f32>(f32(dims_u.x), f32(dims_u.y));
         let screen_px = vec2<f32>(
             overlay.source_x - padding + in.local_pos.x,
             overlay.source_y - padding + in.local_pos.y
