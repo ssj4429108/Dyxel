@@ -15,11 +15,17 @@ use dyxel_render_api::{
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 static RUNTIME_TIMING_DIAG_COUNTER: AtomicU64 = AtomicU64::new(0);
 const RUNTIME_TIMING_SAMPLE_EVERY_N: u64 = 60;
 const RUNTIME_TIMING_SAMPLE_THRESHOLD_MS: f64 = 1.0;
-const RUNTIME_TIMING_ALWAYS_THRESHOLD_MS: f64 = 8.0;
+// Keep Android logcat pressure low. Surface present/acquire waits around
+// 8–16ms are common under HWC backpressure; logging every such frame can itself
+// perturb frame pacing. Truly pathological waits are still logged immediately,
+// while moderate waits are sampled.
+const RUNTIME_TIMING_ALWAYS_THRESHOLD_MS: f64 = 24.0;
+const OFFSCREEN_FRAME_RING_LEN: usize = 3;
 
 fn should_log_runtime_timing(ms: f64) -> bool {
     ms >= RUNTIME_TIMING_ALWAYS_THRESHOLD_MS
@@ -29,6 +35,18 @@ fn should_log_runtime_timing(ms: f64) -> bool {
                 == 0)
 }
 
+#[cfg(target_os = "android")]
+fn android_full_frame_offscreen_enabled() -> bool {
+    std::env::var("DYXEL_ANDROID_FULL_FRAME_OFFSCREEN")
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(true)
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_full_frame_offscreen_enabled() -> bool {
+    false
+}
+
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
@@ -36,7 +54,7 @@ use wasm_bindgen::JsCast;
 pub struct WgpuRuntime {
     instance: wgpu::Instance,
     render_context: vello::util::RenderContext,
-    surfaces: HashMap<RuntimeSurfaceId, vello::util::RenderSurface<'static>>,
+    surfaces: HashMap<RuntimeSurfaceId, Arc<Mutex<vello::util::RenderSurface<'static>>>>,
     offscreen_targets: HashMap<RuntimeSurfaceId, RuntimeOffscreenTarget>,
     next_surface_id: u32,
     late_blit_layout: Option<wgpu::BindGroupLayout>,
@@ -44,14 +62,20 @@ pub struct WgpuRuntime {
     late_blit_pipeline: Option<wgpu::RenderPipeline>,
     late_blit_pipeline_format: Option<wgpu::TextureFormat>,
     late_blit_sampler: Option<wgpu::Sampler>,
+    detached_blit_state: Arc<Mutex<super::frame_context::DetachedBlitState>>,
 }
 
 struct RuntimeOffscreenTarget {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    slots: Vec<RuntimeOffscreenSlot>,
+    next_slot: usize,
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
+}
+
+struct RuntimeOffscreenSlot {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 impl WgpuRuntime {
@@ -69,6 +93,9 @@ impl WgpuRuntime {
             late_blit_pipeline: None,
             late_blit_pipeline_format: None,
             late_blit_sampler: None,
+            detached_blit_state: Arc::new(Mutex::new(
+                super::frame_context::DetachedBlitState::new(),
+            )),
         }
     }
 
@@ -88,26 +115,23 @@ impl WgpuRuntime {
     }
 
     /// Get a mutable reference to a surface by id.
-    pub fn surface(&self, id: RuntimeSurfaceId) -> Option<&vello::util::RenderSurface<'static>> {
-        self.surfaces.get(&id)
+    pub fn surface(
+        &self,
+        id: RuntimeSurfaceId,
+    ) -> Option<Arc<Mutex<vello::util::RenderSurface<'static>>>> {
+        self.surfaces.get(&id).cloned()
     }
 
     /// Get a mutable reference to a surface by id.
     pub fn surface_mut(
         &mut self,
         id: RuntimeSurfaceId,
-    ) -> Option<&mut vello::util::RenderSurface<'static>> {
-        self.surfaces.get_mut(&id)
+    ) -> Option<Arc<Mutex<vello::util::RenderSurface<'static>>>> {
+        self.surfaces.get(&id).cloned()
     }
 
-    fn ensure_late_blit_pipeline(
-        &mut self,
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-    ) {
-        if self.late_blit_pipeline.is_some()
-            && self.late_blit_pipeline_format == Some(format)
-        {
+    fn ensure_late_blit_pipeline(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        if self.late_blit_pipeline.is_some() && self.late_blit_pipeline_format == Some(format) {
             return;
         }
 
@@ -186,41 +210,50 @@ impl WgpuRuntime {
         self.late_blit_pipeline_format = Some(format);
     }
 
-    fn ensure_offscreen_target(
+    fn next_offscreen_target(
         &mut self,
         surface_id: RuntimeSurfaceId,
         device: &wgpu::Device,
         width: u32,
         height: u32,
         format: wgpu::TextureFormat,
-    ) -> &RuntimeOffscreenTarget {
-        let needs_recreate = self
-            .offscreen_targets
-            .get(&surface_id)
-            .map_or(true, |t| t.width != width || t.height != height || t.format != format);
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let needs_recreate = self.offscreen_targets.get(&surface_id).map_or(true, |t| {
+            t.width != width
+                || t.height != height
+                || t.format != format
+                || t.slots.len() != OFFSCREEN_FRAME_RING_LEN
+        });
         if needs_recreate {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Runtime Offscreen Frame Target"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut slots = Vec::with_capacity(OFFSCREEN_FRAME_RING_LEN);
+            for _ in 0..OFFSCREEN_FRAME_RING_LEN {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Runtime Offscreen Frame Target"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("Runtime Offscreen Frame Target View"),
+                    ..Default::default()
+                });
+                slots.push(RuntimeOffscreenSlot { texture, view });
+            }
             self.offscreen_targets.insert(
                 surface_id,
                 RuntimeOffscreenTarget {
-                    texture,
-                    view,
+                    slots,
+                    next_slot: 0,
                     width,
                     height,
                     format,
@@ -233,6 +266,18 @@ impl WgpuRuntime {
                 format
             );
         }
+        let target = self
+            .offscreen_targets
+            .get_mut(&surface_id)
+            .expect("offscreen target must exist after creation");
+        let slot_index = target.next_slot % target.slots.len();
+        target.next_slot = (target.next_slot + 1) % target.slots.len();
+        let slot = &target.slots[slot_index];
+        (slot.texture.clone(), slot.view.clone())
+    }
+
+    #[allow(dead_code)]
+    fn offscreen_target_for_tests(&self, surface_id: RuntimeSurfaceId) -> &RuntimeOffscreenTarget {
         self.offscreen_targets
             .get(&surface_id)
             .expect("offscreen target must exist after creation")
@@ -243,10 +288,8 @@ impl GraphicsRuntime for WgpuRuntime {
     fn initialize(&mut self) -> anyhow::Result<()> {
         // Ensure at least one device is available.
         if self.render_context.devices.is_empty() {
-            let dev_id = pollster::block_on(async {
-                self.render_context.device(None).await
-            })
-            .ok_or_else(|| anyhow::anyhow!("No compatible wgpu device found"))?;
+            let dev_id = pollster::block_on(async { self.render_context.device(None).await })
+                .ok_or_else(|| anyhow::anyhow!("No compatible wgpu device found"))?;
             log::info!("WgpuRuntime: initialized device id {}", dev_id);
         }
         Ok(())
@@ -264,25 +307,28 @@ impl GraphicsRuntime for WgpuRuntime {
                     raw_window_handle: window,
                     raw_display_handle: display,
                 };
-                unsafe { self.instance.create_surface_unsafe(target) }
-                    .map_err(|e| anyhow::anyhow!("Failed to create wgpu surface from raw handle: {:?}", e))?
+                unsafe { self.instance.create_surface_unsafe(target) }.map_err(|e| {
+                    anyhow::anyhow!("Failed to create wgpu surface from raw handle: {:?}", e)
+                })?
             }
             NativeSurfaceHandle::WebCanvas { canvas_id } => {
                 #[cfg(target_arch = "wasm32")]
                 {
                     let window = web_sys::window()
                         .ok_or_else(|| anyhow::anyhow!("No web window available"))?;
-                    let document = window.document()
+                    let document = window
+                        .document()
                         .ok_or_else(|| anyhow::anyhow!("No document available"))?;
-                    let canvas = document.get_element_by_id(&canvas_id)
-                        .ok_or_else(|| anyhow::anyhow!("Canvas element '{}' not found", canvas_id))?;
+                    let canvas = document.get_element_by_id(&canvas_id).ok_or_else(|| {
+                        anyhow::anyhow!("Canvas element '{}' not found", canvas_id)
+                    })?;
                     let canvas: web_sys::HtmlCanvasElement = canvas
                         .dyn_into()
                         .map_err(|_| anyhow::anyhow!("Element '{}' is not a canvas", canvas_id))?;
                     let target = wgpu::SurfaceTarget::Canvas(canvas);
-                    self.instance
-                        .create_surface(target)
-                        .map_err(|e| anyhow::anyhow!("Failed to create wgpu surface from canvas: {:?}", e))?
+                    self.instance.create_surface(target).map_err(|e| {
+                        anyhow::anyhow!("Failed to create wgpu surface from canvas: {:?}", e)
+                    })?
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -292,30 +338,28 @@ impl GraphicsRuntime for WgpuRuntime {
                     ));
                 }
             }
-            NativeSurfaceHandle::NativeSurface { kind, ptr } => {
-                match kind {
-                    NativeSurfaceKind::Android => {
-                        let handle = raw_window_handle::AndroidNdkWindowHandle::new(
-                            std::ptr::NonNull::new(ptr as *mut std::ffi::c_void)
-                                .ok_or_else(|| anyhow::anyhow!("Invalid ANativeWindow pointer"))?
-                        );
-                        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-                            raw_window_handle: raw_window_handle::RawWindowHandle::AndroidNdk(handle),
-                            raw_display_handle: raw_window_handle::RawDisplayHandle::Android(
-                                raw_window_handle::AndroidDisplayHandle::new()
-                            ),
-                        };
-                        unsafe { self.instance.create_surface_unsafe(target) }
-                            .map_err(|e| anyhow::anyhow!("Failed to create Android surface: {:?}", e))?
-                    }
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "NativeSurface kind {:?} not yet supported in WgpuRuntime",
-                            kind
-                        ));
-                    }
+            NativeSurfaceHandle::NativeSurface { kind, ptr } => match kind {
+                NativeSurfaceKind::Android => {
+                    let handle = raw_window_handle::AndroidNdkWindowHandle::new(
+                        std::ptr::NonNull::new(ptr as *mut std::ffi::c_void)
+                            .ok_or_else(|| anyhow::anyhow!("Invalid ANativeWindow pointer"))?,
+                    );
+                    let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_window_handle: raw_window_handle::RawWindowHandle::AndroidNdk(handle),
+                        raw_display_handle: raw_window_handle::RawDisplayHandle::Android(
+                            raw_window_handle::AndroidDisplayHandle::new(),
+                        ),
+                    };
+                    unsafe { self.instance.create_surface_unsafe(target) }
+                        .map_err(|e| anyhow::anyhow!("Failed to create Android surface: {:?}", e))?
                 }
-            }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "NativeSurface kind {:?} not yet supported in WgpuRuntime",
+                        kind
+                    ));
+                }
+            },
         };
 
         // Select present mode based on platform capabilities.
@@ -336,9 +380,15 @@ impl GraphicsRuntime for WgpuRuntime {
         let id = RuntimeSurfaceId(self.next_surface_id);
         self.next_surface_id += 1;
         let dev_id = v_surface.dev_id;
-        self.surfaces.insert(id, v_surface);
+        self.surfaces.insert(id, Arc::new(Mutex::new(v_surface)));
 
-        log::info!("WgpuRuntime: created surface {:?} ({}x{}) dev_id={}", id, width, height, dev_id);
+        log::info!(
+            "WgpuRuntime: created surface {:?} ({}x{}) dev_id={}",
+            id,
+            width,
+            height,
+            dev_id
+        );
         Ok(id)
     }
 
@@ -350,9 +400,13 @@ impl GraphicsRuntime for WgpuRuntime {
     ) -> anyhow::Result<()> {
         let surface = self
             .surfaces
-            .get_mut(&surface_id)
+            .get(&surface_id)
             .ok_or_else(|| anyhow::anyhow!("Surface {:?} not found", surface_id))?;
-        self.render_context.resize_surface(surface, width, height);
+        let mut surface = surface
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Surface {:?} lock poisoned", surface_id))?;
+        self.render_context
+            .resize_surface(&mut surface, width, height);
         self.offscreen_targets.remove(&surface_id);
         // resize_surface already calls configure_surface internally
         Ok(())
@@ -360,6 +414,9 @@ impl GraphicsRuntime for WgpuRuntime {
 
     fn suspend(&mut self) -> anyhow::Result<()> {
         for (_, surface) in &mut self.surfaces {
+            let surface = surface
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Surface lock poisoned during suspend"))?;
             surface.surface.configure(
                 &self.render_context.devices[surface.dev_id].device,
                 &wgpu::SurfaceConfiguration {
@@ -368,7 +425,7 @@ impl GraphicsRuntime for WgpuRuntime {
                     width: surface.config.width,
                     height: surface.config.height,
                     present_mode: surface.config.present_mode,
-                    desired_maximum_frame_latency: 2,
+                    desired_maximum_frame_latency: surface.config.desired_maximum_frame_latency,
                     alpha_mode: wgpu::CompositeAlphaMode::Auto,
                     view_formats: vec![],
                 },
@@ -379,6 +436,9 @@ impl GraphicsRuntime for WgpuRuntime {
 
     fn resume(&mut self) -> anyhow::Result<()> {
         for (_, surface) in &mut self.surfaces {
+            let surface = surface
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Surface lock poisoned during resume"))?;
             let device = &self.render_context.devices[surface.dev_id].device;
             surface.surface.configure(device, &surface.config);
         }
@@ -399,8 +459,11 @@ impl GraphicsRuntime for WgpuRuntime {
         let (dev_id, format, width, height) = {
             let surface = self
                 .surfaces
-                .get_mut(&surface_id)
+                .get(&surface_id)
                 .ok_or_else(|| anyhow::anyhow!("Surface {:?} not found", surface_id))?;
+            let surface = surface
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Surface {:?} lock poisoned", surface_id))?;
             (
                 surface.dev_id,
                 surface.format,
@@ -411,38 +474,61 @@ impl GraphicsRuntime for WgpuRuntime {
         let device = self.render_context.devices[dev_id].device.clone();
         let queue = self.render_context.devices[dev_id].queue.clone();
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "android"))]
         {
-            // macOS uses Fifo in the stable path. Acquiring the drawable here
-            // can block on CAMetalLayer/vblank and makes the scheduler account
-            // that wait as render work. Render to an offscreen texture first;
-            // acquire the drawable only in end_frame for the final blit/present.
-            let target = self.ensure_offscreen_target(surface_id, &device, width, height, format);
+            // macOS/Fifo benefits from full-frame offscreen-first because
+            // drawable acquire can block. On Android this is an experiment only:
+            // real-device logs showed the extra full-frame blit can push mobile
+            // GPU/HWC over budget and drop the app to ~40fps, so keep it opt-in.
+            let use_offscreen_first =
+                cfg!(target_os = "macos") || android_full_frame_offscreen_enabled();
+            if use_offscreen_first {
+                let (offscreen_texture, offscreen_view) =
+                    self.next_offscreen_target(surface_id, &device, width, height, format);
+                #[cfg(target_os = "android")]
+                let detached_presenter = {
+                    let surface = self
+                        .surfaces
+                        .get(&surface_id)
+                        .ok_or_else(|| anyhow::anyhow!("Surface {:?} not found", surface_id))?
+                        .clone();
+                    Some(super::frame_context::WgpuDetachedPresenter::new(
+                        surface,
+                        self.detached_blit_state.clone(),
+                    ))
+                };
+                #[cfg(not(target_os = "android"))]
+                let detached_presenter = None;
 
-            return Ok(Box::new(super::frame_context::WgpuFrameContext {
-                surface_id,
-                surface_texture: None,
-                offscreen_texture: Some(target.texture.clone()),
-                view: target.view.clone(),
-                render_to_offscreen: true,
-                device,
-                queue,
-                format,
-                width,
-                height,
-                acquire_ms: 0.0,
-                present_ms: 0.0,
-            }));
+                return Ok(Box::new(super::frame_context::WgpuFrameContext {
+                    surface_id,
+                    surface_texture: None,
+                    offscreen_texture: Some(offscreen_texture),
+                    view: offscreen_view,
+                    render_to_offscreen: true,
+                    device,
+                    queue,
+                    format,
+                    width,
+                    height,
+                    acquire_ms: 0.0,
+                    present_ms: 0.0,
+                    last_submission_index: None,
+                    detached_presenter,
+                }));
+            }
         }
 
-        #[cfg(not(target_os = "macos"))]
         {
             // Acquire surface texture for this frame.
             let acquire_t0 = std::time::Instant::now();
-            let surface_texture = self
+            let surface = self
                 .surfaces
-                .get_mut(&surface_id)
-                .ok_or_else(|| anyhow::anyhow!("Surface {:?} not found", surface_id))?
+                .get(&surface_id)
+                .ok_or_else(|| anyhow::anyhow!("Surface {:?} not found", surface_id))?;
+            let surface_texture = surface
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Surface {:?} lock poisoned", surface_id))?
                 .surface
                 .get_current_texture()
                 .map_err(|e| anyhow::anyhow!("Failed to acquire surface texture: {:?}", e))?;
@@ -468,14 +554,13 @@ impl GraphicsRuntime for WgpuRuntime {
                 height,
                 acquire_ms,
                 present_ms: 0.0,
+                last_submission_index: None,
+                detached_presenter: None,
             }))
         }
     }
 
-    fn end_frame(
-        &mut self,
-        mut frame: Box<dyn BackendFrameContext>,
-    ) -> anyhow::Result<()> {
+    fn end_frame(&mut self, mut frame: Box<dyn BackendFrameContext>) -> anyhow::Result<()> {
         let frame = frame
             .as_any()
             .downcast_mut::<super::frame_context::WgpuFrameContext>()
@@ -486,14 +571,19 @@ impl GraphicsRuntime for WgpuRuntime {
         if frame.render_to_offscreen {
             let surface = self
                 .surfaces
-                .get_mut(&frame.surface_id)
+                .get(&frame.surface_id)
                 .ok_or_else(|| anyhow::anyhow!("Surface {:?} not found", frame.surface_id))?;
 
             let acquire_t0 = std::time::Instant::now();
-            let surface_texture = surface
-                .surface
-                .get_current_texture()
-                .map_err(|e| anyhow::anyhow!("Failed to late-acquire surface texture: {:?}", e))?;
+            let (surface_texture, surface_format) = {
+                let surface = surface
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Surface {:?} lock poisoned", frame.surface_id))?;
+                let surface_texture = surface.surface.get_current_texture().map_err(|e| {
+                    anyhow::anyhow!("Failed to late-acquire surface texture: {:?}", e)
+                })?;
+                (surface_texture, surface.format)
+            };
             let late_acquire_ms = acquire_t0.elapsed().as_secs_f64() * 1000.0;
 
             let surface_view = surface_texture
@@ -505,7 +595,7 @@ impl GraphicsRuntime for WgpuRuntime {
                 .ok_or_else(|| anyhow::anyhow!("Missing offscreen texture in frame context"))?
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
-            self.ensure_late_blit_pipeline(&frame.device, frame.format);
+            self.ensure_late_blit_pipeline(&frame.device, surface_format);
             let bind_group = frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Runtime Late Surface Blit Bind Group"),
                 layout: self
@@ -520,17 +610,20 @@ impl GraphicsRuntime for WgpuRuntime {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(
-                            self.late_blit_sampler
-                                .as_ref()
-                                .ok_or_else(|| anyhow::anyhow!("Late blit sampler not initialized"))?,
+                            self.late_blit_sampler.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!("Late blit sampler not initialized")
+                            })?,
                         ),
                     },
                 ],
             });
 
-            let mut encoder = frame.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Runtime Late Surface Blit Encoder"),
-            });
+            let mut encoder =
+                frame
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Runtime Late Surface Blit Encoder"),
+                    });
             {
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Runtime Late Surface Blit Pass"),

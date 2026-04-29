@@ -70,12 +70,18 @@ fn test_vello_integration_render_to_texture() {
     let mut frame = dyxel_render_vello::frame_context::WgpuFrameContext {
         surface_id: RuntimeSurfaceId(1),
         surface_texture: Some(fake_surface_tex),
+        offscreen_texture: None,
         view: test_view,
+        render_to_offscreen: false,
         device: device.clone(),
         queue: queue.clone(),
         format: wgpu::TextureFormat::Rgba8Unorm,
         width: 256,
         height: 256,
+        acquire_ms: 0.0,
+        present_ms: 0.0,
+        last_submission_index: None,
+        detached_presenter: None,
     };
 
     backend.render(&mut frame as &mut dyn BackendFrameContext,

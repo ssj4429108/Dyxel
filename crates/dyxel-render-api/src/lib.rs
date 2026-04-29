@@ -302,7 +302,9 @@ pub struct TextDrawPayload {
 #[derive(Clone, Debug)]
 pub enum NodeContent {
     /// RGBA, 8-bit per channel (sRGB, non-premultiplied).
-    Rect { color: [u8; 4] },
+    Rect {
+        color: [u8; 4],
+    },
     Text(TextDrawPayload),
 }
 
@@ -385,11 +387,7 @@ pub struct RenderPackage {
 }
 
 impl RenderPackage {
-    pub fn new(
-        viewport: (u32, u32),
-        root_id: Option<u32>,
-        nodes: Vec<SceneNode>,
-    ) -> Self {
+    pub fn new(viewport: (u32, u32), root_id: Option<u32>, nodes: Vec<SceneNode>) -> Self {
         Self {
             viewport,
             root_id,
@@ -679,15 +677,10 @@ pub enum NativeSurfaceHandle {
         display: raw_window_handle::RawDisplayHandle,
     },
     /// Web canvas path
-    WebCanvas {
-        canvas_id: String,
-    },
+    WebCanvas { canvas_id: String },
     /// Opaque native surface pointer for platforms that cannot use
     /// raw-window-handle naturally (e.g. Android ANativeWindow*)
-    NativeSurface {
-        kind: NativeSurfaceKind,
-        ptr: u64,
-    },
+    NativeSurface { kind: NativeSurfaceKind, ptr: u64 },
 }
 
 // Native surface handles are opaque transport values passed between platform
@@ -709,6 +702,43 @@ pub enum NativeSurfaceKind {
 pub struct RuntimeSurfaceId(pub u32);
 
 /// Per-frame rendering context — created by GraphicsRuntime, consumed by RenderBackend.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait BackendFrameContext: Send {
+    fn as_any(&mut self) -> &mut dyn Any;
+    fn runtime_kind(&self) -> RuntimeKind;
+
+    /// Whether this frame can be presented without calling back into
+    /// `GraphicsRuntime::end_frame`.
+    ///
+    /// Android full-frame offscreen presenter uses this to move surface
+    /// acquire/blit/present onto a bounded presenter path without holding the
+    /// runtime mutex and blocking render-thread `begin_frame`.
+    fn supports_detached_present(&self) -> bool {
+        false
+    }
+
+    /// Present the frame from a detached presenter path.
+    ///
+    /// Implementations that return `true` from `supports_detached_present` must
+    /// override this method.
+    fn present_detached(self: Box<Self>) -> anyhow::Result<f64> {
+        Err(anyhow::anyhow!(
+            "BackendFrameContext does not support detached present"
+        ))
+    }
+
+    /// Wait until GPU work submitted before this call is complete.
+    ///
+    /// Backends that cannot expose a fence-like signal should keep the default
+    /// ready response. WGPU-backed runtimes override this via
+    /// `Queue::on_submitted_work_done`, allowing presenters to distinguish
+    /// GpuSubmitted from GpuReady.
+    fn wait_until_gpu_ready(&self, _timeout: std::time::Duration) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 pub trait BackendFrameContext {
     fn as_any(&mut self) -> &mut dyn Any;
     fn runtime_kind(&self) -> RuntimeKind;
@@ -750,10 +780,7 @@ pub trait GraphicsRuntime: Send + Sync {
         surface: RuntimeSurfaceId,
     ) -> anyhow::Result<Box<dyn BackendFrameContext>>;
 
-    fn end_frame(
-        &mut self,
-        frame: Box<dyn BackendFrameContext>,
-    ) -> anyhow::Result<()>;
+    fn end_frame(&mut self, frame: Box<dyn BackendFrameContext>) -> anyhow::Result<()>;
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -786,10 +813,7 @@ pub trait GraphicsRuntime {
         surface: RuntimeSurfaceId,
     ) -> anyhow::Result<Box<dyn BackendFrameContext>>;
 
-    fn end_frame(
-        &mut self,
-        frame: Box<dyn BackendFrameContext>,
-    ) -> anyhow::Result<()>;
+    fn end_frame(&mut self, frame: Box<dyn BackendFrameContext>) -> anyhow::Result<()>;
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;

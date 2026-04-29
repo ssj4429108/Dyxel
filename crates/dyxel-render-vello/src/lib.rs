@@ -1689,7 +1689,7 @@ impl VelloBackend {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         target_view: &wgpu::TextureView,
-    ) -> RenderResult {
+    ) -> anyhow::Result<Option<vello::wgpu::SubmissionIndex>> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Clear Surface (Async Loading)"),
         });
@@ -1712,10 +1712,10 @@ impl VelloBackend {
             });
         }
 
-        queue.submit(Some(encoder.finish()));
+        let submission_index = queue.submit(Some(encoder.finish()));
         // Present is handled by the caller (old render_package) or GraphicsRuntime::end_frame (new path)
 
-        Ok(())
+        Ok(Some(submission_index))
     }
 
     /// Generate a 3-level downsample pyramid from the full-res scene texture.
@@ -1803,7 +1803,7 @@ impl VelloBackend {
         target_view: &wgpu::TextureView,
         surface_format: wgpu::TextureFormat,
         package: &dyxel_render_api::RenderPackage,
-    ) -> RenderResult {
+    ) -> anyhow::Result<Option<vello::wgpu::SubmissionIndex>> {
         // Derive render inputs from the immutable package (no runtime objects)
         let node_map: std::collections::HashMap<u32, &dyxel_render_api::SceneNode> =
             package.nodes.iter().map(|n| (n.id, n)).collect();
@@ -1860,7 +1860,7 @@ impl VelloBackend {
         stage_timer.mark("perf_start");
 
         if w == 0 || h == 0 {
-            return Ok(());
+            return Ok(None);
         }
 
         // Reset per-frame shadow cache miss counter
@@ -3674,7 +3674,7 @@ impl VelloBackend {
         }
 
         // Single submit for all post-Vello GPU work
-        queue.submit(Some(post_enc.finish()));
+        let submission_index = queue.submit(Some(post_enc.finish()));
         stage_timer.mark("blit_submit");
 
         // Debug: Save composite frame when we have blur textures
@@ -3801,7 +3801,7 @@ impl VelloBackend {
             }
         }
 
-        Ok(())
+        Ok(Some(submission_index))
     }
 
     /// Render a package using a pre-acquired surface texture (double-layer API entry point).
@@ -3814,7 +3814,7 @@ impl VelloBackend {
         surface_texture: &wgpu::SurfaceTexture,
         surface_format: wgpu::TextureFormat,
         package: &dyxel_render_api::RenderPackage,
-    ) -> RenderResult {
+    ) -> anyhow::Result<Option<vello::wgpu::SubmissionIndex>> {
         let target_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -3833,7 +3833,7 @@ impl VelloBackend {
         target_view: &wgpu::TextureView,
         target_format: wgpu::TextureFormat,
         package: &dyxel_render_api::RenderPackage,
-    ) -> RenderResult {
+    ) -> anyhow::Result<Option<vello::wgpu::SubmissionIndex>> {
         self.render_internal_impl(device, queue, target_view, target_format, package)
     }
 
@@ -5330,15 +5330,15 @@ impl RenderBackend for VelloBackend {
                 .get_current_texture()
                 .map_err(|e| anyhow::anyhow!("Failed to get current texture: {:?}", e))?;
             let target_view = st.texture.create_view(&Default::default());
-            let result = self.render_internal_impl(
+            let _ = self.render_internal_impl(
                 device,
                 queue,
                 &target_view,
                 v_surface.surface.format,
                 package,
-            );
+            )?;
             st.present();
-            return result;
+            return Ok(());
         }
 
         #[cfg(target_os = "android")]
@@ -5355,15 +5355,15 @@ impl RenderBackend for VelloBackend {
                 .get_current_texture()
                 .map_err(|e| anyhow::anyhow!("Failed to get current texture: {:?}", e))?;
             let target_view = st.texture.create_view(&Default::default());
-            let result = self.render_internal_impl(
+            let _ = self.render_internal_impl(
                 device,
                 queue,
                 &target_view,
                 v_surface.surface.format,
                 package,
-            );
+            )?;
             st.present();
-            return result;
+            return Ok(());
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -5380,15 +5380,15 @@ impl RenderBackend for VelloBackend {
                 .get_current_texture()
                 .map_err(|e| anyhow::anyhow!("Failed to get current texture: {:?}", e))?;
             let target_view = st.texture.create_view(&Default::default());
-            let result = self.render_internal_impl(
+            let _ = self.render_internal_impl(
                 device,
                 queue,
                 &target_view,
                 v_surface.surface.format,
                 package,
-            );
+            )?;
             st.present();
-            return result;
+            return Ok(());
         }
 
         #[cfg(all(

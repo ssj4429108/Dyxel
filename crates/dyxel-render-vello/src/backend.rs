@@ -84,14 +84,14 @@ impl RenderBackendV2 for VelloDrawingBackend {
             .downcast_mut::<super::frame_context::WgpuFrameContext>()
             .ok_or_else(|| anyhow::anyhow!("Invalid frame context type"))?;
 
-        if frame.render_to_offscreen {
+        let submission_index = if frame.render_to_offscreen {
             self.vello_backend.render_to_view(
                 &frame.device,
                 &frame.queue,
                 &frame.view,
                 frame.format,
                 package,
-            )?;
+            )?
         } else {
             self.vello_backend.render_with_surface_texture(
                 &frame.device,
@@ -99,8 +99,9 @@ impl RenderBackendV2 for VelloDrawingBackend {
                 frame.surface_texture.as_ref().ok_or_else(|| anyhow::anyhow!("Missing surface texture in frame context"))?,
                 frame.format,
                 package,
-            )?;
-        }
+            )?
+        };
+        frame.last_submission_index = submission_index;
 
         Ok(RenderFrameStats {
             cpu_time_ms: None,
