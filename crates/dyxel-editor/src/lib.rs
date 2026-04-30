@@ -112,9 +112,9 @@ impl Editor {
     /// Set font weight.
     pub fn set_font_weight(&mut self, weight: u16) {
         self.font_weight = weight;
-        self.editor
-            .edit_styles()
-            .insert(StyleProperty::FontWeight(parley::style::FontWeight::new(weight as f32)));
+        self.editor.edit_styles().insert(StyleProperty::FontWeight(
+            parley::style::FontWeight::new(weight as f32),
+        ));
     }
 
     /// Get current font family.
@@ -128,9 +128,9 @@ impl Editor {
         let family_stack = if family.is_empty() {
             FontStack::Single(GenericFamily::SystemUi.into())
         } else {
-            FontStack::Single(parley::style::FontFamily::Named(
-                std::borrow::Cow::Owned(family.to_string()),
-            ))
+            FontStack::Single(parley::style::FontFamily::Named(std::borrow::Cow::Owned(
+                family.to_string(),
+            )))
         };
         self.editor
             .edit_styles()

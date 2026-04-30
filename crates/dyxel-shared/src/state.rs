@@ -3,7 +3,7 @@
 
 use crate::protocol::{DirtyField, DirtyTracker};
 use crate::types::{Role, ViewType};
-use crate::{INITIAL_CAPACITY, MAX_CAPACITY, NodeHandle};
+use crate::{NodeHandle, INITIAL_CAPACITY, MAX_CAPACITY};
 use std::collections::HashMap;
 use taffy::prelude::*;
 

@@ -12,8 +12,8 @@
 //! - Third launch: Full cache hit, fastest startup
 
 use std::sync::{
-    Arc,
     atomic::{AtomicU8, Ordering},
+    Arc,
 };
 use std::thread;
 

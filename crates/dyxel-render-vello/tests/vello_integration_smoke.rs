@@ -1,6 +1,4 @@
-use dyxel_render_api::{
-    BackendFrameContext, GraphicsRuntime, RenderBackendV2, RuntimeSurfaceId,
-};
+use dyxel_render_api::{BackendFrameContext, GraphicsRuntime, RenderBackendV2, RuntimeSurfaceId};
 use dyxel_render_vello::{backend::VelloDrawingBackend, runtime::WgpuRuntime};
 
 #[test]
@@ -9,7 +7,8 @@ fn test_vello_integration_render_to_texture() {
     runtime.initialize().expect("Failed to initialize runtime");
 
     let mut backend = VelloDrawingBackend::new();
-    backend.initialize(&mut runtime as &mut dyn GraphicsRuntime)
+    backend
+        .initialize(&mut runtime as &mut dyn GraphicsRuntime)
         .expect("Failed to initialize backend");
 
     // Create a dummy package with a simple scene
@@ -84,9 +83,9 @@ fn test_vello_integration_render_to_texture() {
         detached_presenter: None,
     };
 
-    backend.render(&mut frame as &mut dyn BackendFrameContext,
-        &package,
-    ).expect("Render failed");
+    backend
+        .render(&mut frame as &mut dyn BackendFrameContext, &package)
+        .expect("Render failed");
 
     // Read back the test texture
     let bytes_per_row = ((256 * 4 + 255) / 256) * 256;
@@ -119,7 +118,9 @@ fn test_vello_integration_render_to_texture() {
 
     let slice = readback.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
     while rx.try_recv().is_err() {
         let _ = device.poll(wgpu::PollType::Poll);
     }
@@ -128,6 +129,9 @@ fn test_vello_integration_render_to_texture() {
     let first_pixel = [data[0], data[1], data[2], data[3]];
     println!("Integration test first pixel: {:?}", first_pixel);
 
-    assert!(first_pixel[0] > 0 || first_pixel[1] > 0 || first_pixel[2] > 0,
-        "Expected non-black pixel, got {:?}", first_pixel);
+    assert!(
+        first_pixel[0] > 0 || first_pixel[1] > 0 || first_pixel[2] > 0,
+        "Expected non-black pixel, got {:?}",
+        first_pixel
+    );
 }

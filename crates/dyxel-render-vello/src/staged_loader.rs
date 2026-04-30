@@ -4,8 +4,8 @@
 //! Staged shader loader with progressive enhancement
 
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicU8, Ordering},
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};

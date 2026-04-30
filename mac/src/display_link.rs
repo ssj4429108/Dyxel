@@ -154,12 +154,9 @@ impl VBlankWaiter for MacVBlankWaiter {
         let start_counter = self.state.counter.load(Ordering::SeqCst);
         let target = start_counter + 1;
         let timeout = std::time::Duration::from_millis(100);
-        let result = self
-            .state
-            .condvar
-            .wait_timeout_while(last, timeout, |_l| {
-                self.state.counter.load(Ordering::SeqCst) < target
-            });
+        let result = self.state.condvar.wait_timeout_while(last, timeout, |_l| {
+            self.state.counter.load(Ordering::SeqCst) < target
+        });
         match result {
             Ok((mut guard, timeout_result)) => {
                 let reached = self.state.counter.load(Ordering::SeqCst) >= target;

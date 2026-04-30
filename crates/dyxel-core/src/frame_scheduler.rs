@@ -19,6 +19,19 @@ const PERF_STATS_WARMUP_PRESENTED_SKIP: u64 = if cfg!(target_os = "macos") { 60 
 /// skipped-in-flight only.
 const PERF_DROP_COUNTS_MAILBOX_EPOCHS: bool = !cfg!(target_os = "macos");
 const PERF_DROP_FROM_RASTER_FPS_DEFICIT: bool = cfg!(target_os = "macos");
+#[cfg(target_os = "android")]
+fn max_submitted_not_presented() -> u32 {
+    std::env::var("DYXEL_ANDROID_PIPELINE_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1)
+        .clamp(1, 3)
+}
+
+#[cfg(not(target_os = "android"))]
+fn max_submitted_not_presented() -> u32 {
+    2
+}
 
 /// Catch-up threshold for missed VBlank tokens. Disabled on Android due to
 /// Choreographer late-phase launch causing spurious catch-up tokens.
@@ -60,6 +73,22 @@ pub enum SchedulerEvent {
         frame_id: u64,
         epoch: u64,
     },
+    GpuSubmitted {
+        frame_id: u64,
+        epoch: u64,
+        stats: crate::FrameStats,
+        will_present: bool,
+    },
+    GpuReady {
+        frame_id: u64,
+        epoch: u64,
+    },
+    Presented {
+        frame_id: u64,
+        epoch: u64,
+        present_ms: f32,
+    },
+    /// Legacy synchronous path: render and present completed together.
     RenderCompleted {
         frame_id: u64,
         epoch: u64,
@@ -118,6 +147,8 @@ pub struct FrameScheduler {
     last_sent_cadence: Option<(f64, u32)>,
     /// Buffer for tracking UI (logic commit) frame rate.
     ui_frame_buffer: EventRateBuffer,
+    /// Buffer for tracking actual platform presented frame rate.
+    present_frame_buffer: EventRateBuffer,
     /// Shared performance stats written by the scheduler.
     frame_perf_state: Option<Arc<Mutex<FramePerformanceStats>>>,
     /// Last time a render token was issued. Used for cadence diagnostics.
@@ -127,6 +158,9 @@ pub struct FrameScheduler {
     /// we can retroactively issue a token for that VBlank instead of waiting
     /// another full interval.
     last_vblank: Option<(Instant, CadenceDecision)>,
+    submitted_not_ready: u32,
+    ready_not_presented: u32,
+    last_present_at: Option<Instant>,
 }
 
 impl FrameScheduler {
@@ -153,9 +187,13 @@ impl FrameScheduler {
             surface_height: 0,
             last_sent_cadence: None,
             ui_frame_buffer: EventRateBuffer::new(60),
+            present_frame_buffer: EventRateBuffer::new(60),
             frame_perf_state,
             last_token_issued_at: None,
             last_vblank: None,
+            submitted_not_ready: 0,
+            ready_not_presented: 0,
+            last_present_at: None,
         }
     }
 
@@ -285,7 +323,17 @@ impl FrameScheduler {
                 if decision.should_present_this_tick {
                     match self.state {
                         SchedulerState::Armed => {
-                            self.try_issue_token_with_decision(decision, timestamp);
+                            if self.has_pipeline_capacity() {
+                                self.try_issue_token_with_decision(decision, timestamp);
+                            } else {
+                                self.timeline.record_skipped_vblank(
+                                    timestamp,
+                                    crate::frame_timeline::FrameResultClass::SkippedInFlight,
+                                    self.display_hz,
+                                    decision.divisor,
+                                    decision.effective_hz,
+                                );
+                            }
                         }
                         SchedulerState::Rendering => {
                             // A frame is already in flight; this VBlank cannot
@@ -332,58 +380,76 @@ impl FrameScheduler {
                 );
                 false
             }
+            SchedulerEvent::GpuSubmitted {
+                frame_id,
+                epoch,
+                stats,
+                will_present,
+            } => {
+                self.handle_gpu_submitted(frame_id, epoch, stats, will_present);
+                false
+            }
+            SchedulerEvent::GpuReady { frame_id, epoch } => {
+                if self.submitted_not_ready > 0 {
+                    self.submitted_not_ready -= 1;
+                }
+                self.ready_not_presented = self.ready_not_presented.saturating_add(1);
+                if frame_id % 60 == 0 || self.ready_not_presented > 1 {
+                    log::info!(
+                        "[DIAG] FrameScheduler: GpuReady frame_id={} epoch={} submitted_not_ready={} ready_not_presented={} total={}/{}",
+                        frame_id,
+                        epoch,
+                        self.submitted_not_ready,
+                        self.ready_not_presented,
+                        self.pipeline_depth(),
+                        max_submitted_not_presented()
+                    );
+                }
+                false
+            }
+            SchedulerEvent::Presented {
+                frame_id,
+                epoch,
+                present_ms,
+            } => {
+                if self.ready_not_presented > 0 {
+                    self.ready_not_presented -= 1;
+                } else if self.submitted_not_ready > 0 {
+                    self.submitted_not_ready -= 1;
+                }
+                self.last_presented_epoch = self.last_presented_epoch.max(epoch);
+                let now = Instant::now();
+                let interval_ms = self
+                    .last_present_at
+                    .map(|last| now.duration_since(last).as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                self.last_present_at = Some(now);
+                self.present_frame_buffer.push(now);
+                self.update_performance_state();
+                if frame_id % 60 == 0 || present_ms >= 8.0 {
+                    log::info!(
+                        "[DIAG] FrameScheduler: Presented frame_id={} epoch={} present_ms={:.2} interval={:.2}ms submitted_not_ready={} ready_not_presented={} total={}/{}",
+                        frame_id,
+                        epoch,
+                        present_ms,
+                        interval_ms,
+                        self.submitted_not_ready,
+                        self.ready_not_presented,
+                        self.pipeline_depth(),
+                        max_submitted_not_presented()
+                    );
+                }
+                false
+            }
             SchedulerEvent::RenderCompleted {
                 frame_id,
                 epoch,
                 stats,
             } => {
-                let now = Instant::now();
-                self.timeline.mark_render_completed(frame_id, now);
-                let measured_work_ms = (stats.frame_time_ms > 0.0).then_some(stats.frame_time_ms as f64);
-                let missed_cadence = self
-                    .timeline
-                    .classify_frame_result_with_duration(frame_id, measured_work_ms)
-                    .map(|r| matches!(r, crate::frame_timeline::FrameResultClass::MissedCadence))
-                    .unwrap_or(false);
-                self.cadence
-                    .record_frame(crate::cadence::GovernorFrameRecord {
-                        frame_time_ms: stats.frame_time_ms as f64,
-                        gpu_time_ms: None, // TODO: populate when GPU timing is available
-                        missed_cadence,
-                    });
+                self.handle_gpu_submitted(frame_id, epoch, stats, false);
                 self.last_presented_epoch = epoch;
-                self.in_flight = None;
+                self.present_frame_buffer.push(Instant::now());
                 self.update_performance_state();
-
-                // If a newer epoch was committed while rendering, arm again.
-                // The next VBlank will issue the token (refresh-locked).
-                let new_state = if self.latest_committed_epoch > epoch {
-                    SchedulerState::Armed
-                } else {
-                    SchedulerState::CoolingDown
-                };
-                self.state = new_state;
-
-                // Catch-up: if we just transitioned to Armed and a VBlank fired
-                // very recently (we missed it because RenderCompleted hadn't
-                // arrived yet), issue a token immediately for that VBlank
-                // instead of waiting another full interval.
-                if new_state == SchedulerState::Armed {
-                    if let Some((vblank_timestamp, decision)) = self.last_vblank {
-                        let elapsed = now.duration_since(vblank_timestamp);
-                        if decision.should_present_this_tick
-                            && elapsed < Duration::from_millis(CATCH_UP_THRESHOLD_MS)
-                            && self.in_flight.is_none()
-                        {
-                            log::info!(
-                                "[DIAG] FrameScheduler: catch-up token for missed VBlank (elapsed={:.2}ms) frame_id={}",
-                                elapsed.as_secs_f64() * 1000.0,
-                                self.next_frame_id.load(Ordering::Relaxed)
-                            );
-                            self.try_issue_token_with_decision(decision, vblank_timestamp);
-                        }
-                    }
-                }
                 false
             }
             SchedulerEvent::SurfaceChanged {
@@ -479,6 +545,75 @@ impl FrameScheduler {
         }
     }
 
+    fn handle_gpu_submitted(
+        &mut self,
+        frame_id: u64,
+        epoch: u64,
+        stats: crate::FrameStats,
+        will_present: bool,
+    ) {
+        let now = Instant::now();
+        self.timeline.mark_render_completed(frame_id, now);
+        let measured_work_ms = (stats.frame_time_ms > 0.0).then_some(stats.frame_time_ms as f64);
+        let missed_cadence = self
+            .timeline
+            .classify_frame_result_with_duration(frame_id, measured_work_ms)
+            .map(|r| matches!(r, crate::frame_timeline::FrameResultClass::MissedCadence))
+            .unwrap_or(false);
+        self.cadence
+            .record_frame(crate::cadence::GovernorFrameRecord {
+                frame_time_ms: stats.frame_time_ms as f64,
+                gpu_time_ms: None,
+                missed_cadence,
+            });
+        self.in_flight = None;
+        if will_present {
+            self.submitted_not_ready = self.submitted_not_ready.saturating_add(1);
+        }
+        self.update_performance_state();
+
+        let new_state = if self.latest_committed_epoch > epoch {
+            SchedulerState::Armed
+        } else {
+            SchedulerState::CoolingDown
+        };
+        self.state = new_state;
+
+        if new_state == SchedulerState::Armed {
+            self.try_catch_up(now);
+        }
+    }
+
+    fn try_catch_up(&mut self, now: Instant) {
+        let Some((vblank_timestamp, decision)) = self.last_vblank else {
+            return;
+        };
+        if !decision.should_present_this_tick
+            || self.in_flight.is_some()
+            || !self.has_pipeline_capacity()
+        {
+            return;
+        }
+        let elapsed = now.duration_since(vblank_timestamp);
+        if elapsed >= Duration::from_millis(CATCH_UP_THRESHOLD_MS) {
+            return;
+        }
+        log::info!(
+            "[DIAG] FrameScheduler: catch-up token for missed VBlank (elapsed={:.2}ms) frame_id={}",
+            elapsed.as_secs_f64() * 1000.0,
+            self.next_frame_id.load(Ordering::Relaxed)
+        );
+        self.try_issue_token_with_decision(decision, vblank_timestamp);
+    }
+
+    fn pipeline_depth(&self) -> u32 {
+        self.submitted_not_ready + self.ready_not_presented
+    }
+
+    fn has_pipeline_capacity(&self) -> bool {
+        self.pipeline_depth() < max_submitted_not_presented()
+    }
+
     pub fn cadence_info(&self) -> CadenceInfo {
         self.cadence.info()
     }
@@ -513,6 +648,9 @@ impl FrameScheduler {
             let mut dropped_count = dropped;
             if let Ok(mut perf) = state.lock() {
                 perf.ui_fps = self.ui_frame_buffer.fps();
+                if self.present_frame_buffer.fps() > 0.0 {
+                    perf.raster_fps = self.present_frame_buffer.fps();
+                }
                 perf.target_fps = cadence.effective_hz as f32;
 
                 if PERF_DROP_FROM_RASTER_FPS_DEFICIT {

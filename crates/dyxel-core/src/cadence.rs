@@ -25,13 +25,25 @@ const OUTLIER_CAP_MS: f64 = 40.0;
 /// disabled. At 1.50 the governor never downgraded, causing sustained
 /// missed-cadence jank. At 1.20, 22ms frames correctly trigger 30fps
 /// mode (33ms budget) which eliminates the jank spiral.
-const DOWNGRADE_TOTAL_PRESSURE_FACTOR: f64 = if cfg!(target_os = "macos") { 2.50 } else { 1.20 };
+const DOWNGRADE_TOTAL_PRESSURE_FACTOR: f64 = if cfg!(target_os = "macos") {
+    2.50
+} else {
+    1.20
+};
 /// Missed cadence is noisy at the VBlank boundary; require a majority of the
 /// short window before treating it as sustained pressure.
-const DOWNGRADE_MISSED_RATE: f64 = if cfg!(target_os = "macos") { 0.75 } else { 0.50 };
+const DOWNGRADE_MISSED_RATE: f64 = if cfg!(target_os = "macos") {
+    0.75
+} else {
+    0.50
+};
 /// A short skipped-in-flight burst can come from one cold-start GPU outlier.
 /// Require a longer continuous burst before downshifting cadence.
-const DOWNGRADE_SKIPPED_IN_FLIGHT: u32 = if cfg!(target_os = "macos") { u32::MAX } else { 6 };
+const DOWNGRADE_SKIPPED_IN_FLIGHT: u32 = if cfg!(target_os = "macos") {
+    u32::MAX
+} else {
+    6
+};
 /// Upgrade only when the long-window total time has clear headroom under the
 /// next faster cadence's frame budget. Basing this on the current slower budget
 /// allows 30fps workloads to promote back to 60fps while still exceeding the
@@ -339,13 +351,9 @@ impl CadenceGovernor {
 
                 // Fast-path: short window (recent performance)
                 if self.short_window.len() >= SHORT_WINDOW {
-                    let short_p95_total =
-                        percentile(&self.short_window, |r| r.frame_time_ms, 0.95);
-                    let short_p95_gpu = percentile(
-                        &self.short_window,
-                        |r| r.gpu_time_ms.unwrap_or(0.0),
-                        0.95,
-                    );
+                    let short_p95_total = percentile(&self.short_window, |r| r.frame_time_ms, 0.95);
+                    let short_p95_gpu =
+                        percentile(&self.short_window, |r| r.gpu_time_ms.unwrap_or(0.0), 0.95);
                     let short_missed_rate = self
                         .short_window
                         .iter()
@@ -383,16 +391,12 @@ impl CadenceGovernor {
 
                 // Stable-path: long window (sustained performance)
                 if self.long_window.len() >= LONG_WINDOW / 2 {
-                    let long_missed_rate = self.long_window.iter().filter(|r| r.missed_cadence).count()
-                        as f64
-                        / self.long_window.len() as f64;
-                    let long_p95_total =
-                        percentile(&self.long_window, |r| r.frame_time_ms, 0.95);
-                    let long_p95_gpu = percentile(
-                        &self.long_window,
-                        |r| r.gpu_time_ms.unwrap_or(0.0),
-                        0.95,
-                    );
+                    let long_missed_rate =
+                        self.long_window.iter().filter(|r| r.missed_cadence).count() as f64
+                            / self.long_window.len() as f64;
+                    let long_p95_total = percentile(&self.long_window, |r| r.frame_time_ms, 0.95);
+                    let long_p95_gpu =
+                        percentile(&self.long_window, |r| r.gpu_time_ms.unwrap_or(0.0), 0.95);
 
                     let total_upgrade_headroom =
                         UPGRADE_NEXT_TOTAL_HEADROOM_FACTOR * next_target_frame_ms;

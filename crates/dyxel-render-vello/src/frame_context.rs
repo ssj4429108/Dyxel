@@ -118,13 +118,13 @@ impl DetachedBlitState {
 
 #[derive(Clone)]
 pub(crate) struct WgpuDetachedPresenter {
-    surface: Arc<Mutex<vello::util::RenderSurface<'static>>>,
+    surface: Arc<Mutex<super::runtime::RuntimeRenderSurface>>,
     blit_state: Arc<Mutex<DetachedBlitState>>,
 }
 
 impl WgpuDetachedPresenter {
     pub(crate) fn new(
-        surface: Arc<Mutex<vello::util::RenderSurface<'static>>>,
+        surface: Arc<Mutex<super::runtime::RuntimeRenderSurface>>,
         blit_state: Arc<Mutex<DetachedBlitState>>,
     ) -> Self {
         Self {
@@ -222,14 +222,45 @@ impl WgpuDetachedPresenter {
         }
         drop(blit_state);
 
-        frame.queue.submit(Some(encoder.finish()));
+        let blit_submit_t0 = std::time::Instant::now();
+        let blit_submission = frame.queue.submit(Some(encoder.finish()));
+        let blit_submit_ms = blit_submit_t0.elapsed().as_secs_f64() * 1000.0;
+
+        let wait_for_blit = std::env::var("DYXEL_ANDROID_DETACHED_BLIT_READY_WAIT")
+            .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+            .unwrap_or(false);
+        let blit_wait_t0 = std::time::Instant::now();
+        let blit_ready = if wait_for_blit {
+            match frame.device.poll(vello::wgpu::PollType::Wait {
+                submission_index: Some(blit_submission),
+                timeout: Some(std::time::Duration::from_millis(50)),
+            }) {
+                Ok(_) => true,
+                Err(vello::wgpu::PollError::Timeout) => false,
+                Err(err) => {
+                    log::warn!("[DIAG-RUNTIME] detached_surface_blit_wait error: {:?}", err);
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        let blit_wait_ms = blit_wait_t0.elapsed().as_secs_f64() * 1000.0;
         surface_texture.present();
 
         let present_ms = present_t0.elapsed().as_secs_f64() * 1000.0;
-        if late_acquire_ms >= 24.0 || present_ms >= 24.0 {
+        if wait_for_blit && !blit_ready
+            || late_acquire_ms >= 8.0
+            || blit_wait_ms >= 4.0
+            || present_ms >= 8.0
+        {
             log::info!(
-                "[DIAG-RUNTIME] detached_late_acquire_ms={:.2} detached_present_ms={:.2}",
+                "[DIAG-RUNTIME] detached_late_acquire_ms={:.2} detached_blit_submit_ms={:.2} detached_blit_wait_ms={:.2} wait={} ready={} detached_present_ms={:.2}",
                 late_acquire_ms,
+                blit_submit_ms,
+                blit_wait_ms,
+                wait_for_blit,
+                blit_ready,
                 present_ms
             );
         }
@@ -281,16 +312,34 @@ impl BackendFrameContext for WgpuFrameContext {
     }
 
     fn supports_detached_present(&self) -> bool {
-        self.render_to_offscreen && self.detached_presenter.is_some()
+        (self.render_to_offscreen && self.detached_presenter.is_some())
+            || (!self.render_to_offscreen && self.surface_texture.is_some())
     }
 
     fn present_detached(self: Box<Self>) -> anyhow::Result<f64> {
         let mut frame = *self;
-        let presenter = frame
-            .detached_presenter
+        if frame.render_to_offscreen {
+            let presenter = frame
+                .detached_presenter
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("WgpuFrameContext has no detached presenter"))?;
+            return presenter.present_offscreen(frame);
+        }
+
+        let present_t0 = std::time::Instant::now();
+        let surface_texture = frame
+            .surface_texture
             .take()
-            .ok_or_else(|| anyhow::anyhow!("WgpuFrameContext has no detached presenter"))?;
-        presenter.present_offscreen(frame)
+            .ok_or_else(|| anyhow::anyhow!("Detached direct present missing surface texture"))?;
+        surface_texture.present();
+        let present_ms = present_t0.elapsed().as_secs_f64() * 1000.0;
+        if present_ms >= 8.0 {
+            log::info!(
+                "[DIAG-RUNTIME] detached_direct_present_ms={:.2}",
+                present_ms
+            );
+        }
+        Ok(present_ms)
     }
 
     fn wait_until_gpu_ready(&self, timeout: std::time::Duration) -> anyhow::Result<bool> {

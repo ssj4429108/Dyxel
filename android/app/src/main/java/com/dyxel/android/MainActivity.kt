@@ -1,6 +1,7 @@
 package com.dyxel.android
 
 import android.annotation.SuppressLint
+import android.graphics.PixelFormat
 import android.os.Bundle
 import android.view.*
 import androidx.appcompat.app.AppCompatActivity
@@ -43,6 +44,12 @@ class MainActivity : AppCompatActivity() {
         engine.setup(this)
 
         val sv = SurfaceView(this)
+        // The rendered scene is fully opaque. Tell Android up front so the
+        // SurfaceView layer does not get treated as an alpha-composited layer
+        // by SurfaceFlinger/HWC. This is separate from wgpu's surface
+        // CompositeAlphaMode and affects the Java SurfaceHolder/ANativeWindow
+        // that backs the wgpu surface.
+        sv.holder.setFormat(PixelFormat.OPAQUE)
         setContentView(sv, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT

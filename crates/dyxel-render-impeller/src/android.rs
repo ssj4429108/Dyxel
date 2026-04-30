@@ -5,6 +5,10 @@ use ash::vk::Handle;
 use dyxel_render_api::{RenderContext, SurfaceState};
 use impellers::{Context, VkSwapChain};
 use std::os::raw::c_void;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static ANDROID_IMPELLER_RENDER_COUNT: AtomicU32 = AtomicU32::new(0);
+static ANDROID_IMPELLER_ACQUIRE_FAIL_COUNT: AtomicU32 = AtomicU32::new(0);
 
 pub struct AndroidImpellerSurfaceState {
     pub swapchain: VkSwapChain,
@@ -74,9 +78,6 @@ impl SurfaceState for AndroidImpellerSurfaceState {
     fn height(&self) -> u32 {
         self.height
     }
-    fn density(&self) -> f32 {
-        self.density
-    }
 }
 
 pub fn render_android(
@@ -84,24 +85,19 @@ pub fn render_android(
     surface: &mut AndroidImpellerSurfaceState,
     display_list: &impellers::DisplayList,
 ) -> anyhow::Result<()> {
-    static mut RENDER_COUNT: u32 = 0;
-    unsafe {
-        if RENDER_COUNT < 5 {
-            log::info!(
-                "RENDER_ANDROID_ENTRY: width={}, height={}",
-                surface.width,
-                surface.height
-            );
-            RENDER_COUNT += 1;
-        }
+    let entry_count = ANDROID_IMPELLER_RENDER_COUNT.load(Ordering::Relaxed);
+    if entry_count < 5 {
+        log::info!(
+            "RENDER_ANDROID_ENTRY: width={}, height={}",
+            surface.width,
+            surface.height
+        );
     }
 
     if let Some(mut impeller_surface) = surface.swapchain.acquire_next_surface_new() {
-        unsafe {
-            if RENDER_COUNT < 6 {
-                log::info!("RENDER_ANDROID: Surface acquired, drawing...");
-                RENDER_COUNT += 1;
-            }
+        let render_count = ANDROID_IMPELLER_RENDER_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if render_count <= 5 {
+            log::info!("RENDER_ANDROID: Surface acquired, drawing...");
         }
         if let Err(e) = impeller_surface.draw_display_list(display_list) {
             log::error!("IMPELLER: draw_display_list failed: {:?}", e);
@@ -110,15 +106,12 @@ pub fn render_android(
             log::error!("IMPELLER: present failed: {:?}", e);
         }
     } else {
-        static mut FAIL_COUNT: u32 = 0;
-        unsafe {
-            if FAIL_COUNT % 60 == 0 {
-                log::warn!(
-                    "IMPELLER: Failed to acquire next surface from swapchain (count: {})",
-                    FAIL_COUNT
-                );
-            }
-            FAIL_COUNT += 1;
+        let fail_count = ANDROID_IMPELLER_ACQUIRE_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+        if fail_count % 60 == 0 {
+            log::warn!(
+                "IMPELLER: Failed to acquire next surface from swapchain (count: {})",
+                fail_count
+            );
         }
     }
     Ok(())

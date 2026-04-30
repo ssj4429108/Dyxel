@@ -1,8 +1,8 @@
 // Minimal standalone test: verify Vello 0.7.0 render_to_texture works
 
 use vello::{
-    Renderer, RendererOptions, Scene,
     peniko::{Color, Fill},
+    Renderer, RendererOptions, Scene,
 };
 
 #[test]
@@ -32,14 +32,13 @@ fn test_vello_render_to_texture() {
 
     let (device, queue) = pollster::block_on(async {
         adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Test Device"),
-                    required_features: adapter.features() & (wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE),
-                    required_limits: wgpu::Limits::default(),
-                    ..Default::default()
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Test Device"),
+                required_features: adapter.features()
+                    & (wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
             .await
             .expect("Failed to create device")
     });
@@ -136,7 +135,9 @@ fn test_vello_render_to_texture() {
 
     let slice = readback.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
     while rx.try_recv().is_err() {
         device.poll(wgpu::PollType::Poll);
     }
@@ -145,15 +146,30 @@ fn test_vello_render_to_texture() {
     let first_pixel = [data[0], data[1], data[2], data[3]];
     let center_pixel = {
         let offset = (128 * bytes_per_row + 128 * 4) as usize;
-        [data[offset], data[offset+1], data[offset+2], data[offset+3]]
+        [
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]
     };
 
     println!("First pixel: {:?}", first_pixel);
     println!("Center pixel: {:?}", center_pixel);
 
     // Expect red (255, 0, 0, 255)
-    assert_eq!(first_pixel, [255, 0, 0, 255], "Expected red pixel, got {:?}", first_pixel);
-    assert_eq!(center_pixel, [255, 0, 0, 255], "Expected red pixel at center, got {:?}", center_pixel);
+    assert_eq!(
+        first_pixel,
+        [255, 0, 0, 255],
+        "Expected red pixel, got {:?}",
+        first_pixel
+    );
+    assert_eq!(
+        center_pixel,
+        [255, 0, 0, 255],
+        "Expected red pixel at center, got {:?}",
+        center_pixel
+    );
 
     println!("SUCCESS: render_to_texture works correctly!");
 }

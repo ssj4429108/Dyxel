@@ -9,6 +9,7 @@ use dyxel_render_api::{
 use dyxel_shared::ViewType;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use taffy::style::AvailableSpace;
 
 /// Rebuild a single SceneNode's render-only properties, reusing cached layout values.
@@ -87,9 +88,7 @@ fn rebuild_single_node(
             prepared,
         })
     } else {
-        NodeContent::Rect {
-            color: node.color,
-        }
+        NodeContent::Rect { color: node.color }
     };
 
     let shadow = if node.shadow_blur > 0.0 {
@@ -237,9 +236,7 @@ fn build_scene_snapshot(
                 prepared,
             })
         } else {
-            NodeContent::Rect {
-                color: node.color,
-            }
+            NodeContent::Rect { color: node.color }
         };
 
         let shadow = if node.shadow_blur > 0.0 {
@@ -551,7 +548,9 @@ pub fn runtime_prepare(e: &mut LogicState, w: u32, h: u32) -> RenderPackage {
             for node_id in g.dirty_tracker.iter_dirty_nodes() {
                 if let Some(&idx) = index.get(&node_id) {
                     if let Some(cached) = cache.get(idx) {
-                        if let Some(new_node) = rebuild_single_node(&g, &mut editors, node_id, cached) {
+                        if let Some(new_node) =
+                            rebuild_single_node(&g, &mut editors, node_id, cached)
+                        {
                             cache[idx] = new_node.clone();
                             nodes[idx] = new_node;
                         }
@@ -773,6 +772,187 @@ pub struct RenderFrameTimings {
     pub end_ms: f64,
 }
 
+#[cfg(target_os = "android")]
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(default)
+}
+
+#[cfg(target_os = "android")]
+fn env_f64(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(default)
+}
+
+/// Android HWC logs `WaitGpuAcquireFence` when the app presents a surface
+/// buffer immediately after queue submission and SurfaceFlinger inherits the
+/// still-open GPU fence. Fully waiting for GPU ready eliminates those logs but
+/// destroys frame pacing. This experimental path tries a tiny headroom-gated
+/// wait, but remains opt-in because real-device validation showed it can move
+/// presents closer to SurfaceFlinger composition and increase HWC wait counts.
+#[cfg(target_os = "android")]
+fn maybe_adaptive_android_present_wait(
+    frame: &dyn dyxel_render_api::BackendFrameContext,
+    render_elapsed_ms: f64,
+    frame_interval_ms: f64,
+) -> f64 {
+    if !env_flag_enabled("DYXEL_ANDROID_ADAPTIVE_PRESENT_WAIT", false) {
+        return 0.0;
+    }
+
+    let max_wait_ms = env_f64("DYXEL_ANDROID_ADAPTIVE_PRESENT_WAIT_MAX_MS", 2.0).clamp(0.0, 8.0);
+    if max_wait_ms <= 0.0 {
+        return 0.0;
+    }
+
+    // Keep enough slack for surface_texture.present(), thread wake jitter, and
+    // scheduler bookkeeping. This is intentionally conservative: the mitigation
+    // must never regress the known-good 60fps default path.
+    let headroom_guard_ms =
+        env_f64("DYXEL_ANDROID_ADAPTIVE_PRESENT_WAIT_GUARD_MS", 2.5).clamp(0.5, 8.0);
+    let interval_budget_ms = if (8.0..=100.0).contains(&frame_interval_ms) {
+        frame_interval_ms
+    } else {
+        16.67
+    };
+    let available_ms = interval_budget_ms - headroom_guard_ms - render_elapsed_ms;
+    let wait_budget_ms = max_wait_ms.min(available_ms.max(0.0));
+    if wait_budget_ms < 0.25 {
+        return 0.0;
+    }
+
+    let wait_t0 = std::time::Instant::now();
+    let ready = match frame
+        .wait_until_gpu_ready(std::time::Duration::from_secs_f64(wait_budget_ms / 1000.0))
+    {
+        Ok(ready) => ready,
+        Err(err) => {
+            log::warn!("[DIAG-RENDERER] adaptive_present_wait error: {:?}", err);
+            false
+        }
+    };
+    let wait_ms = wait_t0.elapsed().as_secs_f64() * 1000.0;
+
+    static ADAPTIVE_WAIT_LOG_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sample = ADAPTIVE_WAIT_LOG_COUNTER.fetch_add(1, Ordering::Relaxed) % 60 == 0;
+    if sample || ready {
+        log::info!(
+            "[DIAG-RENDERER] adaptive_present_wait wait={:.2}ms budget={:.2}ms ready={} render_elapsed={:.2}ms interval={:.2}ms",
+            wait_ms,
+            wait_budget_ms,
+            ready,
+            render_elapsed_ms,
+            interval_budget_ms
+        );
+    }
+
+    wait_ms
+}
+
+pub struct DeferredRenderFrame {
+    runtime: Arc<StdMutex<Box<dyn dyxel_render_api::GraphicsRuntime>>>,
+    frame: Box<dyn dyxel_render_api::BackendFrameContext>,
+    begin_ms: f64,
+    backend_ms: f64,
+}
+
+impl DeferredRenderFrame {
+    pub fn submitted_timings(&self) -> RenderFrameTimings {
+        RenderFrameTimings {
+            begin_ms: self.begin_ms,
+            backend_ms: self.backend_ms,
+            end_ms: 0.0,
+        }
+    }
+
+    pub fn wait_until_gpu_ready(&self, timeout: std::time::Duration) -> (bool, f64) {
+        let t0 = std::time::Instant::now();
+        let ready = match self.frame.wait_until_gpu_ready(timeout) {
+            Ok(ready) => ready,
+            Err(err) => {
+                log::warn!("renderer: GPU ready wait failed: {:?}", err);
+                false
+            }
+        };
+        (ready, t0.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    pub fn present(self) -> RenderFrameTimings {
+        let DeferredRenderFrame {
+            runtime,
+            frame,
+            begin_ms,
+            backend_ms,
+        } = self;
+
+        let t2 = std::time::Instant::now();
+        let end_result = if frame.supports_detached_present() {
+            frame.present_detached().map(|_| ())
+        } else {
+            runtime.lock().unwrap().end_frame(frame)
+        };
+        if let Err(err) = end_result {
+            log::error!("renderer: deferred present failed: {:?}", err);
+        }
+        let end_ms = t2.elapsed().as_secs_f64() * 1000.0;
+        record_render_frame_timing(begin_ms, backend_ms, end_ms)
+    }
+}
+
+/// Render into an offscreen frame context and return it for a bounded presenter.
+pub fn render_frame_with_package_deferred_present(
+    e: &mut RenderState,
+    surface_id: RuntimeSurfaceId,
+    package: &RenderPackage,
+    frame_timing: Option<(f64, f64)>,
+    perf_stats: Option<dyxel_perf::FramePerformanceStats>,
+) -> Option<DeferredRenderFrame> {
+    let Some(runtime_arc) = e.runtime.as_ref() else {
+        log::error!("renderer: GraphicsRuntime not available");
+        return None;
+    };
+    let Some(backend) = e.backend_v2.as_mut() else {
+        log::error!("renderer: RenderBackendV2 not available");
+        return None;
+    };
+
+    if let Some((pacer_wait_ms, frame_interval_ms)) = frame_timing {
+        backend.set_frame_timing(pacer_wait_ms, frame_interval_ms);
+    }
+
+    if let Some(stats) = perf_stats {
+        backend.set_frame_performance_stats(stats);
+    }
+
+    let t0 = std::time::Instant::now();
+    let mut frame = match runtime_arc.lock().unwrap().begin_frame(surface_id) {
+        Ok(f) => f,
+        Err(err) => {
+            log::error!("renderer: begin_frame failed: {:?}", err);
+            return None;
+        }
+    };
+    let begin_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t1 = std::time::Instant::now();
+    let render_result = backend.render(frame.as_mut(), package);
+    let backend_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    if let Err(err) = render_result {
+        log::error!("renderer: Render error: {:?}", err);
+    }
+
+    Some(DeferredRenderFrame {
+        runtime: runtime_arc.clone(),
+        frame,
+        begin_ms,
+        backend_ms,
+    })
+}
+
 /// GPU-side render owned by Render Worker.
 /// Consumes a pre-prepared RenderPackage snapshot from the mailbox.
 pub fn render_frame_with_package(
@@ -818,11 +998,24 @@ pub fn render_frame_with_package(
     }
 
     let t2 = std::time::Instant::now();
+    #[cfg(target_os = "android")]
+    if let Some((_, frame_interval_ms)) = frame_timing {
+        let render_elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _ = maybe_adaptive_android_present_wait(
+            frame.as_ref(),
+            render_elapsed_ms,
+            frame_interval_ms,
+        );
+    }
     if let Err(err) = runtime_arc.lock().unwrap().end_frame(frame) {
         log::error!("renderer: end_frame failed: {:?}", err);
     }
     let end_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
+    Some(record_render_frame_timing(begin_ms, backend_ms, end_ms))
+}
+
+fn record_render_frame_timing(begin_ms: f64, backend_ms: f64, end_ms: f64) -> RenderFrameTimings {
     // Per-frame threshold trigger. Keep this sampled: present/end_frame often
     // sits around 1–3ms on Android, and logging every such frame adds enough
     // logcat pressure to perturb the cadence we are measuring.
@@ -846,11 +1039,11 @@ pub fn render_frame_with_package(
         }
     }
 
-    Some(RenderFrameTimings {
+    RenderFrameTimings {
         begin_ms,
         backend_ms,
         end_ms,
-    })
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
 //! 4. Type downcasts and runtime kind checks work (no GPU required)
 
 use dyxel_render_api::GraphicsRuntimeFactory;
-use dyxel_render_vello::{VelloGraphicsFactory, runtime::WgpuRuntime};
+use dyxel_render_vello::{runtime::WgpuRuntime, VelloGraphicsFactory};
 
 /// Step 2A: Validate object model and contract without touching GPU.
 /// This must pass in CI / headless environments.
@@ -66,5 +66,7 @@ fn test_runtime_initializes_with_gpu() {
     assert!(wgpu_runtime.queue().is_some());
 
     // Initialize backend against runtime — needs GPU
-    backend.initialize(&mut *runtime).expect("backend initialize failed");
+    backend
+        .initialize(&mut *runtime)
+        .expect("backend initialize failed");
 }

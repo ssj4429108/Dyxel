@@ -126,8 +126,7 @@ impl CacheEntry {
 
     /// Check if this entry can be recycled (unused for too long)
     pub fn can_recycle(&self, current_frame: u64, threshold: u64) -> bool {
-        self.state == CacheEntryState::Baked
-            && (current_frame - self.last_access_frame) > threshold
+        self.state == CacheEntryState::Baked && (current_frame - self.last_access_frame) > threshold
     }
 }
 
@@ -198,7 +197,8 @@ impl RasterCache {
         if let Some(entry) = self.entries.get_mut(&node_id) {
             // Always reset stability tracking when dirty
             entry.stable_frames = 0;
-            if entry.state == CacheEntryState::Baked || entry.state == CacheEntryState::ReadyToBake {
+            if entry.state == CacheEntryState::Baked || entry.state == CacheEntryState::ReadyToBake
+            {
                 entry.state = CacheEntryState::Tracking;
                 self.stats.baked_nodes = self.stats.baked_nodes.saturating_sub(1);
             }
@@ -283,7 +283,8 @@ impl RasterCache {
             self.stats.tracked_nodes = self.stats.tracked_nodes.saturating_sub(1);
             if entry.state == CacheEntryState::Baked {
                 self.stats.baked_nodes = self.stats.baked_nodes.saturating_sub(1);
-                self.stats.memory_used = self.stats
+                self.stats.memory_used = self
+                    .stats
                     .memory_used
                     .saturating_sub((entry.texture_size.0 * entry.texture_size.1 * 4) as usize);
                 return entry.texture_id;
@@ -371,11 +372,7 @@ impl RasterCache {
     /// Clear all cache entries.
     /// Returns the list of texture IDs that should be released by the backend.
     pub fn clear(&mut self) -> Vec<TextureId> {
-        let texture_ids: Vec<_> = self
-            .entries
-            .values()
-            .filter_map(|e| e.texture_id)
-            .collect();
+        let texture_ids: Vec<_> = self.entries.values().filter_map(|e| e.texture_id).collect();
 
         self.entries.clear();
         self.stats = RasterCacheStats::default();

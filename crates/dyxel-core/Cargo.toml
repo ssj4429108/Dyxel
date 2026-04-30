@@ -7,14 +7,16 @@ edition = "2021"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
-default = ["wasm3-support"]
+default = ["wasm3-support", "render-vello"]
 # Only enable real wasm3 support on non-wasm32 platforms
 wasm3-support = ["dep:wasm3"]
+render-vello = ["dyxel-render-bootstrap/vello"]
+render-impeller = ["dyxel-render-bootstrap/impeller"]
 
 [dependencies]
 dyxel-shared.workspace = true
 dyxel-render-api = { path = "../dyxel-render-api" }
-dyxel-render-bootstrap = { path = "../dyxel-render-bootstrap" }
+dyxel-render-bootstrap = { path = "../dyxel-render-bootstrap", default-features = false }
 dyxel-perf = { path = "../dyxel-perf" }
 dyxel-gesture = { path = "../dyxel-gesture" }
 dyxel-editor = { path = "../dyxel-editor" }

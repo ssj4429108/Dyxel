@@ -14,7 +14,11 @@ pub mod input;
 pub mod input_proxy;
 pub mod pacer;
 pub mod platform;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod presenter;
 pub mod render_mailbox;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod render_worker;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod renderer;
 pub mod runtime;

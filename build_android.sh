@@ -8,6 +8,7 @@ API_LEVEL=24
 # NDK Configuration: Set ANDROID_NDK_VERSION to specify NDK version (e.g., "27.1.12297006")
 # Or directly set ANDROID_NDK_HOME environment variable
 ANDROID_NDK_VERSION="${ANDROID_NDK_VERSION:-27.1.12297006}"
+DYXEL_RENDER_BACKEND="${DYXEL_RENDER_BACKEND:-vello}"
 
 if [ -z "$ANDROID_NDK_HOME" ]; then
     # Try to find NDK from ANDROID_SDK_HOME or ANDROID_SDK_ROOT
@@ -44,8 +45,28 @@ echo "--- 2. Building Native Host (Android $TARGET_ARCH) ---"
 # Use cargo-ndk for cross-compilation, with 16KB page size alignment support.
 # `vello` backend selection moved out of `dyxel-core`; Android now configures
 # the default graphics factory at runtime.
+if [ "$DYXEL_RENDER_BACKEND" = "impeller" ]; then
+    CORE_FEATURE_FLAGS=(--no-default-features --features wasm3-support,render-impeller)
+elif [ "$DYXEL_RENDER_BACKEND" = "vello" ]; then
+    CORE_FEATURE_FLAGS=(--features wasm3-support)
+else
+    echo "Error: unsupported DYXEL_RENDER_BACKEND='$DYXEL_RENDER_BACKEND' (expected vello or impeller)"
+    exit 1
+fi
+echo "Using render backend: $DYXEL_RENDER_BACKEND"
 RUSTFLAGS="-C link-arg=-z -C link-arg=max-page-size=16384" \
-cargo ndk -t "$TARGET_ARCH" -P "$API_LEVEL" -o "$JNI_LIBS_DIR" build -p dyxel-core --release --features wasm3-support
+cargo ndk -t "$TARGET_ARCH" -P "$API_LEVEL" -o "$JNI_LIBS_DIR" build -p dyxel-core --release "${CORE_FEATURE_FLAGS[@]}"
+
+if [ "$DYXEL_RENDER_BACKEND" = "impeller" ]; then
+    IMPELLER_SO="$(find target/aarch64-linux-android/release/build -path '*/out/libimpeller.so' | head -n 1)"
+    if [ -z "$IMPELLER_SO" ]; then
+        echo "Error: Impeller build completed but libimpeller.so was not found under target/aarch64-linux-android/release/build"
+        exit 1
+    fi
+    mkdir -p "$JNI_LIBS_DIR/$TARGET_ARCH"
+    cp "$IMPELLER_SO" "$JNI_LIBS_DIR/$TARGET_ARCH/libimpeller.so"
+    echo "Impeller shared library copied: $JNI_LIBS_DIR/$TARGET_ARCH/libimpeller.so"
+fi
 
 echo "--- 3. Generating UniFFI Kotlin Bindings ---"
 # Get the compiled .so path (generated from dyxel-core)

@@ -10,8 +10,8 @@
 //! This reduces initial startup time while maintaining full functionality.
 
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicU8, Ordering},
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::Instant;

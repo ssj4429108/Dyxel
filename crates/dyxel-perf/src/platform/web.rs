@@ -14,7 +14,8 @@ impl SystemInfoProvider for WebSystemInfo {
         if let Some(window) = window() {
             if let Some(performance) = window.performance() {
                 // memory() is a Chrome-specific extension; use Reflect to access it dynamically
-                let memory = js_sys::Reflect::get(&performance, &JsValue::from_str("memory")).ok()?;
+                let memory =
+                    js_sys::Reflect::get(&performance, &JsValue::from_str("memory")).ok()?;
                 if memory.is_undefined() || memory.is_null() {
                     return None;
                 }

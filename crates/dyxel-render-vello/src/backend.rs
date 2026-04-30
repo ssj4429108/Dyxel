@@ -41,10 +41,7 @@ impl VelloDrawingBackend {
 }
 
 impl RenderBackendV2 for VelloDrawingBackend {
-    fn initialize(
-        &mut self,
-        runtime: &mut dyn GraphicsRuntime,
-    ) -> anyhow::Result<()> {
+    fn initialize(&mut self, runtime: &mut dyn GraphicsRuntime) -> anyhow::Result<()> {
         let wgpu_runtime = runtime
             .as_any_mut()
             .downcast_mut::<super::runtime::WgpuRuntime>()
@@ -63,7 +60,8 @@ impl RenderBackendV2 for VelloDrawingBackend {
             data_dir: self.data_dir.clone(),
         };
 
-        self.vello_backend.init(device_handle, queue_handle, config)?;
+        self.vello_backend
+            .init(device_handle, queue_handle, config)?;
         Ok(())
     }
 
@@ -96,7 +94,10 @@ impl RenderBackendV2 for VelloDrawingBackend {
             self.vello_backend.render_with_surface_texture(
                 &frame.device,
                 &frame.queue,
-                frame.surface_texture.as_ref().ok_or_else(|| anyhow::anyhow!("Missing surface texture in frame context"))?,
+                frame
+                    .surface_texture
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Missing surface texture in frame context"))?,
                 frame.format,
                 package,
             )?
@@ -119,10 +120,7 @@ impl RenderBackendV2 for VelloDrawingBackend {
         self.vello_backend.set_frame_performance_stats(stats);
     }
 
-    fn on_lifecycle_event(
-        &self,
-        event: LifecycleEvent,
-    ) -> anyhow::Result<()> {
+    fn on_lifecycle_event(&self, event: LifecycleEvent) -> anyhow::Result<()> {
         self.vello_backend.on_lifecycle_event(event);
         Ok(())
     }

@@ -6,7 +6,7 @@ edition = "2021"
 [features]
 default = ["vello"]
 vello = ["dep:dyxel-render-vello"]
-impeller = ["dep:dyxel-render-impeller"]
+impeller = ["dep:dyxel-render-impeller", "dyxel-render-impeller/cache_libs"]
 skia = []
 
 [dependencies]

@@ -9,7 +9,7 @@
 //! 预期表现：UI FPS 和 Raster FPS 都会受压，Jank/Dropped 更接近真实界面行为
 
 use dyxel_app::prelude::*;
-use dyxel_view::{BaseView, FlexDirection, FlexWrap, JustifyContent, View, Text, set_text};
+use dyxel_view::{BaseView, FlexDirection, FlexWrap, JustifyContent, Text, View, set_text};
 use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
@@ -123,7 +123,9 @@ impl Future for MixedDriver {
                 let dx = 2.0 + (f as f32 * 0.02).sin() * 2.0;
                 let dy = 3.0 + (f as f32 * 0.025).cos() * 2.0;
                 View { id: node_id }.shadow((dx, dy, 8.0, 0x60000000u32));
-            } else if node_idx < TEXT_NODE_COUNT + BLUR_NODE_COUNT + SHADOW_NODE_COUNT + OPACITY_NODE_COUNT {
+            } else if node_idx
+                < TEXT_NODE_COUNT + BLUR_NODE_COUNT + SHADOW_NODE_COUNT + OPACITY_NODE_COUNT
+            {
                 // Opacity 节点：动态透明度 + 颜色变化
                 let phase = (f as f32 * 0.03 + node_idx as f32 * 0.1) % std::f32::consts::TAU;
                 let opacity = 0.3 + 0.5 * (1.0 + phase.sin()) * 0.5; // 0.3 ~ 0.8 波动
@@ -165,8 +167,14 @@ mod tests {
         ));
         let blur_call = [".bl", "ur("].concat();
         let blur_const = ["BLUR_", "NODE_COUNT"].concat();
-        assert!(source.contains(&blur_call), "expected .blur() calls in source");
-        assert!(source.contains(&blur_const), "expected BLUR_NODE_COUNT constant in source");
+        assert!(
+            source.contains(&blur_call),
+            "expected .blur() calls in source"
+        );
+        assert!(
+            source.contains(&blur_const),
+            "expected BLUR_NODE_COUNT constant in source"
+        );
     }
 
     #[test]
@@ -231,17 +239,18 @@ pub fn MixedHeavy() -> impl BaseView {
             let inner = View::new()
                 .width((cell_w - 16.0).max(4.0))
                 .height((cell_h - 16.0).max(4.0))
-                .color((255u32 - base_color.0, 255 - base_color.1, 255 - base_color.2, 60u32))
+                .color((
+                    255u32 - base_color.0,
+                    255 - base_color.1,
+                    255 - base_color.2,
+                    60u32,
+                ))
                 .border_radius(4.0);
             View { id: blur_card.id }.child(inner.id);
             View { id: root.id }.child(blur_card.id);
         } else if i < TEXT_NODE_COUNT + BLUR_NODE_COUNT + SHADOW_NODE_COUNT {
             // 阴影节点
-            let shadow_colors = [
-                0x40000000u32,
-                0x60000000u32,
-                0x80404040u32,
-            ];
+            let shadow_colors = [0x40000000u32, 0x60000000u32, 0x80404040u32];
             let shadow_color = shadow_colors[(i as usize) % shadow_colors.len()];
             let shadow_node = View::new()
                 .width(cell_w - 4.0)

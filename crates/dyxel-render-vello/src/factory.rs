@@ -3,9 +3,7 @@
 
 //! VelloGraphicsFactory — GraphicsRuntimeFactory for the Vello + wgpu backend.
 
-use dyxel_render_api::{
-    BackendCapabilities, GraphicsRuntimeFactory, RenderBackendV2,
-};
+use dyxel_render_api::{BackendCapabilities, GraphicsRuntimeFactory, RenderBackendV2};
 
 /// Factory for creating Vello + wgpu runtime/backend pairs.
 pub struct VelloGraphicsFactory;
@@ -32,8 +30,7 @@ impl GraphicsRuntimeFactory for VelloGraphicsFactory {
         }
     }
 
-    fn create_runtime(&self,
-    ) -> anyhow::Result<Box<dyn dyxel_render_api::GraphicsRuntime>> {
+    fn create_runtime(&self) -> anyhow::Result<Box<dyn dyxel_render_api::GraphicsRuntime>> {
         let runtime = super::runtime::WgpuRuntime::new();
         Ok(Box::new(runtime))
     }

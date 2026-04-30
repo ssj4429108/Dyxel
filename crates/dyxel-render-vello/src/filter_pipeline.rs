@@ -1144,7 +1144,7 @@ impl FilterPipeline {
         // src alternates: quarter → ping → pong → ... final result in last dst
         let textures = [quarter_tex, ping_tex, pong_tex];
         let mut src_idx: usize = 0; // index into textures[] for source
-        // dst starts at ping (index 1), then alternates ping/pong
+                                    // dst starts at ping (index 1), then alternates ping/pong
         let kawase_dsts: [usize; 6] = [1, 2, 1, 2, 1, 2]; // ping=1, pong=2
         let mut last_dst_idx = 0usize;
         for i in 0..kawase_n {

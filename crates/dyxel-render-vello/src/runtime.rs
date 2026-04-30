@@ -39,11 +39,78 @@ fn should_log_runtime_timing(ms: f64) -> bool {
 fn android_full_frame_offscreen_enabled() -> bool {
     std::env::var("DYXEL_ANDROID_FULL_FRAME_OFFSCREEN")
         .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "android"))]
 fn android_full_frame_offscreen_enabled() -> bool {
+    false
+}
+
+#[cfg(target_os = "android")]
+fn android_surface_ready_wait_enabled() -> bool {
+    std::env::var("DYXEL_ANDROID_SURFACE_READY_WAIT")
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_surface_ready_wait_enabled() -> bool {
+    false
+}
+
+#[cfg(target_os = "android")]
+fn android_surface_ready_wait_timeout() -> std::time::Duration {
+    let timeout_ms = std::env::var("DYXEL_ANDROID_SURFACE_READY_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(6);
+    std::time::Duration::from_millis(timeout_ms)
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_surface_ready_wait_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(0)
+}
+
+#[cfg(target_os = "android")]
+fn android_present_mode() -> wgpu::PresentMode {
+    match std::env::var("DYXEL_ANDROID_PRESENT_MODE")
+        .unwrap_or_else(|_| "mailbox".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "fifo" => wgpu::PresentMode::Fifo,
+        "immediate" => wgpu::PresentMode::Immediate,
+        _ => wgpu::PresentMode::Mailbox,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_surface_max_frame_latency() -> u32 {
+    std::env::var("DYXEL_ANDROID_MAX_FRAME_LATENCY")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(2)
+        .clamp(1, 3)
+}
+
+#[cfg(target_os = "android")]
+fn android_force_opaque_surface() -> bool {
+    std::env::var("DYXEL_ANDROID_FORCE_OPAQUE_SURFACE")
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "android")]
+fn android_offscreen_copy_present_enabled() -> bool {
+    std::env::var("DYXEL_ANDROID_OFFSCREEN_COPY_PRESENT")
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_offscreen_copy_present_enabled() -> bool {
     false
 }
 
@@ -53,8 +120,11 @@ use wasm_bindgen::JsCast;
 /// Wgpu graphics runtime — manages the wgpu instance, device, queue, and surfaces.
 pub struct WgpuRuntime {
     instance: wgpu::Instance,
-    render_context: vello::util::RenderContext,
-    surfaces: HashMap<RuntimeSurfaceId, Arc<Mutex<vello::util::RenderSurface<'static>>>>,
+    render_context: RuntimeRenderContext,
+    surfaces: HashMap<RuntimeSurfaceId, Arc<Mutex<RuntimeRenderSurface>>>,
+    #[cfg(target_os = "android")]
+    native_presenters:
+        HashMap<RuntimeSurfaceId, super::android_native_presenter::AndroidNativePresenterProbe>,
     offscreen_targets: HashMap<RuntimeSurfaceId, RuntimeOffscreenTarget>,
     next_surface_id: u32,
     late_blit_layout: Option<wgpu::BindGroupLayout>,
@@ -78,14 +148,189 @@ struct RuntimeOffscreenSlot {
     view: wgpu::TextureView,
 }
 
+pub(crate) struct RuntimeRenderContext {
+    pub(crate) instance: wgpu::Instance,
+    pub(crate) devices: Vec<RuntimeDeviceHandle>,
+}
+
+pub(crate) struct RuntimeDeviceHandle {
+    adapter: wgpu::Adapter,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+}
+
+impl RuntimeDeviceHandle {
+    pub(crate) fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
+    }
+}
+
+pub(crate) struct RuntimeRenderSurface {
+    pub(crate) surface: wgpu::Surface<'static>,
+    pub(crate) config: wgpu::SurfaceConfiguration,
+    pub(crate) dev_id: usize,
+    pub(crate) format: wgpu::TextureFormat,
+}
+
+impl RuntimeRenderContext {
+    fn new() -> Self {
+        let backends = wgpu::Backends::from_env().unwrap_or_default();
+        let flags = wgpu::InstanceFlags::from_build_config().with_env();
+        let memory_budget_thresholds = wgpu::MemoryBudgetThresholds::default();
+        let backend_options = wgpu::BackendOptions::from_env_or_default();
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends,
+            flags,
+            memory_budget_thresholds,
+            backend_options,
+        });
+        Self {
+            instance,
+            devices: Vec::new(),
+        }
+    }
+
+    async fn create_render_surface(
+        &mut self,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        present_mode: wgpu::PresentMode,
+    ) -> anyhow::Result<RuntimeRenderSurface> {
+        let dev_id = self
+            .device(Some(&surface))
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No compatible wgpu device found"))?;
+
+        let device_handle = &self.devices[dev_id];
+        let capabilities = surface.get_capabilities(&device_handle.adapter);
+        let format = capabilities
+            .formats
+            .into_iter()
+            .find(|it| {
+                matches!(
+                    it,
+                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+                )
+            })
+            .ok_or_else(|| anyhow::anyhow!("Unsupported surface format"))?;
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        let surface = RuntimeRenderSurface {
+            surface,
+            config,
+            dev_id,
+            format,
+        };
+        self.configure_surface(&surface);
+        Ok(surface)
+    }
+
+    fn resize_surface(&self, surface: &mut RuntimeRenderSurface, width: u32, height: u32) {
+        surface.config.width = width;
+        surface.config.height = height;
+        self.configure_surface(surface);
+    }
+
+    fn configure_surface(&self, surface: &RuntimeRenderSurface) {
+        let device = &self.devices[surface.dev_id].device;
+        surface.surface.configure(device, &surface.config);
+    }
+
+    async fn device(&mut self, compatible_surface: Option<&wgpu::Surface<'_>>) -> Option<usize> {
+        let compatible = match compatible_surface {
+            Some(surface) => self
+                .devices
+                .iter()
+                .enumerate()
+                .find(|(_, device)| device.adapter.is_surface_supported(surface))
+                .map(|(index, _)| index),
+            None => (!self.devices.is_empty()).then_some(0),
+        };
+        if compatible.is_none() {
+            return self.new_device(compatible_surface).await;
+        }
+        compatible
+    }
+
+    async fn new_device(
+        &mut self,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Option<usize> {
+        let adapter =
+            wgpu::util::initialize_adapter_from_env_or_default(&self.instance, compatible_surface)
+                .await
+                .ok()?;
+        let features = adapter.features();
+        let limits = wgpu::Limits::default();
+        let maybe_features = wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE;
+
+        #[cfg(target_os = "android")]
+        if super::android_native_presenter::android_native_presenter_custom_device_enabled() {
+            let requested_features =
+                super::android_native_presenter::default_native_presenter_wgpu_features(&adapter);
+            match super::android_native_presenter::create_wgpu_custom_vulkan_device_with_android_interop(
+                &adapter,
+                requested_features,
+                "Dyxel Android native presenter main custom Vulkan device",
+            ) {
+                Ok((device, queue)) => {
+                    log::warn!(
+                        "[DIAG-NATIVE-PRESENTER] using experimental custom Vulkan wgpu Device for main renderer"
+                    );
+                    self.devices.push(RuntimeDeviceHandle {
+                        adapter,
+                        device,
+                        queue,
+                    });
+                    return Some(self.devices.len() - 1);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "[DIAG-NATIVE-PRESENTER] custom Vulkan main Device failed, falling back to default wgpu device: {:?}",
+                        err
+                    );
+                }
+            }
+        }
+
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: features & maybe_features,
+                required_limits: limits,
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+        self.devices.push(RuntimeDeviceHandle {
+            adapter,
+            device,
+            queue,
+        });
+        Some(self.devices.len() - 1)
+    }
+}
+
 impl WgpuRuntime {
     pub fn new() -> Self {
-        let render_context = vello::util::RenderContext::new();
+        let render_context = RuntimeRenderContext::new();
         let instance = render_context.instance.clone();
         Self {
             instance,
             render_context,
             surfaces: HashMap::new(),
+            #[cfg(target_os = "android")]
+            native_presenters: HashMap::new(),
             offscreen_targets: HashMap::new(),
             next_surface_id: 1,
             late_blit_layout: None,
@@ -109,24 +354,21 @@ impl WgpuRuntime {
         self.render_context.devices.first().map(|d| &d.queue)
     }
 
-    /// Get a reference to the inner vello RenderContext.
-    pub fn render_context(&self) -> &vello::util::RenderContext {
+    /// Get a reference to the inner runtime RenderContext.
+    pub(crate) fn render_context(&self) -> &RuntimeRenderContext {
         &self.render_context
     }
 
     /// Get a mutable reference to a surface by id.
-    pub fn surface(
-        &self,
-        id: RuntimeSurfaceId,
-    ) -> Option<Arc<Mutex<vello::util::RenderSurface<'static>>>> {
+    pub(crate) fn surface(&self, id: RuntimeSurfaceId) -> Option<Arc<Mutex<RuntimeRenderSurface>>> {
         self.surfaces.get(&id).cloned()
     }
 
     /// Get a mutable reference to a surface by id.
-    pub fn surface_mut(
+    pub(crate) fn surface_mut(
         &mut self,
         id: RuntimeSurfaceId,
-    ) -> Option<Arc<Mutex<vello::util::RenderSurface<'static>>>> {
+    ) -> Option<Arc<Mutex<RuntimeRenderSurface>>> {
         self.surfaces.get(&id).cloned()
     }
 
@@ -301,6 +543,9 @@ impl GraphicsRuntime for WgpuRuntime {
         width: u32,
         height: u32,
     ) -> anyhow::Result<RuntimeSurfaceId> {
+        #[cfg(target_os = "android")]
+        let mut android_native_window_ptr: Option<u64> = None;
+
         let surface = match handle {
             NativeSurfaceHandle::RawWindow { window, display } => {
                 let target = wgpu::SurfaceTargetUnsafe::RawHandle {
@@ -340,6 +585,10 @@ impl GraphicsRuntime for WgpuRuntime {
             }
             NativeSurfaceHandle::NativeSurface { kind, ptr } => match kind {
                 NativeSurfaceKind::Android => {
+                    #[cfg(target_os = "android")]
+                    {
+                        android_native_window_ptr = Some(ptr);
+                    }
                     let handle = raw_window_handle::AndroidNdkWindowHandle::new(
                         std::ptr::NonNull::new(ptr as *mut std::ffi::c_void)
                             .ok_or_else(|| anyhow::anyhow!("Invalid ANativeWindow pointer"))?,
@@ -363,14 +612,16 @@ impl GraphicsRuntime for WgpuRuntime {
         };
 
         // Select present mode based on platform capabilities.
-        // Android supports Mailbox (low-latency VSync replacement).
-        // macOS/iOS Metal only supports Fifo and Immediate.
+        // Android supports Mailbox (low-latency VSync replacement), but Fifo
+        // can be useful to validate whether HWC fence waits come from mailbox
+        // replacement timing rather than GPU work itself.
         #[cfg(target_os = "android")]
-        let present_mode = wgpu::PresentMode::Mailbox;
+        let present_mode = android_present_mode();
         #[cfg(not(target_os = "android"))]
         let present_mode = wgpu::PresentMode::Fifo;
 
-        let v_surface = pollster::block_on(async {
+        #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
+        let mut v_surface = pollster::block_on(async {
             self.render_context
                 .create_render_surface(surface, width, height, present_mode)
                 .await
@@ -380,14 +631,161 @@ impl GraphicsRuntime for WgpuRuntime {
         let id = RuntimeSurfaceId(self.next_surface_id);
         self.next_surface_id += 1;
         let dev_id = v_surface.dev_id;
+
+        #[cfg(target_os = "android")]
+        {
+            let device_handle = &self.render_context.devices[dev_id];
+            let caps = v_surface.surface.get_capabilities(device_handle.adapter());
+            let requested_alpha = if android_force_opaque_surface()
+                && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque)
+            {
+                wgpu::CompositeAlphaMode::Opaque
+            } else {
+                v_surface.config.alpha_mode
+            };
+            let requested_latency = android_surface_max_frame_latency();
+            if android_offscreen_copy_present_enabled() {
+                v_surface.config.usage |= wgpu::TextureUsages::COPY_DST;
+            }
+            if v_surface.config.desired_maximum_frame_latency != requested_latency
+                || v_surface.config.alpha_mode != requested_alpha
+                || android_offscreen_copy_present_enabled()
+            {
+                v_surface.config.desired_maximum_frame_latency = requested_latency;
+                v_surface.config.alpha_mode = requested_alpha;
+                v_surface
+                    .surface
+                    .configure(&device_handle.device, &v_surface.config);
+                log::info!(
+                    "[DIAG-RUNTIME] Android surface config override latency={} alpha={:?} usage={:?}",
+                    requested_latency,
+                    requested_alpha,
+                    v_surface.config.usage
+                );
+            }
+        }
+
         self.surfaces.insert(id, Arc::new(Mutex::new(v_surface)));
 
+        #[cfg(target_os = "android")]
+        {
+            let native_presenter_requested =
+                super::android_native_presenter::android_native_presenter_enabled();
+            let native_presenter_diag_requested =
+                super::android_native_presenter::android_native_presenter_diag_enabled();
+            let custom_device_probe_requested =
+                super::android_native_presenter::android_native_presenter_custom_device_probe_enabled();
+            let ahb_import_probe_requested =
+                super::android_native_presenter::android_native_presenter_ahb_import_probe_enabled(
+                );
+            let gpu_clear_probe_requested =
+                super::android_native_presenter::android_native_presenter_gpu_clear_probe_enabled();
+            let gpu_present_probe_requested =
+                super::android_native_presenter::android_native_presenter_gpu_present_probe_enabled(
+                );
+            let wgpu_ahb_texture_probe_requested =
+                super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_texture_probe_enabled();
+            let wgpu_ahb_frame_requested =
+                super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_frame_enabled();
+            if native_presenter_requested
+                || native_presenter_diag_requested
+                || custom_device_probe_requested
+                || ahb_import_probe_requested
+                || gpu_clear_probe_requested
+                || gpu_present_probe_requested
+                || wgpu_ahb_texture_probe_requested
+                || wgpu_ahb_frame_requested
+            {
+                super::android_native_presenter::log_android_cpu_ahb_presenter_support();
+                let device_handle = &self.render_context.devices[dev_id];
+                super::android_native_presenter::log_wgpu_vulkan_external_ahb_support(
+                    device_handle.adapter(),
+                    &device_handle.device,
+                );
+                if custom_device_probe_requested {
+                    super::android_native_presenter::probe_wgpu_custom_vulkan_device_extensions(
+                        device_handle.adapter(),
+                    );
+                }
+                if ahb_import_probe_requested {
+                    super::android_native_presenter::probe_wgpu_vulkan_ahb_import(
+                        device_handle.adapter(),
+                        &device_handle.device,
+                    );
+                }
+                if gpu_clear_probe_requested {
+                    super::android_native_presenter::probe_wgpu_vulkan_ahb_gpu_clear(
+                        device_handle.adapter(),
+                        &device_handle.device,
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        if super::android_native_presenter::android_native_presenter_enabled()
+            || super::android_native_presenter::android_native_presenter_gpu_present_probe_enabled()
+            || super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_texture_probe_enabled()
+            || super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_frame_enabled()
+        {
+            if let Some(ptr) = android_native_window_ptr {
+                match super::android_native_presenter::AndroidNativePresenterProbe::new_from_anative_window_ptr(
+                    ptr,
+                    if super::android_native_presenter::android_native_presenter_enabled()
+                        || super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_frame_enabled()
+                    { width } else { width.min(96) },
+                    if super::android_native_presenter::android_native_presenter_enabled()
+                        || super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_frame_enabled()
+                    { height } else { height.min(96) },
+                ) {
+                    Ok(mut presenter) => {
+                        if super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_texture_probe_enabled() {
+                            let device_handle = &self.render_context.devices[dev_id];
+                            if let Err(err) = presenter.submit_wgpu_ahb_texture_probe_once(
+                                device_handle.adapter(),
+                                &device_handle.device,
+                                &device_handle.queue,
+                            ) {
+                                log::warn!(
+                                    "[DIAG-NATIVE-PRESENTER] wgpu AHB texture SurfaceControl probe failed: {:?}",
+                                    err
+                                );
+                            }
+                        } else if super::android_native_presenter::android_native_presenter_gpu_present_probe_enabled() {
+                            let device_handle = &self.render_context.devices[dev_id];
+                            if let Err(err) = presenter.submit_gpu_clear_probe_once(
+                                device_handle.adapter(),
+                                &device_handle.device,
+                            ) {
+                                log::warn!(
+                                    "[DIAG-NATIVE-PRESENTER] GPU SurfaceControl present probe failed: {:?}",
+                                    err
+                                );
+                            }
+                        }
+                        self.native_presenters.insert(id, presenter);
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "[DIAG-NATIVE-PRESENTER] disabled native presenter probe after init failure: {:?}",
+                            err
+                        );
+                    }
+                }
+            } else {
+                log::warn!(
+                    "[DIAG-NATIVE-PRESENTER] native presenter requested but no ANativeWindow pointer was available"
+                );
+            }
+        }
+
         log::info!(
-            "WgpuRuntime: created surface {:?} ({}x{}) dev_id={}",
+            "WgpuRuntime: created surface {:?} ({}x{}) dev_id={} present_mode={:?}",
             id,
             width,
             height,
-            dev_id
+            dev_id,
+            present_mode
         );
         Ok(id)
     }
@@ -407,7 +805,50 @@ impl GraphicsRuntime for WgpuRuntime {
             .map_err(|_| anyhow::anyhow!("Surface {:?} lock poisoned", surface_id))?;
         self.render_context
             .resize_surface(&mut surface, width, height);
+        #[cfg(target_os = "android")]
+        let dev_id = surface.dev_id;
+        drop(surface);
         self.offscreen_targets.remove(&surface_id);
+        #[cfg(target_os = "android")]
+        if let Some(presenter) = self.native_presenters.get_mut(&surface_id) {
+            let (presenter_width, presenter_height) =
+                if super::android_native_presenter::android_native_presenter_enabled()
+                    || super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_frame_enabled()
+                {
+                    (width, height)
+                } else {
+                    (width.min(96), height.min(96))
+                };
+            if let Err(err) = presenter.resize(presenter_width, presenter_height) {
+                log::warn!(
+                    "[DIAG-NATIVE-PRESENTER] resize ignored after failure: {:?}",
+                    err
+                );
+                self.native_presenters.remove(&surface_id);
+            } else if super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_texture_probe_enabled() {
+                let device_handle = &self.render_context.devices[dev_id];
+                if let Err(err) = presenter.submit_wgpu_ahb_texture_probe_once(
+                    device_handle.adapter(),
+                    &device_handle.device,
+                    &device_handle.queue,
+                ) {
+                    log::warn!(
+                        "[DIAG-NATIVE-PRESENTER] wgpu AHB texture SurfaceControl probe after resize failed: {:?}",
+                        err
+                    );
+                }
+            } else if super::android_native_presenter::android_native_presenter_gpu_present_probe_enabled() {
+                let device_handle = &self.render_context.devices[dev_id];
+                if let Err(err) =
+                    presenter.submit_gpu_clear_probe_once(device_handle.adapter(), &device_handle.device)
+                {
+                    log::warn!(
+                        "[DIAG-NATIVE-PRESENTER] GPU SurfaceControl present probe after resize failed: {:?}",
+                        err
+                    );
+                }
+            }
+        }
         // resize_surface already calls configure_surface internally
         Ok(())
     }
@@ -431,6 +872,8 @@ impl GraphicsRuntime for WgpuRuntime {
                 },
             );
         }
+        #[cfg(target_os = "android")]
+        self.native_presenters.clear();
         Ok(())
     }
 
@@ -480,8 +923,14 @@ impl GraphicsRuntime for WgpuRuntime {
             // drawable acquire can block. On Android this is an experiment only:
             // real-device logs showed the extra full-frame blit can push mobile
             // GPU/HWC over budget and drop the app to ~40fps, so keep it opt-in.
-            let use_offscreen_first =
-                cfg!(target_os = "macos") || android_full_frame_offscreen_enabled();
+            #[cfg(target_os = "android")]
+            let native_ahb_frame =
+                super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_frame_enabled();
+            #[cfg(not(target_os = "android"))]
+            let native_ahb_frame = false;
+            let use_offscreen_first = cfg!(target_os = "macos")
+                || android_full_frame_offscreen_enabled()
+                || native_ahb_frame;
             if use_offscreen_first {
                 let (offscreen_texture, offscreen_view) =
                     self.next_offscreen_target(surface_id, &device, width, height, format);
@@ -569,6 +1018,38 @@ impl GraphicsRuntime for WgpuRuntime {
         let present_t0 = std::time::Instant::now();
 
         if frame.render_to_offscreen {
+            #[cfg(target_os = "android")]
+            if super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_frame_enabled() {
+                if let Some(presenter) = self.native_presenters.get_mut(&frame.surface_id) {
+                    let offscreen_texture = frame.offscreen_texture.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Missing offscreen texture for native AHB frame")
+                    })?;
+                    match super::android_native_wgpu_ahb::present_offscreen_texture_frame(
+                        presenter,
+                        &frame.device,
+                        &frame.queue,
+                        offscreen_texture,
+                        frame.width,
+                        frame.height,
+                    ) {
+                        Ok(present_ms) => {
+                            frame.present_ms = present_ms;
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "[DIAG-NATIVE-PRESENTER] native AHB frame present failed, falling back to wgpu Surface: {:?}",
+                                err
+                            );
+                        }
+                    }
+                } else {
+                    log::warn!(
+                        "[DIAG-NATIVE-PRESENTER] native AHB frame requested but presenter is missing; falling back to wgpu Surface"
+                    );
+                }
+            }
+
             let surface = self
                 .surfaces
                 .get(&frame.surface_id)
@@ -585,6 +1066,60 @@ impl GraphicsRuntime for WgpuRuntime {
                 (surface_texture, surface.format)
             };
             let late_acquire_ms = acquire_t0.elapsed().as_secs_f64() * 1000.0;
+
+            #[cfg(target_os = "android")]
+            if android_offscreen_copy_present_enabled() {
+                let copy_t0 = std::time::Instant::now();
+                let offscreen_texture = frame
+                    .offscreen_texture
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Missing offscreen texture in frame context"))?;
+                let mut encoder =
+                    frame
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Runtime Late Surface Copy Encoder"),
+                        });
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: offscreen_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &surface_texture.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: frame.width,
+                        height: frame.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                frame.queue.submit(Some(encoder.finish()));
+                surface_texture.present();
+                let end_ms = present_t0.elapsed().as_secs_f64() * 1000.0;
+                let copy_ms = copy_t0.elapsed().as_secs_f64() * 1000.0;
+                if should_log_runtime_timing(late_acquire_ms)
+                    || should_log_runtime_timing(copy_ms)
+                    || should_log_runtime_timing(end_ms)
+                {
+                    log::info!(
+                        "[DIAG-RUNTIME] late_acquire_ms={:.2} late_copy_present_ms={:.2} copy_submit_present_ms={:.2}",
+                        late_acquire_ms,
+                        end_ms,
+                        copy_ms
+                    );
+                }
+                frame.present_ms = present_t0.elapsed().as_secs_f64() * 1000.0;
+                if should_log_runtime_timing(frame.present_ms) {
+                    log::info!("[DIAG-RUNTIME] present_ms={:.2}", frame.present_ms);
+                }
+                return Ok(());
+            }
 
             let surface_view = surface_texture
                 .texture
@@ -660,6 +1195,31 @@ impl GraphicsRuntime for WgpuRuntime {
                 );
             }
         } else if let Some(surface_texture) = frame.surface_texture.take() {
+            #[cfg(target_os = "android")]
+            if android_surface_ready_wait_enabled() {
+                if let Some(submission_index) = frame.last_submission_index.clone() {
+                    let wait_t0 = std::time::Instant::now();
+                    let ready = match frame.device.poll(wgpu::PollType::Wait {
+                        submission_index: Some(submission_index),
+                        timeout: Some(android_surface_ready_wait_timeout()),
+                    }) {
+                        Ok(_) => true,
+                        Err(wgpu::PollError::Timeout) => false,
+                        Err(err) => {
+                            log::warn!("[DIAG-RUNTIME] surface_ready_wait error: {:?}", err);
+                            false
+                        }
+                    };
+                    let wait_ms = wait_t0.elapsed().as_secs_f64() * 1000.0;
+                    if should_log_runtime_timing(wait_ms) {
+                        log::info!(
+                            "[DIAG-RUNTIME] surface_ready_wait_ms={:.2} ready={}",
+                            wait_ms,
+                            ready
+                        );
+                    }
+                }
+            }
             surface_texture.present();
         }
         frame.present_ms = present_t0.elapsed().as_secs_f64() * 1000.0;

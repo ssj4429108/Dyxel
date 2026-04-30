@@ -243,8 +243,8 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use crate::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     /// 模拟真实场景：创建-删除-复用循环
     #[test]

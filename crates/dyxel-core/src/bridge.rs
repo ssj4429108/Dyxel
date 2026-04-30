@@ -45,6 +45,29 @@ const LOGIC_DIAG_SAMPLE_THRESHOLD_MS: f64 = 8.0;
 #[cfg(not(target_arch = "wasm32"))]
 const LOGIC_DIAG_ALWAYS_THRESHOLD_MS: f64 = 16.0;
 
+#[cfg(target_os = "android")]
+fn android_vblank_phase_delay(refresh_hz: f64) -> Option<Duration> {
+    let enabled = std::env::var("DYXEL_ANDROID_VBLANK_PHASE_LEAD")
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(false);
+    if !enabled || !(1.0..=240.0).contains(&refresh_hz) {
+        return None;
+    }
+    let lead_ms = std::env::var("DYXEL_ANDROID_VBLANK_PHASE_LEAD_MS")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(8.0)
+        .clamp(0.0, 16.0);
+    let interval_ms = 1000.0 / refresh_hz;
+    let delay_ms = (interval_ms - lead_ms).clamp(0.0, interval_ms);
+    Some(Duration::from_secs_f64(delay_ms / 1000.0))
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_vblank_phase_delay(_refresh_hz: f64) -> Option<Duration> {
+    None
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn next_input_batch_id() -> u64 {
     INPUT_BATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -718,6 +741,18 @@ impl DyxelHost {
         let frame_perf_state =
             Arc::new(StdMutex::new(dyxel_perf::FramePerformanceStats::default()));
 
+        #[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
+        let android_presenter = if crate::presenter::android_detached_present_enabled() {
+            Some(crate::presenter::BoundedPresenter::spawn(
+                scheduler_tx.clone(),
+                frame_perf_state.clone(),
+            ))
+        } else {
+            None
+        };
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+        let android_presenter: Option<crate::presenter::BoundedPresenter> = None;
+
         // Clone logic_tx before it is moved into Self so the scheduler can
         // dispatch ProcessPendingInput to the logic worker.
         #[cfg(not(target_arch = "wasm32"))]
@@ -928,9 +963,9 @@ impl DyxelHost {
                                 }
                                 LogicMessage::ProcessPendingInput => {
                                     if let Some(ref mut l) = logic_opt {
-                                        let mut drained = false;
-                                        while let Some(event) = input_queue_for_logic.lock().unwrap().pop_front() {
-                                            drained = true;
+                                        while let Some(event) =
+                                            input_queue_for_logic.lock().unwrap().pop_front()
+                                        {
                                             process_input_internal(l, event);
                                         }
                                         // Always tick: reactive tasks (spawned futures, timers,
@@ -1000,6 +1035,7 @@ impl DyxelHost {
             let vblank_shutdown_for_render = vblank_shutdown.clone();
             let display_hz_for_render = display_hz.clone();
             let frame_perf_state_for_render = frame_perf_state.clone();
+            let presenter_for_render = android_presenter.clone();
 
             thread::Builder::new()
                 .name("DyxelRender".into())
@@ -1070,10 +1106,23 @@ impl DyxelHost {
                                                         );
                                                     }
                                                 }
-                                                last_vblank_at = Some(now);
                                                 let hz = *display_hz.lock().unwrap();
+                                                if let Some(delay) = crate::bridge::android_vblank_phase_delay(hz) {
+                                                    if vblank_count % 60 == 0 {
+                                                        log::info!(
+                                                            "[DIAG] VBlankHW phase lead delay={:.2}ms",
+                                                            delay.as_secs_f64() * 1000.0
+                                                        );
+                                                    }
+                                                    thread::sleep(delay);
+                                                    if shutdown_clone.load(Ordering::Relaxed) {
+                                                        break;
+                                                    }
+                                                }
+                                                let event_now = std::time::Instant::now();
+                                                last_vblank_at = Some(event_now);
                                                 let _ = scheduler_tx.send(SchedulerEvent::VBlank {
-                                                    timestamp: now,
+                                                    timestamp: event_now,
                                                     refresh_hz: hz,
                                                 });
                                             }
@@ -1135,6 +1184,9 @@ impl DyxelHost {
                                     if let Some(ref shutdown) = hardware_vblank_shutdown {
                                         shutdown.store(true, Ordering::Relaxed);
                                     }
+                                    if let Some(ref presenter) = presenter_for_render {
+                                        presenter.shutdown();
+                                    }
                                     return;
                                 }
                                 RenderMessage::TogglePerfOverlay => {
@@ -1171,108 +1223,29 @@ impl DyxelHost {
                         if lifecycle == Lifecycle::Running {
                             match render_cmd_rx.recv_timeout(Duration::from_millis(16)) {
                                 Ok(crate::frame_scheduler::RenderCommand::Render(token)) => {
-                                    log::debug!("RenderThread: Received RenderCommand frame_id={} epoch={}", token.frame_id, token.epoch);
-                                    let token_receive_time = std::time::Instant::now();
-                                    let token_latency_ms = token_receive_time.duration_since(token.vblank_at).as_secs_f64() * 1000.0;
-                                    if token.frame_id % 20 == 0 {
-                                        log::info!("[DIAG] RenderThread token_latency={:.2}ms frame_id={}", token_latency_ms, token.frame_id);
-                                    }
-                                    let frame_interval_ms = LAST_PRESENT_TIME.with(|t| {
-                                        let interval = t.get().map(|last| token_receive_time.duration_since(last).as_secs_f64() * 1000.0).unwrap_or(0.0);
-                                        t.set(Some(token_receive_time));
-                                        interval
-                                    });
-
-                                    is_rendering_for_render.store(true, std::sync::atomic::Ordering::Release);
-
-                                    let active_id = *active_surface_ptr.lock_guard().unwrap();
-                                    // Always notify scheduler that render started/completed,
-                                    // even if we have no surface yet. Otherwise scheduler
-                                    // stays in Rendering state forever and never issues
-                                    // another token.
-                                    let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderStarted { frame_id: token.frame_id, epoch: token.epoch });
-
-                                    // In continuous render mode, feed synthetic input
-                                    // immediately so logic can overlap with render.
-                                    if continuous_render {
-                                        let _ = scheduler_tx_for_render.send(SchedulerEvent::InputArrived(0));
-                                    }
-
-                                    let mut frame_time_ms = 0.0f32;
-                                    let mut did_present = false;
-                                    let render_start = std::time::Instant::now();
-                                    if let (Some(ref mut r), Some(id)) = (&mut render_opt, active_id) {
-                                        let sid_map = surface_id_map_ptr.lock_guard().unwrap();
-                                        if let Some(surface_id) = sid_map.get(&id.0) {
-                                            log::trace!("RenderThread: Rendering frame for surface {:?} runtime_surface_id={:?}", id, surface_id);
-                                            let (epoch, package) = mailbox_for_render.snapshot();
-                                            log::debug!("RenderThread: Rendering epoch={} (token epoch={}) nodes={} viewport={:?}", epoch, token.epoch, package.nodes.len(), package.viewport);
-                                            let perf_stats = frame_perf_state_for_render
-                                                .lock()
-                                                .ok()
-                                                .map(|perf| *perf);
-                                            let render_timings = crate::renderer::render_frame_with_package(
-                                                r,
-                                                *surface_id,
-                                                &package,
-                                                Some((0.0, frame_interval_ms)),
-                                                perf_stats,
-                                            );
-                                            frame_time_ms = render_timings
-                                                .map(|t| {
-                                                    // Surface acquire/present wait is display/driver pacing, not
-                                                    // backend rendering workload. Counting it in the cadence
-                                                    // governor makes Android Mailbox present spikes look like blur
-                                                    // render jank and can incorrectly drop the target to 30Hz.
-                                                    #[cfg(any(target_os = "macos", target_os = "android"))]
-                                                    {
-                                                        t.backend_ms as f32
-                                                    }
-                                                    #[cfg(not(any(target_os = "macos", target_os = "android")))]
-                                                    {
-                                                        (t.backend_ms + t.end_ms) as f32
-                                                    }
-                                                })
-                                                .unwrap_or_else(|| render_start.elapsed().as_secs_f32() * 1000.0);
-                                            did_present = true;
-                                            // Legacy: also signal logic thread (to be removed in Task 6)
-                                            let _ = render_complete_tx.send(());
-                                        } else {
-                                            log::warn!("RenderThread: Active surface {:?} not found in surface_id_map", id);
-                                        }
-                                    } else {
-                                        log::trace!("RenderThread: Draw ignored (no active surface or no render_opt)");
-                                    }
-                                    let render_completed_time = std::time::Instant::now();
-                                    let setup_ms = render_start.duration_since(token_receive_time).as_secs_f64() * 1000.0;
-                                    let cleanup_ms = render_completed_time.duration_since(render_start).as_secs_f64() * 1000.0 - frame_time_ms as f64;
-                                    let total_pipeline_ms = render_completed_time.duration_since(token_receive_time).as_secs_f64() * 1000.0;
-                                    if token.frame_id % 20 == 0 {
-                                        log::info!("[DIAG] RenderThread pipeline frame_id={} setup={:.2}ms render={:.2}ms cleanup={:.2}ms total={:.2}ms", token.frame_id, setup_ms, frame_time_ms, cleanup_ms, total_pipeline_ms);
-                                    }
-                                    let stats = crate::FrameStats {
-                                        frame_time_ms,
-                                        ..Default::default()
-                                    };
-                                    // Report RenderCompleted with the token's epoch so the
-                                    // scheduler's single-frame ownership accounting stays
-                                    // consistent. The actual rendered content may be newer
-                                    // (latest-wins mailbox), but the in-flight token is what
-                                    // the scheduler tracks.
-                                    let _ = scheduler_tx_for_render.send(SchedulerEvent::RenderCompleted { frame_id: token.frame_id, epoch: token.epoch, stats });
-
-                                    // Only count raster FPS when we actually presented a frame.
-                                    if did_present {
-                                        raster_frame_buffer.push(std::time::Instant::now());
-                                        if let Ok(mut perf) = frame_perf_state_for_render.lock() {
-                                            perf.raster_fps = raster_frame_buffer.fps();
-                                        }
-                                    }
-
-                                    is_rendering_for_render.store(false, std::sync::atomic::Ordering::Release);
+                                    let active_surface_id = *active_surface_ptr.lock_guard().unwrap();
+                                    crate::render_worker::execute_render_token(
+                                        crate::render_worker::RenderTokenExecution {
+                                            token,
+                                            render_state: &mut render_opt,
+                                            active_surface_id,
+                                            surface_id_map: &surface_id_map_ptr,
+                                            mailbox: &mailbox_for_render,
+                                            scheduler_tx: &scheduler_tx_for_render,
+                                            render_complete_tx: &render_complete_tx,
+                                            is_rendering: &is_rendering_for_render,
+                                            frame_perf_state: &frame_perf_state_for_render,
+                                            raster_frame_buffer: &mut raster_frame_buffer,
+                                            continuous_render,
+                                            presenter: presenter_for_render.as_ref(),
+                                        },
+                                    );
                                 }
                                 Ok(crate::frame_scheduler::RenderCommand::Shutdown) => {
                                     log::info!("RenderThread: Received Shutdown command");
+                                    if let Some(ref presenter) = presenter_for_render {
+                                        presenter.shutdown();
+                                    }
                                     break;
                                 }
                                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {

@@ -10,12 +10,16 @@ class DyxelEngine {
     private var enginePrepared = false
 
     fun setup(context: android.content.Context) {
+        // Initialize native logging synchronously before any background Rust
+        // preparation. The previous fire-and-forget launch could race with
+        // prepareEngine/initNative and drop the most important cold-start
+        // diagnostics (Impeller Vulkan surface extent, ANativeWindow geometry).
+        initLogger()
         host.setDefaultGraphicsFactory()
 
         val dataDir = context.filesDir.absolutePath
         
         scope.launch {
-            initLogger()
             launch { extractAssets(context) }
             launch {
                 if (!enginePrepared) {

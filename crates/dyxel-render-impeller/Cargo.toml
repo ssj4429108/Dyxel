@@ -17,6 +17,7 @@ raw-window-handle = "0.6"
 
 [features]
 prebuilt_libs = ["impellers/prebuilt_libs"]
+cache_libs = ["impellers/cache_libs"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.29"
@@ -27,6 +28,8 @@ objc = "0.2"
 ndk-sys = "0.6"
 ndk = "0.8"
 ash = "0.38"
+libc = "0.2"
+khronos-egl = { version = "6.0", features = ["dynamic"] }
 # For Vulkan library loading
 libloading = "0.8"
 ash-window = "0.13"

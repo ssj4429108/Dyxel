@@ -20,6 +20,13 @@ pub mod mac;
 #[cfg(target_os = "android")]
 pub mod android;
 
+pub mod backend;
+pub mod factory;
+pub mod runtime;
+
+pub use backend::ImpellerDrawingBackend;
+pub use factory::ImpellerGraphicsFactory;
+
 pub struct ImpellerBackend {
     context: Mutex<Option<Context>>,
 }
@@ -150,7 +157,7 @@ impl RenderBackend for ImpellerBackend {
                     _ptr as *mut _,
                     width,
                     height,
-                    density,
+                    1.0,
                 )));
             }
         }
