@@ -62,11 +62,11 @@ struct TextureReturn {
 pub struct KawaseTextureSet {
     /// Downsample 1/2 resolution (half size of input)
     pub ds_half: PooledTexture,
-    /// Downsample 1/8 resolution (1/8 size of input for reduced fill rate)
+    /// Downsample 1/4 resolution (quarter size of input)
     pub ds_quarter: PooledTexture,
-    /// Ping-pong buffer A (1/8 size)
+    /// Ping-pong buffer A (1/4 size)
     pub ping: PooledTexture,
-    /// Ping-pong buffer B (1/8 size)
+    /// Ping-pong buffer B (1/4 size)
     pub pong: PooledTexture,
 }
 
@@ -209,9 +209,8 @@ impl TexturePool {
         // Calculate sizes
         let half_w = (full_width / 2).max(1);
         let half_h = (full_height / 2).max(1);
-        // Use /8 to match internal KawaseTexturePool optimization (reduces fill rate to 1/64)
-        let quarter_w = (full_width / 8).max(1);
-        let quarter_h = (full_height / 8).max(1);
+        let quarter_w = (full_width / 4).max(1);
+        let quarter_h = (full_height / 4).max(1);
 
         KawaseTextureSet {
             ds_half: self.acquire(half_w, half_h, wgpu::TextureFormat::Rgba16Float),

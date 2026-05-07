@@ -3,7 +3,35 @@
 
 //! VelloGraphicsFactory — GraphicsRuntimeFactory for the Vello + wgpu backend.
 
-use dyxel_render_api::{BackendCapabilities, GraphicsRuntimeFactory, RenderBackendV2};
+use dyxel_render_api::{
+    BackendCapabilities, GraphicsRuntimeFactory, RenderBackend, RenderBackendFactory,
+    RenderBackendV2,
+};
+
+/// Legacy factory for creating direct `RenderBackend` Vello instances.
+pub struct VelloBackendFactory;
+
+impl VelloBackendFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl RenderBackendFactory for VelloBackendFactory {
+    fn create(&self) -> Box<dyn RenderBackend> {
+        Box::new(super::VelloBackend::new())
+    }
+
+    fn name(&self) -> &'static str {
+        "vello"
+    }
+}
+
+impl Default for VelloBackendFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Factory for creating Vello + wgpu runtime/backend pairs.
 pub struct VelloGraphicsFactory;

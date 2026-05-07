@@ -54,10 +54,10 @@ struct KawaseTexturePool {
     // Half-res texture (full/2)
     half: wgpu::Texture,
     half_view: wgpu::TextureView,
-    // Quarter-res texture (full/8 for reduced fill rate)
+    // Quarter-res texture (full/4)
     quarter: wgpu::Texture,
     quarter_view: wgpu::TextureView,
-    // Two ping-pong buffers at quarter-res (full/8) for Kawase iterations
+    // Two ping-pong buffers at quarter-res (full/4) for Kawase iterations
     ping: wgpu::Texture,
     ping_view: wgpu::TextureView,
     pong: wgpu::Texture,
@@ -66,12 +66,12 @@ struct KawaseTexturePool {
 
 impl KawaseTexturePool {
     fn create(device: &wgpu::Device, full_width: u32, full_height: u32) -> Self {
-        // OPTIMIZATION: Use 1/8 resolution instead of 1/4 for significant performance gain
-        // Pixel fill rate: 1/64 of original vs 1/16 of 1/4 resolution
+        // Use true 1/4 resolution for stronger/cleaner blur quality.
+        // Pixel fill rate: 1/16 of original.
         let half_w = (full_width / 2).max(1);
         let half_h = (full_height / 2).max(1);
-        let quarter_w = (full_width / 8).max(1);
-        let quarter_h = (full_height / 8).max(1);
+        let quarter_w = (full_width / 4).max(1);
+        let quarter_h = (full_height / 4).max(1);
 
         let make = |w: u32, h: u32, label: &'static str| {
             let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -1009,9 +1009,8 @@ impl FilterPipeline {
         if let Some(ref set) = external_tex_set {
             let expected_half_w = (full_w / 2).max(1);
             let expected_half_h = (full_h / 2).max(1);
-            // Internal pool uses /8 for performance (1/64 fill rate vs 1/16)
-            let expected_quarter_w = (full_w / 8).max(1);
-            let expected_quarter_h = (full_h / 8).max(1);
+            let expected_quarter_w = (full_w / 4).max(1);
+            let expected_quarter_h = (full_h / 4).max(1);
 
             let valid = set.ds_half.texture().width() == expected_half_w
                 && set.ds_half.texture().height() == expected_half_h

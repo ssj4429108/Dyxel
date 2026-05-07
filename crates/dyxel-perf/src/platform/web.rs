@@ -5,7 +5,7 @@
 
 use crate::SystemInfoProvider;
 use wasm_bindgen::prelude::*;
-use web_sys::{window, Navigator};
+use web_sys::window;
 
 pub struct WebSystemInfo;
 
@@ -47,30 +47,4 @@ impl SystemInfoProvider for WebSystemInfo {
     fn platform_name(&self) -> &'static str {
         "web"
     }
-}
-
-/// Get device memory information (in GB) if available
-pub fn get_device_memory_gb() -> Option<f32> {
-    if let Some(window) = window() {
-        if let Ok(navigator) = window.navigator().dyn_into::<Navigator>() {
-            // deviceMemory is available in Chrome
-            if let Ok(memory) = js_sys::Reflect::get(&navigator, &JsValue::from_str("deviceMemory"))
-            {
-                if !memory.is_undefined() && !memory.is_null() {
-                    return memory.as_f64().map(|v| v as f32);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Get hardware concurrency (number of logical processors)
-pub fn get_hardware_concurrency() -> Option<u32> {
-    if let Some(window) = window() {
-        if let Ok(navigator) = window.navigator().dyn_into::<Navigator>() {
-            return Some(navigator.hardware_concurrency() as u32);
-        }
-    }
-    None
 }

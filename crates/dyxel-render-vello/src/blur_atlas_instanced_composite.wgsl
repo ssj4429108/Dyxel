@@ -52,7 +52,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32,
     var out: VertexOutput;
     out.position = vec4<f32>(clip, 0.0, 1.0);
     out.local_pos = uv * inst.rect.zw;
-    out.atlas_px = inst.atlas_rect.xy + uv * inst.atlas_rect.zw;
+    let atlas_extent = max(inst.atlas_rect.zw - vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 0.0));
+    var atlas_local = uv * atlas_extent;
+    out.atlas_px = inst.atlas_rect.xy + atlas_local;
     out.size = inst.rect.zw;
     out.color = inst.color;
     out.params = inst.params;

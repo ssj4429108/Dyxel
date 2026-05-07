@@ -18,6 +18,7 @@ pub(crate) struct DetachedBlitState {
 }
 
 impl DetachedBlitState {
+    #[cfg(target_os = "android")]
     pub(crate) fn new() -> Self {
         Self {
             layout: None,
@@ -123,6 +124,7 @@ pub(crate) struct WgpuDetachedPresenter {
 }
 
 impl WgpuDetachedPresenter {
+    #[cfg(target_os = "android")]
     pub(crate) fn new(
         surface: Arc<Mutex<super::runtime::RuntimeRenderSurface>>,
         blit_state: Arc<Mutex<DetachedBlitState>>,
@@ -311,11 +313,13 @@ impl BackendFrameContext for WgpuFrameContext {
         RuntimeKind::Wgpu
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn supports_detached_present(&self) -> bool {
         (self.render_to_offscreen && self.detached_presenter.is_some())
             || (!self.render_to_offscreen && self.surface_texture.is_some())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn present_detached(self: Box<Self>) -> anyhow::Result<f64> {
         let mut frame = *self;
         if frame.render_to_offscreen {
@@ -342,6 +346,7 @@ impl BackendFrameContext for WgpuFrameContext {
         Ok(present_ms)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn wait_until_gpu_ready(&self, timeout: std::time::Duration) -> anyhow::Result<bool> {
         // If no GPU work was submitted for this frame (e.g. w==0 || h==0),
         // there is nothing to wait for.
