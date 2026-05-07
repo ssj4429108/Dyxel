@@ -749,6 +749,92 @@ impl VelloBackend {
         (atlas_bind_group, atlas_instance_count, atlas_enabled)
     }
 
+    /// Pass 4 blur composite: draw blurred textures and cached draws on top of the scene.
+    /// Returns true if any blur textures were composited.
+    #[inline]
+    pub(crate) fn composite_blur_pass(
+        &self,
+        rp: &mut wgpu::RenderPass<'_>,
+        has_blur: bool,
+        cached_draws: &[crate::cache::CachedDraw],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        w: u32,
+        h: u32,
+        surface_format: wgpu::TextureFormat,
+        atlas_bind_group: Option<&wgpu::BindGroup>,
+        atlas_instance_count: u32,
+        atlas_enabled: bool,
+    ) -> bool {
+        if !has_blur && cached_draws.is_empty() {
+            return false;
+        }
+
+        let mut blurred_textures = self.blurred_textures.lock().unwrap();
+
+        let needs_pipeline = self.blur_composite_pipeline.lock().unwrap().is_none();
+        if needs_pipeline {
+            self.create_blur_composite_pipeline(device, surface_format);
+        }
+
+        let blur_pipeline = self.blur_composite_pipeline.lock().unwrap();
+        let blur_bg_layout = self.blur_composite_bind_group_layout.lock().unwrap();
+        let uniform_buffer = self.blur_composite_uniforms.lock().unwrap();
+        let overlay_uniform_buffer = self.blur_composite_overlay_uniforms.lock().unwrap();
+
+        if let (Some(pipeline), Some(layout), _, _) = (
+            blur_pipeline.as_ref(),
+            blur_bg_layout.as_ref(),
+            uniform_buffer.as_ref(),
+            overlay_uniform_buffer.as_ref(),
+        ) {
+            let sampler_guard = self.sampler.lock().unwrap();
+            let sampler = sampler_guard
+                .as_ref()
+                .expect("Sampler should be initialized");
+            let staging_guard = self.blur_staging_buffer.lock().unwrap();
+            let staging = staging_guard
+                .as_ref()
+                .expect("blur staging buffer not initialized");
+            let alignment = *self.blur_staging_alignment.lock().unwrap();
+            let gpu_pool_guard = self.gpu_texture_pool.lock().unwrap();
+            let atlas_pipeline_guard = self.blur_instanced_pipeline.lock().unwrap();
+            let backdrop_guard = self.backdrop_blur.lock().unwrap();
+            let backdrop_view = if crate::blur::USE_FULL_FRAME_BACKDROP_BLUR {
+                backdrop_guard.as_ref().map(|b| &b.view)
+            } else {
+                None
+            };
+
+            let res = crate::blur::BlurCompositeResources {
+                pipeline,
+                layout,
+                sampler,
+                staging_buffer: staging,
+                staging_alignment: alignment,
+                staging_offset: &self.blur_staging_offset,
+                gpu_texture_pool: gpu_pool_guard.as_ref(),
+                atlas_pipeline: atlas_pipeline_guard.as_ref(),
+                atlas_bind_group,
+                atlas_instance_count,
+                atlas_enabled,
+                backdrop_view,
+            };
+            crate::blur::composite_blur_pass4(
+                rp,
+                &mut blurred_textures,
+                cached_draws,
+                &res,
+                device,
+                queue,
+                w,
+                h,
+            )
+        } else {
+            false
+        }
+    }
+
     #[inline]
     pub(crate) fn log_frame_diagnostics(
         &self,
@@ -842,5 +928,58 @@ impl VelloBackend {
                 report.print();
             }
         }
+    }
+
+    /// Create blit shader, bind group layout, and sampler for the blit pipeline.
+    /// Returns (shader, bind_group_layout, sampler).
+    #[inline]
+    pub(crate) fn create_blit_resources(
+        device: &wgpu::Device,
+    ) -> (wgpu::ShaderModule, wgpu::BindGroupLayout, wgpu::Sampler) {
+        let blit_shader = if cfg!(target_os = "android") {
+            let spv_words: Vec<u32> = crate::BLIT_SHADER_SPV
+                .chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Blit Shader (SPIR-V)"),
+                source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Owned(spv_words)),
+            })
+        } else {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Blit Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
+            })
+        };
+
+        let blit_bl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        (blit_shader, blit_bl, sampler)
     }
 }
