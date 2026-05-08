@@ -1,4 +1,4 @@
-use dyxel_render_api::{BackendFrameContext, GraphicsRuntime, RenderBackendV2, RuntimeSurfaceId};
+use dyxel_render_api::{GraphicsRuntime, RenderBackendV2};
 use dyxel_render_vello::{backend::VelloDrawingBackend, runtime::WgpuRuntime};
 
 #[test]
@@ -11,32 +11,32 @@ fn test_vello_integration_render_to_texture() {
         .initialize(&mut runtime as &mut dyn GraphicsRuntime)
         .expect("Failed to initialize backend");
 
-    // Create a dummy package with a simple scene
-    let package = dyxel_render_api::RenderPackage {
-        nodes: vec![dyxel_render_api::SceneNode {
+    // Create a dummy package with a simple scene.
+    let package = dyxel_render_api::RenderPackage::new(
+        (256, 256),
+        Some(0),
+        vec![dyxel_render_api::SceneNode {
             id: 0,
             x: 0.0,
             y: 0.0,
             width: 256.0,
             height: 256.0,
-            opacity: 1.0,
-            children: vec![],
+            position_x: 0.0,
+            position_y: 0.0,
             content: dyxel_render_api::NodeContent::Rect {
                 color: [255, 0, 0, 255],
             },
-            transform: None,
-            clip: None,
-            blur: None,
+            border_radius: 0.0,
+            opacity: 1.0,
+            clip_to_bounds: false,
             shadow: None,
+            blur: None,
+            children: vec![],
         }],
-        root_id: Some(0),
-        viewport: (256, 256),
-        recycle_plans: vec![],
-        bake_plans: vec![],
-    };
+    );
 
-    // We can't create a real surface without a window, but we can test the backend's
-    // internal render path by calling the vello_backend directly.
+    // We can't create a real surface without a window, so exercise the backend's
+    // render-to-view path directly.
     let device = runtime.device().expect("No device");
     let queue = runtime.queue().expect("No queue");
 
@@ -52,39 +52,45 @@ fn test_vello_integration_render_to_texture() {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::STORAGE_BINDING
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let test_view = test_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Create a fake surface texture (we won't present it)
-    let fake_surface_tex = wgpu::SurfaceTexture {
-        texture: std::sync::Arc::new(test_tex),
-        suboptimal: false,
-        presented: false,
-    };
-
-    let mut frame = dyxel_render_vello::frame_context::WgpuFrameContext {
-        surface_id: RuntimeSurfaceId(1),
-        surface_texture: Some(fake_surface_tex),
-        offscreen_texture: None,
-        view: test_view,
-        render_to_offscreen: false,
-        device: device.clone(),
-        queue: queue.clone(),
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        width: 256,
-        height: 256,
-        acquire_ms: 0.0,
-        present_ms: 0.0,
-        last_submission_index: None,
-        detached_presenter: None,
-    };
-
+    // Renderer initialization is intentionally asynchronous for cold-start
+    // behavior. Kick it once, wait until ready, then render the package.
+    for _ in 0..200 {
+        backend
+            .vello_backend()
+            .render_to_view(
+                device,
+                queue,
+                &test_view,
+                wgpu::TextureFormat::Rgba8Unorm,
+                &package,
+            )
+            .expect("Render failed");
+        if backend.vello_backend().is_renderer_ready() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        backend.vello_backend().is_renderer_ready(),
+        "renderer did not become ready"
+    );
     backend
-        .render(&mut frame as &mut dyn BackendFrameContext, &package)
+        .vello_backend()
+        .render_to_view(
+            device,
+            queue,
+            &test_view,
+            wgpu::TextureFormat::Rgba8Unorm,
+            &package,
+        )
         .expect("Render failed");
 
     // Read back the test texture

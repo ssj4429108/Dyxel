@@ -7,8 +7,10 @@
 //! and WgpuRuntime::end_frame().
 
 use dyxel_render_api::{BackendFrameContext, RuntimeKind};
+#[cfg(target_os = "android")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "android")]
 pub(crate) struct DetachedBlitState {
     layout: Option<vello::wgpu::BindGroupLayout>,
     shader: Option<vello::wgpu::ShaderModule>,
@@ -17,8 +19,8 @@ pub(crate) struct DetachedBlitState {
     sampler: Option<vello::wgpu::Sampler>,
 }
 
+#[cfg(target_os = "android")]
 impl DetachedBlitState {
-    #[cfg(target_os = "android")]
     pub(crate) fn new() -> Self {
         Self {
             layout: None,
@@ -117,14 +119,15 @@ impl DetachedBlitState {
     }
 }
 
+#[cfg(target_os = "android")]
 #[derive(Clone)]
 pub(crate) struct WgpuDetachedPresenter {
     surface: Arc<Mutex<super::runtime::RuntimeRenderSurface>>,
     blit_state: Arc<Mutex<DetachedBlitState>>,
 }
 
+#[cfg(target_os = "android")]
 impl WgpuDetachedPresenter {
-    #[cfg(target_os = "android")]
     pub(crate) fn new(
         surface: Arc<Mutex<super::runtime::RuntimeRenderSurface>>,
         blit_state: Arc<Mutex<DetachedBlitState>>,
@@ -301,6 +304,7 @@ pub struct WgpuFrameContext {
     /// The submission index of the last `queue.submit()` for this frame.
     /// Used by the presenter to wait only for this frame's GPU work.
     pub(crate) last_submission_index: Option<vello::wgpu::SubmissionIndex>,
+    #[cfg(target_os = "android")]
     pub(crate) detached_presenter: Option<WgpuDetachedPresenter>,
 }
 
@@ -315,19 +319,35 @@ impl BackendFrameContext for WgpuFrameContext {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn supports_detached_present(&self) -> bool {
-        (self.render_to_offscreen && self.detached_presenter.is_some())
-            || (!self.render_to_offscreen && self.surface_texture.is_some())
+        #[cfg(target_os = "android")]
+        {
+            return (self.render_to_offscreen && self.detached_presenter.is_some())
+                || (!self.render_to_offscreen && self.surface_texture.is_some());
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            !self.render_to_offscreen && self.surface_texture.is_some()
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn present_detached(self: Box<Self>) -> anyhow::Result<f64> {
         let mut frame = *self;
+
+        #[cfg(target_os = "android")]
         if frame.render_to_offscreen {
             let presenter = frame
                 .detached_presenter
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("WgpuFrameContext has no detached presenter"))?;
             return presenter.present_offscreen(frame);
+        }
+
+        if frame.render_to_offscreen {
+            return Err(anyhow::anyhow!(
+                "Detached present is only available for direct surface frames on this platform"
+            ));
         }
 
         let present_t0 = std::time::Instant::now();

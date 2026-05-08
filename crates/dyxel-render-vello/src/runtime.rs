@@ -25,6 +25,7 @@ const RUNTIME_TIMING_SAMPLE_THRESHOLD_MS: f64 = 1.0;
 // perturb frame pacing. Truly pathological waits are still logged immediately,
 // while moderate waits are sampled.
 const RUNTIME_TIMING_ALWAYS_THRESHOLD_MS: f64 = 24.0;
+#[cfg(any(target_os = "macos", target_os = "android"))]
 const OFFSCREEN_FRAME_RING_LEN: usize = 3;
 
 fn should_log_runtime_timing(ms: f64) -> bool {
@@ -40,11 +41,6 @@ fn android_full_frame_offscreen_enabled() -> bool {
     std::env::var("DYXEL_ANDROID_FULL_FRAME_OFFSCREEN")
         .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
         .unwrap_or(false)
-}
-
-#[cfg(not(target_os = "android"))]
-fn android_full_frame_offscreen_enabled() -> bool {
-    false
 }
 
 #[cfg(target_os = "android")]
@@ -110,6 +106,7 @@ pub struct WgpuRuntime {
     #[cfg(target_os = "android")]
     native_presenters:
         HashMap<RuntimeSurfaceId, super::android_native_presenter::AndroidNativePresenterProbe>,
+    #[cfg(any(target_os = "macos", target_os = "android"))]
     offscreen_targets: HashMap<RuntimeSurfaceId, RuntimeOffscreenTarget>,
     next_surface_id: u32,
     late_blit_layout: Option<wgpu::BindGroupLayout>,
@@ -121,6 +118,7 @@ pub struct WgpuRuntime {
     detached_blit_state: Arc<Mutex<super::frame_context::DetachedBlitState>>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "android"))]
 struct RuntimeOffscreenTarget {
     slots: Vec<RuntimeOffscreenSlot>,
     next_slot: usize,
@@ -129,6 +127,7 @@ struct RuntimeOffscreenTarget {
     format: wgpu::TextureFormat,
 }
 
+#[cfg(any(target_os = "macos", target_os = "android"))]
 struct RuntimeOffscreenSlot {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -311,6 +310,7 @@ impl WgpuRuntime {
             surfaces: HashMap::new(),
             #[cfg(target_os = "android")]
             native_presenters: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "android"))]
             offscreen_targets: HashMap::new(),
             next_surface_id: 1,
             late_blit_layout: None,
@@ -415,6 +415,7 @@ impl WgpuRuntime {
         self.late_blit_pipeline_format = Some(format);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "android"))]
     fn next_offscreen_target(
         &mut self,
         surface_id: RuntimeSurfaceId,
@@ -481,6 +482,7 @@ impl WgpuRuntime {
         (slot.texture.clone(), slot.view.clone())
     }
 
+    #[cfg(any(target_os = "macos", target_os = "android"))]
     #[allow(dead_code)]
     fn offscreen_target_for_tests(&self, surface_id: RuntimeSurfaceId) -> &RuntimeOffscreenTarget {
         self.offscreen_targets
@@ -771,6 +773,7 @@ impl GraphicsRuntime for WgpuRuntime {
         #[cfg(target_os = "android")]
         let dev_id = surface.dev_id;
         drop(surface);
+        #[cfg(any(target_os = "macos", target_os = "android"))]
         self.offscreen_targets.remove(&surface_id);
         #[cfg(target_os = "android")]
         if let Some(presenter) = self.native_presenters.get_mut(&surface_id) {
@@ -893,9 +896,13 @@ impl GraphicsRuntime for WgpuRuntime {
                 super::android_native_wgpu_ahb::android_native_presenter_wgpu_ahb_frame_enabled();
             #[cfg(not(target_os = "android"))]
             let native_ahb_frame = false;
-            let use_offscreen_first = cfg!(target_os = "macos")
-                || android_full_frame_offscreen_enabled()
-                || native_ahb_frame;
+            #[cfg(target_os = "android")]
+            let android_full_frame_offscreen = android_full_frame_offscreen_enabled();
+            #[cfg(not(target_os = "android"))]
+            let android_full_frame_offscreen = false;
+
+            let use_offscreen_first =
+                cfg!(target_os = "macos") || android_full_frame_offscreen || native_ahb_frame;
             if use_offscreen_first {
                 let (offscreen_texture, offscreen_view) =
                     self.next_offscreen_target(surface_id, &device, width, height, format);
@@ -911,8 +918,6 @@ impl GraphicsRuntime for WgpuRuntime {
                         self.detached_blit_state.clone(),
                     ))
                 };
-                #[cfg(not(target_os = "android"))]
-                let detached_presenter = None;
 
                 return Ok(Box::new(super::frame_context::WgpuFrameContext {
                     surface_id,
@@ -928,6 +933,7 @@ impl GraphicsRuntime for WgpuRuntime {
                     acquire_ms: 0.0,
                     present_ms: 0.0,
                     last_submission_index: None,
+                    #[cfg(target_os = "android")]
                     detached_presenter,
                 }));
             }
@@ -969,6 +975,7 @@ impl GraphicsRuntime for WgpuRuntime {
                 acquire_ms,
                 present_ms: 0.0,
                 last_submission_index: None,
+                #[cfg(target_os = "android")]
                 detached_presenter: None,
             }))
         }

@@ -139,7 +139,7 @@ fn test_vello_render_to_texture() {
         let _ = tx.send(r);
     });
     while rx.try_recv().is_err() {
-        device.poll(wgpu::PollType::Poll);
+        let _ = device.poll(wgpu::PollType::Poll);
     }
 
     let data = slice.get_mapped_range();

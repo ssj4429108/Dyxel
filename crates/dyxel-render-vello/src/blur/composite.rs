@@ -6,7 +6,11 @@
 
 use super::dirty::{blur_entry_visible, USE_FULL_FRAME_BACKDROP_BLUR};
 use super::types::BlurredTextureEntry;
-use crate::CachedDraw;
+use crate::cache::CachedDraw;
+use crate::state::BlurState;
+use crate::texture_pool::GpuTexturePool;
+#[cfg(target_arch = "wasm32")]
+use dyxel_render_api::LockExt;
 use kurbo::Affine;
 use std::sync::atomic::AtomicUsize;
 
@@ -24,6 +28,95 @@ pub(crate) struct BlurCompositeResources<'a> {
     pub atlas_instance_count: u32,
     pub atlas_enabled: bool,
     pub backdrop_view: Option<&'a wgpu::TextureView>,
+}
+
+impl BlurState {
+    /// Pass 4 blur composite: draw blurred textures and cached draws on top of
+    /// the scene. Returns true if any blur textures were composited.
+    ///
+    /// The top-level frame coordinator still owns the final render pass lifetime
+    /// and supplies cross-state resources (`sampler`, raster-cache texture pool)
+    /// so `BlurState` does not depend on `BlitState` or `RasterCacheState`.
+    #[inline]
+    pub(crate) fn composite_blur_pass(
+        &self,
+        rp: &mut wgpu::RenderPass<'_>,
+        has_blur: bool,
+        cached_draws: &[CachedDraw],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        w: u32,
+        h: u32,
+        surface_format: wgpu::TextureFormat,
+        sampler: &wgpu::Sampler,
+        gpu_texture_pool: Option<&GpuTexturePool>,
+        atlas_bind_group: Option<&wgpu::BindGroup>,
+        atlas_instance_count: u32,
+        atlas_enabled: bool,
+    ) -> bool {
+        if !has_blur && cached_draws.is_empty() {
+            return false;
+        }
+
+        let mut blurred_textures = self.blurred_textures.lock().unwrap();
+
+        let needs_pipeline = self.blur_composite_pipeline.lock().unwrap().is_none();
+        if needs_pipeline {
+            self.create_blur_composite_pipeline(device, surface_format);
+        }
+
+        let blur_pipeline = self.blur_composite_pipeline.lock().unwrap();
+        let blur_bg_layout = self.blur_composite_bind_group_layout.lock().unwrap();
+        let uniform_buffer = self.blur_composite_uniforms.lock().unwrap();
+        let overlay_uniform_buffer = self.blur_composite_overlay_uniforms.lock().unwrap();
+
+        if let (Some(pipeline), Some(layout), _, _) = (
+            blur_pipeline.as_ref(),
+            blur_bg_layout.as_ref(),
+            uniform_buffer.as_ref(),
+            overlay_uniform_buffer.as_ref(),
+        ) {
+            let staging_guard = self.blur_staging_buffer.lock().unwrap();
+            let staging = staging_guard
+                .as_ref()
+                .expect("blur staging buffer not initialized");
+            let alignment = *self.blur_staging_alignment.lock().unwrap();
+            let atlas_pipeline_guard = self.blur_instanced_pipeline.lock().unwrap();
+            let backdrop_guard = self.backdrop_blur.lock().unwrap();
+            let backdrop_view = if USE_FULL_FRAME_BACKDROP_BLUR {
+                backdrop_guard.as_ref().map(|b| &b.view)
+            } else {
+                None
+            };
+
+            let res = BlurCompositeResources {
+                pipeline,
+                layout,
+                sampler,
+                staging_buffer: staging,
+                staging_alignment: alignment,
+                staging_offset: &self.blur_staging_offset,
+                gpu_texture_pool,
+                atlas_pipeline: atlas_pipeline_guard.as_ref(),
+                atlas_bind_group,
+                atlas_instance_count,
+                atlas_enabled,
+                backdrop_view,
+            };
+            composite_blur_pass4(
+                rp,
+                &mut blurred_textures,
+                cached_draws,
+                &res,
+                device,
+                queue,
+                w,
+                h,
+            )
+        } else {
+            false
+        }
+    }
 }
 
 /// Execute Pass 4 blur compositing render commands.

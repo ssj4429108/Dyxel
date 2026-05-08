@@ -6,8 +6,10 @@
 use super::dirty::blur_entry_visible;
 use super::types::{BlurDirtyKind, BlurredTextureEntry};
 use crate::color::neutral_to_peniko_color;
-use crate::text::{draw_prepared_text, GlyphRunCacheEntry, GlyphRunCacheKey, GlyphRunCacheStats};
-use dyxel_render_api::{SceneNode, SharedMutex};
+use crate::state::{BlurState, TextCacheState};
+#[cfg(target_arch = "wasm32")]
+use dyxel_render_api::LockExt;
+use dyxel_render_api::SceneNode;
 use kurbo::{Affine, Vec2};
 use std::collections::HashMap;
 use vello::peniko::Color;
@@ -70,8 +72,7 @@ pub(crate) fn render_deferred_child(
     parent_pos: Vec2,
     origin_offset: Vec2,
     scene_transform: Affine,
-    glyph_run_cache: &SharedMutex<HashMap<GlyphRunCacheKey, GlyphRunCacheEntry>>,
-    glyph_run_cache_stats: &SharedMutex<GlyphRunCacheStats>,
+    text_cache_state: &TextCacheState,
 ) {
     use kurbo::{Rect as KRect, RoundedRect};
     use vello::peniko::{BlendMode as PenikoBlendMode, Compose, Fill, Mix};
@@ -98,14 +99,7 @@ pub(crate) fn render_deferred_child(
 
         // Draw the child.
         if let dyxel_render_api::NodeContent::Text(ref payload) = node.content {
-            draw_prepared_text(
-                scene,
-                payload,
-                local_transform,
-                glyph_run_cache,
-                glyph_run_cache_stats,
-                1.0,
-            );
+            text_cache_state.draw_prepared_text(scene, payload, local_transform, 1.0);
         } else if let dyxel_render_api::NodeContent::Rect { color } = node.content {
             let rect = KRect::from_origin_size((0.0, 0.0), (width, height));
             let pcolor = neutral_to_peniko_color(color);
@@ -129,9 +123,59 @@ pub(crate) fn render_deferred_child(
                 global_pos,
                 origin_offset,
                 scene_transform,
-                glyph_run_cache,
-                glyph_run_cache_stats,
+                text_cache_state,
             );
+        }
+    }
+}
+
+impl BlurState {
+    /// Render deferred children for blur entries that need it (Pass 3).
+    ///
+    /// Returns the indices of entries that were successfully rendered (for
+    /// debug frame saving by the caller).
+    #[inline]
+    pub(crate) fn render_pass3_children(
+        &self,
+        node_map: &HashMap<u32, &SceneNode>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut vello::Renderer,
+        aa_config: vello::AaConfig,
+        text_cache_state: &TextCacheState,
+        viewport_w: u32,
+        viewport_h: u32,
+    ) -> Vec<usize> {
+        let mut blurred_textures = self.blurred_textures.lock().unwrap();
+        render_pass3_children(
+            &mut blurred_textures,
+            node_map,
+            device,
+            queue,
+            renderer,
+            aa_config,
+            text_cache_state,
+            viewport_w,
+            viewport_h,
+        )
+    }
+
+    /// Visit pass-3 children textures for debug capture without exposing the
+    /// underlying blur-entry storage to the frame coordinator.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    pub(crate) fn for_each_rendered_child_texture(
+        &self,
+        rendered_indices: &[usize],
+        mut visitor: impl FnMut(u32, &wgpu::Texture),
+    ) {
+        let blurred_textures = self.blurred_textures.lock().unwrap();
+        for &idx in rendered_indices {
+            if let Some(entry) = blurred_textures.get(idx) {
+                if let Some(ref tex) = entry.children_texture {
+                    visitor(entry.view_id, tex);
+                }
+            }
         }
     }
 }
@@ -140,19 +184,15 @@ pub(crate) fn render_deferred_child(
 ///
 /// Iterates blur entries, skips invisible/empty/cached ones, creates
 /// per-entry children scenes, and renders them to local textures.
-///
-/// Returns the indices of entries that were successfully rendered (for
-/// debug frame saving by the caller).
 #[inline]
-pub(crate) fn render_pass3_children(
+fn render_pass3_children(
     blurred_textures: &mut [BlurredTextureEntry],
     node_map: &HashMap<u32, &SceneNode>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     renderer: &mut vello::Renderer,
     aa_config: vello::AaConfig,
-    glyph_run_cache: &SharedMutex<HashMap<GlyphRunCacheKey, GlyphRunCacheEntry>>,
-    glyph_run_cache_stats: &SharedMutex<GlyphRunCacheStats>,
+    text_cache_state: &TextCacheState,
     viewport_w: u32,
     viewport_h: u32,
 ) -> Vec<usize> {
@@ -198,8 +238,7 @@ pub(crate) fn render_pass3_children(
                 Vec2::new(global_x, global_y),
                 origin_offset,
                 children_scene_transform,
-                glyph_run_cache,
-                glyph_run_cache_stats,
+                text_cache_state,
             );
         }
 

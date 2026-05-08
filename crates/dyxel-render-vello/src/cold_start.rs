@@ -4,8 +4,6 @@
 //! Cold-start initialization: async renderer loading, cache management, and pipeline prewarming.
 
 use super::{AsyncShared, VelloBackend};
-#[cfg(target_arch = "wasm32")]
-use dyxel_render_api::LockExt;
 use std::sync::atomic::AtomicBool;
 use vello::peniko::Color;
 use vello::{Renderer, RendererOptions, Scene};
@@ -19,35 +17,28 @@ impl VelloBackend {
         queue: &wgpu::Queue,
     ) {
         // Fast path - already initialized
-        if self.renderer.lock().unwrap().is_some() {
+        if self.renderer_state.is_renderer_ready() {
             return;
         }
 
         // Check if already loading
-        if self.is_loading.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.renderer_state.is_loading() {
             return;
         }
 
         // Try to acquire init info
-        let init_info = self.init_device_info.lock().unwrap().take();
+        let init_info = self.renderer_state.take_deferred_init_info();
         if init_info.is_none() {
             return; // No init info available (should not happen)
         }
 
         let (_cache_path, pipeline_cache, cache_stage) = init_info.unwrap();
 
-        // Defensive: if self.pipeline_cache was never set (e.g. init raced), populate it now.
-        {
-            let mut pc = self.pipeline_cache.lock().unwrap();
-            if pc.is_none() && pipeline_cache.is_some() {
-                log::warn!(
-                    "[ColdStart] self.pipeline_cache was None in ensure_renderer_initialized_async; restoring from init_device_info"
-                );
-                *pc = pipeline_cache.clone();
-            }
-        }
+        // Defensive: if the renderer pipeline cache was never set (e.g. init raced), populate it now.
+        self.renderer_state
+            .restore_pipeline_cache_if_missing(&pipeline_cache);
 
-        let memory_tier = self.memory_optimizer.lock().unwrap().tier();
+        let memory_tier = self.renderer_state.memory_tier();
 
         // Determine if we need full load based on cache stage
         // cache_stage: None = no cache, Some(1) = Stage 1 (area_only), Some(2) = Stage 2 (full)
@@ -62,21 +53,20 @@ impl VelloBackend {
         );
 
         // Set loading flag
-        self.is_loading
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.renderer_state.set_loading(true);
 
         // Clone necessary data for the background thread
-        let renderer_clone = self.renderer.clone();
-        let renderer_id_clone = self.renderer_id.clone();
-        let is_loading_clone = self.is_loading.clone();
+        let renderer_clone = self.renderer_state.renderer_handle_clone();
+        let renderer_id_clone = self.renderer_state.renderer_id_handle();
+        let is_loading_clone = self.renderer_state.loading_flag_handle();
         let device_clone = device.clone();
         let queue_clone = queue.clone();
-        let perf_monitor_clone = self.perf_monitor.clone();
+        let perf_monitor_clone = self.diagnostics_state.perf_monitor_handle();
         let cache_saved_clone = std::sync::Arc::new(AtomicBool::new(false));
         let cache_saved_for_thread = cache_saved_clone.clone();
-        let pipeline_cache_clone = self.pipeline_cache.clone();
-        let cache_path_clone: AsyncShared<Option<String>> = self.cache_path.clone();
-        let cache_stage_clone = self.cache_stage.clone();
+        let pipeline_cache_clone = self.renderer_state.pipeline_cache_handle();
+        let cache_path_clone: AsyncShared<Option<String>> = self.renderer_state.cache_path_handle();
+        let cache_stage_clone = self.renderer_state.cache_stage_handle();
 
         // Spawn background thread for heavy shader compilation
         let handle = std::thread::spawn(move || {
@@ -297,28 +287,32 @@ impl VelloBackend {
             is_loading_clone.store(false, std::sync::atomic::Ordering::SeqCst);
         });
 
-        *self.loading_handle.lock().unwrap() = Some(handle);
+        self.renderer_state.set_loading_handle(handle);
     }
 
     /// Check if renderer is ready for rendering
     pub fn is_renderer_ready(&self) -> bool {
-        self.renderer.lock().unwrap().is_some()
+        self.renderer_state.is_renderer_ready()
     }
 
     /// Check if renderer is currently loading
     pub fn is_renderer_loading(&self) -> bool {
-        self.is_loading.load(std::sync::atomic::Ordering::SeqCst)
+        self.renderer_state.is_loading()
     }
 
     pub(crate) fn save_cache(&self) {
-        if self.cache_saved.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.renderer_state.cache_already_saved() {
             log::info!("[ColdStart] Cache already saved, skipping");
             return;
         }
-        let cache_lock = self.pipeline_cache.lock().unwrap();
-        let path_lock = self.cache_path.lock().unwrap();
+        let pipeline_cache = self.renderer_state.pipeline_cache_handle();
+        let cache_path = self.renderer_state.cache_path_handle();
+        let cache_lock = pipeline_cache.lock().unwrap();
+        let path_lock = cache_path.lock().unwrap();
         #[cfg(not(target_arch = "wasm32"))]
-        let stage_lock = self.cache_stage.lock().unwrap();
+        let cache_stage = self.renderer_state.cache_stage_handle();
+        #[cfg(not(target_arch = "wasm32"))]
+        let stage_lock = cache_stage.lock().unwrap();
         if let (Some(cache), Some(path)) = (&*cache_lock, &*path_lock) {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -348,8 +342,7 @@ impl VelloBackend {
                             "[ColdStart] Pipeline cache saved successfully ({} bytes)",
                             data.len()
                         );
-                        self.cache_saved
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        self.renderer_state.mark_cache_saved();
                     }
                 } else {
                     log::warn!("[ColdStart] Cache get_data() returned None");
@@ -378,57 +371,23 @@ impl VelloBackend {
     /// Prewarm pipelines: create all necessary pipelines in background to reduce first-render latency
     pub(crate) fn prewarm_pipelines(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         log::info!("VelloBackend: Prewarming pipelines...");
-        let blit_shader = self.blit_shader.lock().unwrap();
-        let blit_layout = self.blit_bind_group_layout.lock().unwrap();
-
-        if let (Some(shader), Some(layout)) = (&*blit_shader, &*blit_layout) {
-            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Blit Pipeline Layout Prewarm"),
-                bind_group_layouts: &[layout],
-                push_constant_ranges: &[],
-            });
-
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Blit Pipeline Prewarm"),
-                layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: self.pipeline_cache.lock().unwrap().as_ref(),
-            });
-            *self.blit_pipeline.lock().unwrap() = Some(pipeline);
-            *self.blit_pipeline_format.lock().unwrap() = Some(format);
-            self.ensure_blur_instanced_resources(device, format, 128);
-        }
+        self.renderer_state.with_pipeline_cache(|pipeline_cache| {
+            self.blit_state
+                .prewarm_pipeline(device, format, pipeline_cache);
+        });
+        self.blur_state
+            .ensure_blur_instanced_resources(device, format, 128);
         log::info!("VelloBackend: Pipeline prewarming complete.");
     }
 
     /// Ensure the blit pipeline matches the target surface format, recreating if needed.
     pub(crate) fn ensure_blit_pipeline(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        let needs_create = {
-            let format_guard = self.blit_pipeline_format.lock().unwrap();
-            format_guard.map_or(true, |f| f != format)
-        };
-        if needs_create {
-            self.prewarm_pipelines(device, format);
-        }
+        self.renderer_state.with_pipeline_cache(|pipeline_cache| {
+            self.blit_state
+                .ensure_pipeline(device, format, pipeline_cache);
+        });
+        self.blur_state
+            .ensure_blur_instanced_resources(device, format, 128);
     }
 }
 

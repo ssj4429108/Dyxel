@@ -305,7 +305,6 @@ mod tests {
     fn test_transform_conversion() {
         let t = Transform::translate(10.0, 20.0);
         let affine = VelloSceneAdapter::transform_to_affine(t);
-        // Affine should have translation in the last two elements
-        // Note: kurbo uses column-major order for the 2x2 part
+        assert_eq!(affine.as_coeffs(), [1.0, 0.0, 0.0, 1.0, 10.0, 20.0]);
     }
 }

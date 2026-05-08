@@ -20,7 +20,7 @@ fn test_factory_object_model_no_gpu() {
     assert_eq!(factory.backend_name(), "vello");
 
     let mut runtime = factory.create_runtime().expect("create_runtime failed");
-    let mut backend = factory.create_backend().expect("create_backend failed");
+    let backend = factory.create_backend().expect("create_backend failed");
 
     // Verify runtime downcasts to WgpuRuntime
     let wgpu_runtime = runtime

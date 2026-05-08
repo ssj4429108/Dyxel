@@ -4,18 +4,26 @@
 //! Blur GPU pipeline setup: composite pipeline, atlas textures, and instanced resources.
 
 use super::atlas::{
-    blur_atlas_wide_layout_within_budget, compute_blur_atlas_layout, BLUR_ATLAS_WIDE_GAP_PX,
+    blur_atlas_wide_layout_within_budget, compute_blur_atlas_layout, BLUR_ATLAS_LEGACY_GAP_PX,
+    BLUR_ATLAS_WIDE_GAP_PX, USE_ATLAS_WIDE_BACKDROP_BLUR,
 };
-use super::dirty::kawase_pass_class_for_radius;
+use super::atlas_pass::pack_blur_atlas;
+use super::dirty::{
+    collect_blur_dirty_report, kawase_pass_class_for_radius, log_blur_dirty_report,
+    USE_FULL_FRAME_BACKDROP_BLUR,
+};
+use super::passes::{
+    apply_legacy_kawase_blur, copy_legacy_blur_sources, select_legacy_rebuild_indices,
+};
 use super::types::{
     BackdropBlurTexture, BlurAtlasTexture, BlurDirtyKind, BlurFrameUniform, BlurInstance,
     BlurredTextureEntry,
 };
-use crate::{VelloBackend, DIAG_LOG_EVERY_N_FRAMES};
+use crate::{state::BlurState, DIAG_LOG_EVERY_N_FRAMES, FRAME_COUNTER};
 #[cfg(target_arch = "wasm32")]
 use dyxel_render_api::LockExt;
 
-impl VelloBackend {
+impl BlurState {
     #[inline]
     pub(crate) fn create_blur_composite_pipeline(
         &self,
@@ -613,5 +621,290 @@ impl VelloBackend {
         }
 
         (atlas_wide_valid, source_copies)
+    }
+    #[inline]
+    pub(crate) fn run_full_frame_backdrop_blur_branch(
+        &self,
+        device: &wgpu::Device,
+        post_enc: &mut wgpu::CommandEncoder,
+        pipeline: Option<&crate::filter_pipeline::FilterPipeline>,
+        scene_texture: &wgpu::Texture,
+        blurred_textures: &mut [BlurredTextureEntry],
+        w: u32,
+        h: u32,
+        max_radius: f32,
+        stage_timer: &mut dyxel_perf::FrameTimer,
+    ) {
+        if let Some(pipeline) = pipeline {
+            self.ensure_backdrop_blur_texture(device, w, h);
+            let backdrop_texture = {
+                let backdrop = self.backdrop_blur.lock().unwrap();
+                backdrop.as_ref().map(|b| b.texture.clone())
+            };
+            if let Some(backdrop_texture) = backdrop_texture {
+                post_enc.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: scene_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &backdrop_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                stage_timer.mark("blur_copy_submit");
+                let pool_guard = self.texture_pool.lock().unwrap();
+                if let Err(e) = pipeline.apply_frosted_glass_kawase(
+                    post_enc,
+                    &backdrop_texture,
+                    &backdrop_texture,
+                    max_radius,
+                    pool_guard.as_ref(),
+                ) {
+                    log::warn!("[BlurBackdropFull] Kawase failed: {:?}", e);
+                }
+                for entry in blurred_textures.iter_mut() {
+                    entry.blur_valid = true;
+                    entry.blur_rebuild_pending = false;
+                    entry.dirty_kind = BlurDirtyKind::Clean;
+                }
+                stage_timer.mark("blur_render_submit");
+                return;
+            }
+        }
+
+        stage_timer.mark("blur_copy_submit");
+        stage_timer.mark("blur_render_submit");
+    }
+
+    /// Pass 2: Process blur textures — atlas-wide blur, legacy per-entry blur, or skip.
+    /// Returns `(atlas_wide_blur_valid, atlas_wide_source_copies)`.
+    #[inline]
+    pub(crate) fn process_blur_pass2(
+        &self,
+        device: &wgpu::Device,
+        post_enc: &mut wgpu::CommandEncoder,
+        scene_texture: &wgpu::Texture,
+        w: u32,
+        h: u32,
+        stage_timer: &mut dyxel_perf::FrameTimer,
+    ) -> (bool, usize) {
+        let has_blur = !self.blurred_textures.lock().unwrap().is_empty();
+
+        if !USE_FULL_FRAME_BACKDROP_BLUR {
+            *self.backdrop_blur.lock().unwrap() = None;
+        }
+
+        let mut atlas_wide_blur_valid = false;
+        let mut atlas_wide_source_copies = 0usize;
+
+        if has_blur {
+            let current_frame = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut blurred_textures = self.blurred_textures.lock().unwrap();
+            let filter_pipeline = self.filter_pipeline.lock().unwrap();
+            let dirty_report = collect_blur_dirty_report(&blurred_textures, w, h);
+            let max_radius = dirty_report.max_radius;
+            if current_frame % DIAG_LOG_EVERY_N_FRAMES == 0 {
+                log_blur_dirty_report(current_frame, blurred_textures.len(), &dirty_report);
+            }
+
+            if USE_FULL_FRAME_BACKDROP_BLUR {
+                self.run_full_frame_backdrop_blur_branch(
+                    device,
+                    post_enc,
+                    filter_pipeline.as_ref(),
+                    scene_texture,
+                    &mut blurred_textures,
+                    w,
+                    h,
+                    max_radius,
+                    stage_timer,
+                );
+            } else if let Some(pipeline) = filter_pipeline.as_ref() {
+                if USE_ATLAS_WIDE_BACKDROP_BLUR {
+                    let (valid, copies) = self.try_atlas_wide_blur(
+                        device,
+                        post_enc,
+                        pipeline,
+                        scene_texture,
+                        &mut blurred_textures,
+                        w,
+                        h,
+                        max_radius,
+                        current_frame,
+                        stage_timer,
+                    );
+                    atlas_wide_blur_valid = valid;
+                    atlas_wide_source_copies = copies;
+                }
+
+                if !atlas_wide_blur_valid {
+                    if self
+                        .blur_atlas_wide_active_last_frame
+                        .swap(false, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        for entry in blurred_textures.iter_mut() {
+                            entry.blur_valid = false;
+                            entry.blur_rebuild_pending = true;
+                            entry.atlas_valid = false;
+                            entry.atlas_dirty = true;
+                        }
+                    }
+                    let rebuild_indices = select_legacy_rebuild_indices(&blurred_textures, w, h);
+                    if !rebuild_indices.is_empty() && current_frame % DIAG_LOG_EVERY_N_FRAMES == 0 {
+                        log::info!(
+                            "[BlurLegacy] Budget: rebuilding {} pending entries",
+                            rebuild_indices.len()
+                        );
+                    }
+                    let blur_entries = copy_legacy_blur_sources(
+                        &mut blurred_textures,
+                        post_enc,
+                        scene_texture,
+                        &rebuild_indices,
+                        w,
+                        h,
+                    );
+                    stage_timer.mark("blur_copy_submit");
+                    {
+                        let pool_guard = self.texture_pool.lock().unwrap();
+                        apply_legacy_kawase_blur(
+                            &mut blurred_textures,
+                            pipeline,
+                            post_enc,
+                            blur_entries,
+                            pool_guard.as_ref(),
+                            current_frame,
+                        );
+                    }
+                    stage_timer.mark("blur_render_submit");
+                } else {
+                    self.blur_atlas_wide_active_last_frame
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                self.blur_atlas_wide_active_last_frame
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                stage_timer.mark("blur_copy_submit");
+                stage_timer.mark("blur_render_submit");
+            }
+        } else {
+            self.blur_atlas_wide_active_last_frame
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            stage_timer.mark("blur_copy_submit");
+            stage_timer.mark("blur_render_submit");
+        }
+
+        (atlas_wide_blur_valid, atlas_wide_source_copies)
+    }
+    /// Pass 3.5: Pack valid blur textures into an atlas for instanced composite.
+    /// Returns `(atlas_bind_group, atlas_instance_count, atlas_enabled)`.
+    #[inline]
+    pub(crate) fn pack_blur_atlas_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        post_enc: &mut wgpu::CommandEncoder,
+        sampler: Option<&wgpu::Sampler>,
+        surface_format: wgpu::TextureFormat,
+        atlas_wide_blur_valid: bool,
+        atlas_wide_source_copies: usize,
+        w: u32,
+        h: u32,
+    ) -> (Option<wgpu::BindGroup>, u32, bool) {
+        let mut atlas_bind_group: Option<wgpu::BindGroup> = None;
+        let mut atlas_instance_count: u32 = 0;
+        let mut atlas_enabled = false;
+
+        let has_blur = !self.blurred_textures.lock().unwrap().is_empty();
+        if !has_blur {
+            return (atlas_bind_group, atlas_instance_count, atlas_enabled);
+        }
+
+        let mut blurred_textures = self.blurred_textures.lock().unwrap();
+        let gap = if atlas_wide_blur_valid {
+            BLUR_ATLAS_WIDE_GAP_PX
+        } else {
+            BLUR_ATLAS_LEGACY_GAP_PX
+        };
+        if let Some(layout) = compute_blur_atlas_layout(&blurred_textures, w, h, gap) {
+            if layout.placements.len() >= 8 {
+                self.ensure_blur_instanced_resources(
+                    device,
+                    surface_format,
+                    layout.placements.len(),
+                );
+                let atlas_recreated =
+                    self.ensure_blur_atlas_texture(device, layout.width, layout.height);
+                if atlas_recreated && !atlas_wide_blur_valid {
+                    for entry in blurred_textures.iter_mut() {
+                        entry.atlas_valid = false;
+                        entry.atlas_dirty = true;
+                    }
+                }
+
+                let atlas_guard = self.blur_atlas.lock().unwrap();
+                let frame_buf_guard = self.blur_frame_uniform.lock().unwrap();
+                let inst_buf_guard = self.blur_instance_buffer.lock().unwrap();
+                let bg_layout_guard = self.blur_instanced_bind_group_layout.lock().unwrap();
+                let mut cached_bg_guard = self.blur_instanced_bind_group.lock().unwrap();
+                if let (
+                    Some(atlas),
+                    Some(frame_buf),
+                    Some(inst_buf),
+                    Some(bg_layout),
+                    Some(sampler),
+                ) = (
+                    atlas_guard.as_ref(),
+                    frame_buf_guard.as_ref(),
+                    inst_buf_guard.as_ref(),
+                    bg_layout_guard.as_ref(),
+                    sampler,
+                ) {
+                    let result = pack_blur_atlas(
+                        &mut blurred_textures,
+                        device,
+                        queue,
+                        post_enc,
+                        atlas,
+                        atlas_wide_blur_valid,
+                        &layout,
+                        frame_buf,
+                        inst_buf,
+                        bg_layout,
+                        &mut cached_bg_guard,
+                        sampler,
+                        w,
+                        h,
+                        atlas_wide_source_copies,
+                        DIAG_LOG_EVERY_N_FRAMES,
+                        FRAME_COUNTER.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    atlas_bind_group = result.bind_group;
+                    atlas_instance_count = result.instance_count;
+                    atlas_enabled = result.enabled;
+                }
+
+                if atlas_wide_blur_valid && !atlas_enabled {
+                    for entry in blurred_textures.iter_mut() {
+                        entry.blur_valid = false;
+                        entry.blur_rebuild_pending = true;
+                        entry.atlas_valid = false;
+                        entry.atlas_dirty = true;
+                    }
+                }
+            }
+        }
+
+        (atlas_bind_group, atlas_instance_count, atlas_enabled)
     }
 }

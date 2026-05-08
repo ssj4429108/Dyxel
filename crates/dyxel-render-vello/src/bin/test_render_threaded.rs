@@ -27,7 +27,7 @@ fn main() {
 
     // Wait for renderer to be ready
     loop {
-        let guard = backend.renderer.lock().unwrap();
+        let guard = backend.renderer_handle().lock().unwrap();
         if guard.is_some() {
             break;
         }
@@ -73,7 +73,7 @@ fn main() {
 
         {
             let backend_guard = backend_clone.lock().unwrap();
-            let mut renderer_guard = backend_guard.renderer.lock().unwrap();
+            let mut renderer_guard = backend_guard.renderer_handle().lock().unwrap();
             let renderer = renderer_guard.as_mut().unwrap();
             renderer
                 .render_to_texture(

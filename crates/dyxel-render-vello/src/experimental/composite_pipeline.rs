@@ -107,7 +107,9 @@ impl CompositePipeline {
         // Load shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Composite Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/layer_composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/layer_composite.wgsl").into(),
+            ),
         });
 
         // Create render pipeline
@@ -197,16 +199,18 @@ impl CompositePipeline {
     ) {
         // Update uniforms
         let uniforms = CompositeUniforms::new(
-            x, y, width, height,
-            screen_width, screen_height,
-            alpha, blend_mode,
+            x,
+            y,
+            width,
+            height,
+            screen_width,
+            screen_height,
+            alpha,
+            blend_mode,
         );
 
-        self.queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&uniforms),
-        );
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         // Create bind group for this composite operation
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -270,16 +274,18 @@ impl CompositePipeline {
     ) {
         // Update uniforms
         let uniforms = CompositeUniforms::new(
-            x, y, width, height,
-            screen_width, screen_height,
-            alpha, blend_mode,
+            x,
+            y,
+            width,
+            height,
+            screen_width,
+            screen_height,
+            alpha,
+            blend_mode,
         );
 
-        self.queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&uniforms),
-        );
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         // Create bind group for this composite operation
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -332,11 +338,7 @@ mod tests {
 
     #[test]
     fn test_composite_uniforms() {
-        let uniforms = CompositeUniforms::new(
-            10.0, 20.0, 100.0, 200.0,
-            1920.0, 1080.0,
-            0.5, 0,
-        );
+        let uniforms = CompositeUniforms::new(10.0, 20.0, 100.0, 200.0, 1920.0, 1080.0, 0.5, 0);
 
         assert_eq!(uniforms.rect, [10.0, 20.0, 100.0, 200.0]);
         assert_eq!(uniforms.screen_size, [1920.0, 1080.0]);

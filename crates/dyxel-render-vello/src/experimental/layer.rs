@@ -8,7 +8,6 @@
 //! - Effects (shadow, blur) are composed as layers
 //! - Caching is explicit and controllable
 
-use std::sync::Arc;
 use vello::{kurbo::Affine, peniko::Color, Scene};
 
 /// A render layer represents an offscreen render target
@@ -75,10 +74,7 @@ impl LayerBounds {
 
     /// Check if point is inside bounds
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x
-            && x <= self.x + self.width
-            && y >= self.y
-            && y <= self.y + self.height
+        x >= self.x && x <= self.x + self.width && y >= self.y && y <= self.y + self.height
     }
 
     /// Expand bounds by padding (for effects like shadow)
@@ -192,10 +188,7 @@ impl Layer {
             }
         }
 
-        (
-            bounds.width.ceil() as u32,
-            bounds.height.ceil() as u32,
-        )
+        (bounds.width.ceil() as u32, bounds.height.ceil() as u32)
     }
 
     /// Calculate the texture-to-screen transform

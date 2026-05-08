@@ -1437,10 +1437,3 @@ impl FilterPipeline {
         rpass.draw(0..3, 0..1);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Tests require a wgpu device, use integration tests
-}
